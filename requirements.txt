@@ -1,0 +1,27 @@
+# =============================================================================
+# Dependencias del Agente RCA
+# =============================================================================
+# Para instalar todas las dependencias, ejecuta: setup.bat
+# O manualmente: pip install -r requirements.txt
+# =============================================================================
+
+# FastAPI: framework web moderno para Python que nos permite crear el endpoint
+# HTTP que recibirá las notificaciones de PI System de forma sencilla.
+fastapi>=0.115.0
+
+# Uvicorn: servidor HTTP que ejecuta FastAPI. Es el motor que hace que nuestro
+# webhook esté disponible en la red para recibir las peticiones de PI.
+# La variante "[standard]" incluye soporte para mejor rendimiento y WebSockets.
+uvicorn[standard]>=0.34.0
+
+# SDK oficial de Anthropic para llamar al modelo Claude desde Python.
+# Se usará en los Steps 2-5 del agente (análisis de causa raíz).
+anthropic>=0.54.0
+
+# python-dotenv: carga las variables de configuración desde el fichero .env
+# sin necesidad de definirlas manualmente en el sistema operativo.
+python-dotenv>=1.0.0
+
+# pytz: gestión de zonas horarias con soporte de horario de verano (DST).
+# Misma versión que el MCP server de PI para coherencia en fechas y horas.
+pytz>=2024.2

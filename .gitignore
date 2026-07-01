@@ -1,0 +1,13 @@
+# Fichero .env con credenciales reales — NUNCA subir a git
+.env
+
+# Entorno virtual de Python — se regenera con setup.bat
+.venv/
+
+# Carpetas de caché que Python genera automáticamente
+__pycache__/
+*.pyc
+
+# Carpetas de distribución (si se empaqueta el proyecto)
+dist/
+*.egg-info/
