@@ -14,8 +14,12 @@ fastapi>=0.115.0
 # La variante "[standard]" incluye soporte para mejor rendimiento y WebSockets.
 uvicorn[standard]>=0.34.0
 
+# SDK oficial de Google para llamar al modelo Gemini desde Python.
+# Proveedor de LLM por defecto del agente (ver llm_client.py y LLM_PROVIDER en .env).
+google-genai>=0.3.0
+
 # SDK oficial de Anthropic para llamar al modelo Claude desde Python.
-# Se usará en los Steps 2-5 del agente (análisis de causa raíz).
+# Proveedor alternativo del agente (LLM_PROVIDER=anthropic en .env).
 anthropic>=0.54.0
 
 # python-dotenv: carga las variables de configuración desde el fichero .env

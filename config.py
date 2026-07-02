@@ -24,12 +24,29 @@ load_dotenv(Path(__file__).parent / ".env")
 
 
 # =============================================================================
-# Variables OBLIGATORIAS
+# Proveedor de LLM (Gemini por defecto, o Anthropic)
 # =============================================================================
+# Ver llm_client.py: el resto del agente llama siempre a llm_client.generate()
+# sin conocer qué proveedor hay detrás. Solo se exige la clave de API del
+# proveedor realmente seleccionado (ver validate_config()).
 
-# Clave de API de Anthropic: sin ella el agente no puede llamar a Claude.
-# Se define en el fichero .env como: ANTHROPIC_API_KEY=sk-ant-...
+# "gemini" (por defecto) o "anthropic".
+LLM_PROVIDER: str = os.environ.get("LLM_PROVIDER", "gemini").strip().lower()
+
+# Clave de API de Google (Gemini). Obligatoria si LLM_PROVIDER=gemini.
+# Se obtiene en https://aistudio.google.com/apikey
+GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "")
+
+# Modelo de Gemini a usar. Ajusta aquí si prefieres otro (p.ej. una variante
+# más rápida/económica) sin tocar el código.
+GEMINI_MODEL: str = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro")
+
+# Clave de API de Anthropic. Obligatoria solo si LLM_PROVIDER=anthropic.
+# Se obtiene en https://console.anthropic.com/settings/keys
 ANTHROPIC_API_KEY: str = os.environ.get("ANTHROPIC_API_KEY", "")
+
+# Modelo de Claude a usar si LLM_PROVIDER=anthropic.
+ANTHROPIC_MODEL: str = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8")
 
 
 # =============================================================================
@@ -59,6 +76,8 @@ def validate_config() -> list[str]:
 
     Devuelve una lista con los nombres de las variables que faltan.
     Si la lista está vacía, la configuración es correcta y el agente puede arrancar.
+    Solo se exige la clave de API del proveedor seleccionado en LLM_PROVIDER
+    (no ambas), ya que el agente solo llama a uno de los dos.
 
     Uso típico al arrancar el servidor:
         missing = validate_config()
@@ -67,7 +86,13 @@ def validate_config() -> list[str]:
     """
     missing = []
 
-    if not ANTHROPIC_API_KEY:
-        missing.append("ANTHROPIC_API_KEY")
+    if LLM_PROVIDER == "gemini":
+        if not GEMINI_API_KEY:
+            missing.append("GEMINI_API_KEY")
+    elif LLM_PROVIDER == "anthropic":
+        if not ANTHROPIC_API_KEY:
+            missing.append("ANTHROPIC_API_KEY")
+    else:
+        missing.append(f"LLM_PROVIDER (valor invalido: '{LLM_PROVIDER}', usa 'gemini' o 'anthropic')")
 
     return missing

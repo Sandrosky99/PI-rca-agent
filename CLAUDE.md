@@ -99,6 +99,17 @@ Confirmado el 2026-07-02 (con `StartTime` desde las 09:16 UTC). PI envía este J
 
 **Validación de tipos (Step 2):** `_valid_field(payload, key, expected_type)` en `agent.py` comprueba el tipo de cada campo del payload contra el tipo esperado (`str` para nombres/jerarquía, `(int, float)` para `KPI`/`Limit`, excluyendo `bool`). Si un campo no coincide con el tipo esperado, se omite del mensaje a Claude (no se pasa el dato "roto") y se registra un `WARNING` en el log con el valor recibido, para poder detectar fallos de configuración en PI. `build_analysis_context()` construye la frase del resumen de forma condicional según qué combinación de `KPI`/`Limit` sea válida.
 
+**Proveedor de LLM configurable (2026-07-02):** `llm_client.py` es una capa de abstracción con una única función `generate(system_prompt, user_message) -> str` que llama a Gemini o a Claude según `LLM_PROVIDER` (`.env`), sin que el resto del agente conozca la diferencia. Anthropic y Google **no** comparten un estándar de API, por eso cada proveedor tiene su propia función interna dentro de `llm_client.py`:
+
+| | Anthropic (Claude) | Google (Gemini) |
+|---|---|---|
+| SDK | `anthropic` | `google-genai` |
+| System prompt | parámetro `system` | `GenerateContentConfig(system_instruction=...)` |
+| Mensaje | `messages=[{"role": "user", "content": "..."}]` | `contents="..."` |
+| Respuesta | `response.content[0].text` | `response.text` |
+
+Por defecto `LLM_PROVIDER=gemini`; `validate_config()` en `config.py` solo exige la API key del proveedor realmente seleccionado (no ambas).
+
 ---
 
 ## Estructura de ficheros
@@ -108,10 +119,11 @@ rca-agent/
 ├── webhook.py           ← FastAPI: recibe POST de PI (Step 1 ✅)
 │                          Endpoints: GET /health, POST /notification, GET /notifications/history
 ├── agent.py             ← Agente RCA — aquí van los Steps 2-5
+├── llm_client.py        ← Abstracción sobre el proveedor de LLM (Gemini/Anthropic)
 ├── config.py            ← Carga .env y valida variables obligatorias
 ├── .env.example         ← Plantilla (copiar a .env y rellenar)
 ├── .env                 ← Credenciales reales (NO en git)
-├── requirements.txt     ← fastapi, uvicorn, anthropic, python-dotenv, pytz
+├── requirements.txt     ← fastapi, uvicorn, google-genai, anthropic, python-dotenv, pytz
 ├── setup.bat            ← Crea .venv e instala deps (ejecutar 1 vez)
 ├── start.bat            ← Arranca el servidor (desarrollo)
 ├── install_service.bat  ← Windows Service con NSSM (producción)
@@ -124,7 +136,11 @@ rca-agent/
 
 | Variable | Obligatoria | Descripción | Por defecto |
 |---|---|---|---|
-| `ANTHROPIC_API_KEY` | ✅ | Clave API de Anthropic para Claude | — |
+| `LLM_PROVIDER` | No | Proveedor de LLM: `gemini` o `anthropic` | `gemini` |
+| `GEMINI_API_KEY` | ✅ si `LLM_PROVIDER=gemini` | Clave API de Google para Gemini | — |
+| `GEMINI_MODEL` | No | Modelo de Gemini a usar | `gemini-2.5-pro` |
+| `ANTHROPIC_API_KEY` | ✅ si `LLM_PROVIDER=anthropic` | Clave API de Anthropic para Claude | — |
+| `ANTHROPIC_MODEL` | No | Modelo de Claude a usar | `claude-opus-4-8` |
 | `WEBHOOK_PORT` | No | Puerto del servidor | `8090` |
 | `WEBHOOK_SECRET` | No | Token para validar origen de PI | vacío |
 | `PI_LOCAL_TIMEZONE` | No | Zona horaria para logs | `Europe/Madrid` |
@@ -146,7 +162,7 @@ El `piApiPath` del grafo alimenta directamente `query_by_path` del MCP de PI.
 
 ## Convenciones de desarrollo
 
-- **Modelo Claude:** `claude-opus-4-8` con `thinking: {type: "adaptive"}` y streaming
+- **Proveedor de LLM:** configurable vía `LLM_PROVIDER` (`.env`) — `gemini` por defecto (modelo `gemini-2.5-pro`), o `anthropic` (`claude-opus-4-8` con `thinking: {type: "adaptive"}` y streaming). Ver `llm_client.py`.
 - **Idioma comentarios:** español
 - **Commits:** en español, con `Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>`
 - **Sin hardcodear credenciales** — todo via `.env`
