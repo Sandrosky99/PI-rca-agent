@@ -23,10 +23,207 @@ Flujo completo del agente (los TODOs indican los pasos pendientes):
 """
 
 import logging
+from datetime import datetime
+
+import pytz
+
+import config
 
 # Usamos el mismo logger que el resto del proyecto.
 # Los mensajes aparecerán en la consola con timestamp y nivel (INFO, WARNING...).
 log = logging.getLogger(__name__)
+
+
+# =============================================================================
+# System prompt del agente (dominio fijo, se envía en TODAS las llamadas a
+# Claude — Step 3 y Step 5 — vía el parámetro `system` de la API de Anthropic).
+# =============================================================================
+# La API de Claude es stateless entre llamadas: no hay "memoria" real entre el
+# Step 3 y el Step 5 salvo lo que se envíe en cada request. Por eso el rol y el
+# dominio del agente se fijan aquí como constante, separados del mensaje
+# dinámico de cada alerta (build_analysis_context), en vez de repetirlos "a
+# mano" en cada prompt: así el agente nunca actúa como un asistente genérico,
+# pase lo que pase en el mensaje concreto.
+SYSTEM_PROMPT = (
+    "Eres el agente de análisis de causa raíz (RCA) de una planta de tratamiento "
+    "de aguas residuales (WWTP) y sus estaciones de bombeo externas, "
+    "monitorizadas con AVEVA PI System. Tu función es ayudar a un ingeniero de "
+    "procesos a diagnosticar desviaciones operacionales detectadas por el "
+    "sistema, para mitigarlas de forma rápida y eficaz apoyándote en los datos "
+    "históricos disponibles en PI System. Todo tu razonamiento debe estar "
+    "anclado en el dominio de depuración de aguas residuales y bombeo "
+    "(hidráulica, eficiencia de bombas, caudal, presión, nivel, vibración, "
+    "calidad de agua, etc.); no actúes como un asistente genérico."
+)
+
+
+def _valid_field(payload: dict, key: str, expected_type):
+    """Devuelve payload[key] solo si su tipo coincide con expected_type; si no, None.
+
+    PI puede enviar un campo con un tipo inesperado (p.ej. Limit como texto de
+    fecha en vez de número, visto en producción el 2026-07-02). En ese caso no
+    queremos meter ese valor "roto" en el mensaje a Claude — mejor omitirlo y
+    dejar constancia en el log para poder corregir la configuración en PI.
+
+    expected_type: un tipo (str) o tupla de tipos (p.ej. (int, float)) para
+    campos numéricos. bool se excluye explícitamente de los campos numéricos,
+    ya que en Python bool es subclase de int.
+    """
+    if key not in payload:
+        return None
+    raw = payload[key]
+    type_tuple = expected_type if isinstance(expected_type, tuple) else (expected_type,)
+    if isinstance(raw, bool) and bool not in type_tuple:
+        valid = False
+    else:
+        valid = isinstance(raw, expected_type)
+    if not valid:
+        log.warning(
+            "Campo '%s' con tipo inesperado (se omite del mensaje): %r (se esperaba %s)",
+            key, raw, expected_type,
+        )
+        return None
+    return raw
+
+
+def _describe_threshold(threshold_type: str) -> str:
+    """Explica en lenguaje natural por qué salta un umbral 'Low'/'High' de PI.
+
+    No asume qué KPI es "bueno" alto o bajo (eso depende del KPI concreto y lo
+    interpreta Claude con el contexto de dominio) — solo describe el hecho:
+    qué disparó la alerta.
+    """
+    if threshold_type == "Low":
+        return "un umbral 'Low': la alerta salta porque el valor ha caído por debajo del mínimo aceptable"
+    if threshold_type == "High":
+        return "un umbral 'High': la alerta salta porque el valor ha superado el máximo aceptable"
+    return "un umbral no especificado"
+
+
+def _parse_detection_time(payload: dict) -> tuple[datetime, datetime]:
+    """Obtiene el momento de detección de la alerta en UTC y en hora local.
+
+    Usa el campo "StartTime" que envía PI (UTC, ISO 8601 con 'Z'), igual que
+    search_event_frames en aveva-pi-mcp. Si algún payload no lo trae (p.ej.
+    pruebas antiguas), se aproxima con la hora actual del servidor y se avisa.
+    """
+    tz = pytz.timezone(config.PI_LOCAL_TIMEZONE)
+    start_time_raw = payload.get("StartTime")
+    if start_time_raw:
+        try:
+            detected_at_utc = datetime.fromisoformat(start_time_raw.replace("Z", "+00:00"))
+            return detected_at_utc, detected_at_utc.astimezone(tz)
+        except ValueError:
+            log.warning("Campo 'StartTime' con formato inesperado: %s", start_time_raw)
+
+    log.warning("Payload sin 'StartTime' valido; se usa la hora actual del servidor como aproximacion.")
+    detected_at_local = datetime.now(tz)
+    return detected_at_local.astimezone(pytz.utc), detected_at_local
+
+
+def build_analysis_context(payload: dict) -> dict:
+    """Step 2: construye el contexto estructurado que se enviará a Claude en el Step 3.
+
+    Toma el payload real que envía PI System (ver CLAUDE.md → "Payload real de
+    PI System") y lo convierte en un mensaje dinámico (los datos concretos de
+    esta alerta) que se combina con SYSTEM_PROMPT (rol y dominio fijos) en las
+    llamadas del Step 3.
+
+    Args:
+        payload: diccionario con las claves KPIName, Asset, Subsystem, System,
+                 Plant, KPI, Limit, LimitThresholdType, StartTime. Puede incluir
+                 opcionalmente AssetType/AssetModel (u otros campos de contexto
+                 adicional que PI incorpore en el futuro); si no están, se
+                 omiten del mensaje.
+
+    Returns:
+        Diccionario con los campos extraídos y la clave "claude_prompt" lista
+        para enviarse al modelo en el Step 3 (junto con SYSTEM_PROMPT).
+    """
+    kpi_name = _valid_field(payload, "KPIName", str) or "KPI desconocido"
+    asset = _valid_field(payload, "Asset", str) or "activo desconocido"
+    subsystem = _valid_field(payload, "Subsystem", str) or ""
+    system = _valid_field(payload, "System", str) or ""
+    plant = _valid_field(payload, "Plant", str) or ""
+    kpi_value = _valid_field(payload, "KPI", (int, float))
+    limit_value = _valid_field(payload, "Limit", (int, float))
+    threshold_type = _valid_field(payload, "LimitThresholdType", str) or ""
+    asset_type = _valid_field(payload, "AssetType", str) or ""
+    asset_model = _valid_field(payload, "AssetModel", str) or ""
+
+    detected_at_utc, detected_at_local = _parse_detection_time(payload)
+
+    hierarchy = "/".join(part for part in (subsystem, system, plant) if part)
+    threshold_note = _describe_threshold(threshold_type)
+    model_parts = [part for part in (asset_type, asset_model) if part]
+    model_note = f" ({', '.join(model_parts)})" if model_parts else ""
+
+    if kpi_value is not None and limit_value is not None:
+        value_clause = (
+            f"El valor con el que se ha sobrepasado el límite es {kpi_value}, "
+            f"frente al límite configurado de {limit_value} "
+            f"(se trata de {threshold_note})."
+        )
+    elif kpi_value is not None:
+        value_clause = (
+            f"El valor que ha disparado la alerta es {kpi_value} (se trata de "
+            f"{threshold_note}); el límite configurado no está disponible "
+            f"porque PI envió un valor con un tipo de dato inválido para 'Limit'."
+        )
+    elif limit_value is not None:
+        value_clause = (
+            f"El límite configurado es {limit_value} (se trata de {threshold_note}); "
+            f"el valor que disparó la alerta no está disponible porque PI envió un "
+            f"valor con un tipo de dato inválido para 'KPI'."
+        )
+    else:
+        value_clause = (
+            f"Se trata de {threshold_note}; ni el valor que disparó la alerta ni el "
+            f"límite configurado están disponibles porque PI envió datos con un "
+            f"tipo inválido para 'KPI' y 'Limit'."
+        )
+
+    summary = (
+        f"La alerta detectada es una desviación en el KPI '{kpi_name}' de "
+        f"'{asset}'{model_note}. Este equipo se encuentra en {hierarchy}. "
+        f"{value_clause} "
+        f"Ha sido detectado el {detected_at_local.strftime('%Y-%m-%d %H:%M:%S %Z')} "
+        f"({detected_at_utc.strftime('%Y-%m-%dT%H:%M:%SZ')} UTC)."
+    )
+
+    request = (
+        "Hazme una lista de variables (atributos de PI System) necesarias para "
+        "diagnosticar las posibles causas raíz de esta desviación. No te "
+        "limites a los atributos propios del equipo (p.ej. presión, caudal, "
+        "vibración): incluye también variables de proceso aguas arriba/abajo u "
+        "otros sistemas relacionados que puedan explicar la desviación, si "
+        "tienen sentido para este caso (p.ej. turbidez o sólidos en suspensión "
+        "del agua). Para cada variable, si existen varias formas de medirla u "
+        "obtenerla, indica una lista de prioridad de alternativas (p.ej.: "
+        "'turbidez del agua de entrada; si no existe analizador de turbidez, "
+        "sólidos en suspensión (TSS) como alternativa'). Responde únicamente "
+        "con esa lista priorizada y los timestamps (o ventana temporal) que "
+        "necesitas para identificar la causa raíz, sin explicaciones "
+        "adicionales."
+    )
+
+    return {
+        "kpi_name": kpi_name,
+        "asset": asset,
+        "subsystem": subsystem,
+        "system": system,
+        "plant": plant,
+        "asset_type": asset_type,
+        "asset_model": asset_model,
+        "kpi_value": kpi_value,
+        "limit_value": limit_value,
+        "threshold_type": threshold_type,
+        "detected_at_utc": detected_at_utc.isoformat(),
+        "detected_at_local": detected_at_local.isoformat(),
+        "summary": summary,
+        "system_prompt": SYSTEM_PROMPT,
+        "claude_prompt": f"{summary}\n\n{request}",
+    }
 
 
 async def run_rca_analysis(notification_payload: dict) -> None:
@@ -37,13 +234,18 @@ async def run_rca_analysis(notification_payload: dict) -> None:
 
     Args:
         notification_payload: Diccionario Python con los datos de la alerta
-                              tal como los envió PI System. Por ejemplo:
+                              tal como los envió PI System. Formato real
+                              (confirmado 2026-07-02, ver CLAUDE.md):
                               {
-                                  "EventName": "High Temperature",
-                                  "Asset": "PET01",
-                                  "Attribute": "Temperature",
-                                  "Value": 95.3,
-                                  "Timestamp": "2026-07-01T14:30:00Z"
+                                  "KPIName": "Hydraulic Efficiency",
+                                  "Asset": "PS20102 A03 PS02 Pump 02",
+                                  "Subsystem": "Pumping Station 01",
+                                  "System": "External Pumping",
+                                  "Plant": "WWTP",
+                                  "KPI": 60.0,
+                                  "Limit": 70.0,
+                                  "LimitThresholdType": "Low",
+                                  "StartTime": "2026-07-02T09:15:47Z"
                               }
     """
     log.info("=" * 60)
@@ -52,22 +254,11 @@ async def run_rca_analysis(notification_payload: dict) -> None:
     log.info("=" * 60)
 
     # -------------------------------------------------------------------------
-    # TODO — Step 2: Preparar el contexto estructurado para Claude
+    # Step 2: Preparar el contexto estructurado para Claude
     # -------------------------------------------------------------------------
-    # Aquí se construirá el mensaje que se enviará al modelo Claude.
-    # El mensaje debe incluir:
-    #   - El tipo de alerta (p.ej. "temperatura por encima del límite")
-    #   - El asset afectado (p.ej. "Reactor PET01")
-    #   - El valor que disparó la alerta y el umbral configurado
-    #   - El momento en que ocurrió
-    #   - Instrucciones a Claude sobre el formato de respuesta esperado
-    #     (p.ej. "devuelve una lista de variables de PI que necesitas analizar")
-    #
-    # Ejemplo de lo que se enviará a Claude:
-    # "Se ha detectado una desviación en PET01. La temperatura ha superado
-    #  el umbral de 90°C (valor actual: 95.3°C) a las 14:30 UTC.
-    #  Indica qué atributos de PI necesitas consultar para determinar la causa."
-    # -------------------------------------------------------------------------
+    context = build_analysis_context(notification_payload)
+    log.info("Contexto construido para Claude:")
+    log.info(context["claude_prompt"])
 
     # -------------------------------------------------------------------------
     # TODO — Step 3: Claude responde con las variables que necesita analizar
@@ -109,5 +300,4 @@ async def run_rca_analysis(notification_payload: dict) -> None:
     # El resultado se presentará al usuario (log, notificación, interfaz web...)
     # -------------------------------------------------------------------------
 
-    log.info("AGENTE RCA: Steps 2-5 pendientes de implementar.")
-    log.info("El payload recibido ha sido registrado correctamente.")
+    log.info("AGENTE RCA: Step 2 completado. Steps 3-5 pendientes de implementar.")

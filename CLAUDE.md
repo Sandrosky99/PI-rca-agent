@@ -11,12 +11,14 @@ consulta datos históricos en PI Web API y usa Claude para diagnosticar causas r
 | Step | Descripción | Estado |
 |---|---|---|
 | 1 | Recibir notificación HTTP POST de PI System | ✅ Completado |
-| 2 | Preparar contexto estructurado para Claude | 🔲 Pendiente |
+| 2 | Preparar contexto estructurado para Claude | ✅ Completado |
 | 3 | Claude identifica variables de PI a consultar | 🔲 Pendiente |
 | 4 | Obtener datos históricos de PI vía MCP Server | 🔲 Pendiente |
 | 5 | Claude produce diagnóstico y recomendaciones | 🔲 Pendiente |
 
-**Próximo paso:** Implementar Step 2 en `agent.py` → función `run_rca_analysis()`, bloque `TODO — Step 2`.
+**Próximo paso:** Implementar Step 3 en `agent.py` → llamar a la API de Anthropic con el `context["claude_prompt"]` generado por `build_analysis_context()` (Step 2) para obtener la lista de atributos de PI a consultar.
+
+**Detalle del Step 2 (implementado):** `build_analysis_context(payload)` en `agent.py` extrae los campos del payload real de PI (`KPIName`, `Asset`, `Subsystem`, `System`, `Plant`, `KPI`, `Limit`, `LimitThresholdType`, `StartTime`, y opcionalmente `AssetType`/`AssetModel`), valida el tipo esperado de cada campo (`_valid_field`, omite del mensaje los que no coincidan, p.ej. un `Limit` no numérico), convierte `StartTime` (UTC) a hora local vía `pytz`/`PI_LOCAL_TIMEZONE` (DST-aware, con fallback a `datetime.now()` si falta), y devuelve un dict con el mensaje dinámico de la alerta en `claude_prompt`. El rol y dominio del agente (EDAR + bombeos externos, nunca genérico) están fijados aparte en la constante `SYSTEM_PROMPT`, pensada para enviarse vía el parámetro `system` de la API de Anthropic en **todas** las llamadas (Steps 3 y 5), no repetida en cada mensaje. `run_rca_analysis()` ya invoca `build_analysis_context()` y deja `context` listo para el Step 3.
 
 ---
 
@@ -65,7 +67,7 @@ agent.py  (run_rca_analysis)
 
 ## Payload real de PI System
 
-Confirmado el 2026-07-02. PI envía este JSON en cada notificación:
+Confirmado el 2026-07-02 (con `StartTime` desde las 09:16 UTC). PI envía este JSON en cada notificación:
 
 ```json
 {
@@ -76,7 +78,8 @@ Confirmado el 2026-07-02. PI envía este JSON en cada notificación:
   "Plant":              "WWTP",
   "KPI":                60.0,
   "Limit":              70.0,
-  "LimitThresholdType": "Low"
+  "LimitThresholdType": "Low",
+  "StartTime":          "2026-07-02T09:15:47Z"
 }
 ```
 
@@ -88,6 +91,13 @@ Confirmado el 2026-07-02. PI envía este JSON en cada notificación:
 | `KPI` | Valor actual que disparó la alerta |
 | `Limit` | Umbral configurado en PI |
 | `LimitThresholdType` | `"Low"` (por debajo del límite) o `"High"` (por encima) |
+| `StartTime` | Momento de detección en UTC (ISO 8601 con `Z`). Usado por `agent.py` para la ventana temporal del análisis (conversión a local vía pytz, igual que `search_event_frames` en aveva-pi-mcp). Si falta, se aproxima con la hora actual del servidor. |
+| `AssetType` | Confirmado 2026-07-02. Tipo de equipo (p.ej. `"pump"`). Genérico, no limitado a bombas. Se añade al mensaje de contexto para Claude. |
+| `AssetModel` | Confirmado 2026-07-02. Modelo/descripción del equipo (p.ej. `"single-channel centrifugal pump"`). Se añade al mensaje de contexto para Claude. |
+
+⚠️ **Anomalía detectada 2026-07-02:** en una prueba real, `Limit` llegó como `"1970-01-01T00:00:00Z"` en vez de un valor numérico — probable fallo de mapeo en la configuración de PI Notifications para esa alerta concreta. Revisar la variable enlazada a `Limit` en PI si se repite.
+
+**Validación de tipos (Step 2):** `_valid_field(payload, key, expected_type)` en `agent.py` comprueba el tipo de cada campo del payload contra el tipo esperado (`str` para nombres/jerarquía, `(int, float)` para `KPI`/`Limit`, excluyendo `bool`). Si un campo no coincide con el tipo esperado, se omite del mensaje a Claude (no se pasa el dato "roto") y se registra un `WARNING` en el log con el valor recibido, para poder detectar fallos de configuración en PI. `build_analysis_context()` construye la frase del resumen de forma condicional según qué combinación de `KPI`/`Limit` sea válida.
 
 ---
 
