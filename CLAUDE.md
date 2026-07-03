@@ -138,7 +138,7 @@ rca-agent/
 |---|---|---|---|
 | `LLM_PROVIDER` | No | Proveedor de LLM: `gemini` o `anthropic` | `gemini` |
 | `GEMINI_API_KEY` | ✅ si `LLM_PROVIDER=gemini` | Clave API de Google para Gemini | — |
-| `GEMINI_MODEL` | No | Modelo de Gemini a usar | `gemini-2.5-pro` |
+| `GEMINI_MODEL` | No | Modelo de Gemini a usar | `gemini-2.5-flash` |
 | `ANTHROPIC_API_KEY` | ✅ si `LLM_PROVIDER=anthropic` | Clave API de Anthropic para Claude | — |
 | `ANTHROPIC_MODEL` | No | Modelo de Claude a usar | `claude-opus-4-8` |
 | `WEBHOOK_PORT` | No | Puerto del servidor | `8090` |
@@ -162,7 +162,7 @@ El `piApiPath` del grafo alimenta directamente `query_by_path` del MCP de PI.
 
 ## Convenciones de desarrollo
 
-- **Proveedor de LLM:** configurable vía `LLM_PROVIDER` (`.env`) — `gemini` por defecto (modelo `gemini-2.5-pro`), o `anthropic` (`claude-opus-4-8` con `thinking: {type: "adaptive"}` y streaming). Ver `llm_client.py`.
+- **Proveedor de LLM:** configurable vía `LLM_PROVIDER` (`.env`) — `gemini` por defecto (modelo `gemini-2.5-flash`; `gemini-2.5-pro` requiere facturación activada en el proyecto de Google Cloud, sin ella da error 429 de cuota 0), o `anthropic` (`claude-opus-4-8` con `thinking: {type: "adaptive"}` y streaming). Ver `llm_client.py`.
 - **Idioma comentarios:** español
 - **Commits:** en español, con `Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>`
 - **Sin hardcodear credenciales** — todo via `.env`

@@ -39,14 +39,17 @@ GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "")
 
 # Modelo de Gemini a usar. Ajusta aquí si prefieres otro (p.ej. una variante
 # más rápida/económica) sin tocar el código.
-GEMINI_MODEL: str = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro")
+# Nota: se usa "or" en vez de os.environ.get(key, default) porque .env.example
+# deja la variable presente pero vacía ("GEMINI_MODEL="), y get() solo aplica
+# el valor por defecto cuando la clave no existe, no cuando está vacía.
+GEMINI_MODEL: str = os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash"
 
 # Clave de API de Anthropic. Obligatoria solo si LLM_PROVIDER=anthropic.
 # Se obtiene en https://console.anthropic.com/settings/keys
 ANTHROPIC_API_KEY: str = os.environ.get("ANTHROPIC_API_KEY", "")
 
 # Modelo de Claude a usar si LLM_PROVIDER=anthropic.
-ANTHROPIC_MODEL: str = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8")
+ANTHROPIC_MODEL: str = os.environ.get("ANTHROPIC_MODEL") or "claude-opus-4-8"
 
 
 # =============================================================================
