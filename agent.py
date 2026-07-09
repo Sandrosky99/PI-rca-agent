@@ -8,18 +8,25 @@ agent.py — Agente de Análisis de Causa Raíz (RCA)
 
 ¿Cómo encaja en el flujo completo?
   webhook.py recibe la notificación de PI  →  llama a run_rca_analysis()  →
-  (Steps 2-5 a continuación)
+  (Steps 2-6 a continuación)
 
 Estado actual:
-  Solo está implementado el Step 1 (recepción de la notificación, en webhook.py).
-  Este fichero contiene los stubs documentados de los Steps 2-5, listos para
-  implementar en sesiones posteriores.
+  Está implementado el Step 1 (recepción de la notificación, en webhook.py) y
+  el Step 3 (build_analysis_context(), más abajo) -- aunque el Step 3 está
+  pendiente de actualizar: todavía no incorpora la lista de atributos reales
+  del AF que traerá el nuevo Step 2 (ver CLAUDE.md, "Motivo del cambio
+  2026-07-03"). Este fichero contiene los stubs documentados de los Steps
+  2, 4, 5 y 6, listos para implementar en sesiones posteriores.
 
 Flujo completo del agente (los TODOs indican los pasos pendientes):
-  Step 2 → Preparar el contexto estructurado para Claude
-  Step 3 → Claude decide qué variables de PI necesita analizar
-  Step 4 → Obtener datos históricos de PI vía MCP Server
-  Step 5 → Claude analiza los datos y produce el diagnóstico final
+  Step 2 → Consultar la estructura real del AF (afkg-graph-mcp) para el
+           asset de la alerta y obtener sus atributos disponibles (piApiPath)
+  Step 3 → Preparar el contexto estructurado para el modelo, incluyendo los
+           atributos reales del Step 2 (para que el modelo elija solo entre
+           variables que existen de verdad, no nombres "de libro")
+  Step 4 → El modelo decide, de esas variables reales, cuáles necesita analizar
+  Step 5 → Obtener datos históricos de PI vía MCP Server
+  Step 6 → El modelo analiza los datos y produce el diagnóstico final
 """
 
 import logging
@@ -35,11 +42,11 @@ log = logging.getLogger(__name__)
 
 
 # =============================================================================
-# System prompt del agente (dominio fijo, se envía en TODAS las llamadas a
-# Claude — Step 3 y Step 5 — vía el parámetro `system` de la API de Anthropic).
+# System prompt del agente (dominio fijo, se envía en TODAS las llamadas al
+# modelo — Step 4 y Step 6 — vía el parámetro system/system_instruction).
 # =============================================================================
-# La API de Claude es stateless entre llamadas: no hay "memoria" real entre el
-# Step 3 y el Step 5 salvo lo que se envíe en cada request. Por eso el rol y el
+# La API del modelo es stateless entre llamadas: no hay "memoria" real entre el
+# Step 4 y el Step 6 salvo lo que se envíe en cada request. Por eso el rol y el
 # dominio del agente se fijan aquí como constante, separados del mensaje
 # dinámico de cada alerta (build_analysis_context), en vez de repetirlos "a
 # mano" en cada prompt: así el agente nunca actúa como un asistente genérico,
@@ -122,12 +129,18 @@ def _parse_detection_time(payload: dict) -> tuple[datetime, datetime]:
 
 
 def build_analysis_context(payload: dict) -> dict:
-    """Step 2: construye el contexto estructurado que se enviará a Claude en el Step 3.
+    """Step 3: construye el contexto estructurado que se enviará al modelo en el Step 4.
 
     Toma el payload real que envía PI System (ver CLAUDE.md → "Payload real de
     PI System") y lo convierte en un mensaje dinámico (los datos concretos de
     esta alerta) que se combina con SYSTEM_PROMPT (rol y dominio fijos) en las
-    llamadas del Step 3.
+    llamadas del Step 4.
+
+    PENDIENTE (ver CLAUDE.md, "Motivo del cambio 2026-07-03"): todavía no
+    incorpora la lista de atributos reales del AF que traerá el nuevo Step 2
+    (consulta a afkg-graph-mcp). Sin esa lista, el modelo puede proponer
+    nombres de atributos "de libro" que no existen en el AF real -- hay que
+    añadirla a `claude_prompt` cuando el Step 2 esté implementado.
 
     Args:
         payload: diccionario con las claves KPIName, Asset, Subsystem, System,
@@ -138,7 +151,7 @@ def build_analysis_context(payload: dict) -> dict:
 
     Returns:
         Diccionario con los campos extraídos y la clave "claude_prompt" lista
-        para enviarse al modelo en el Step 3 (junto con SYSTEM_PROMPT).
+        para enviarse al modelo en el Step 4 (junto con SYSTEM_PROMPT).
     """
     kpi_name = _valid_field(payload, "KPIName", str) or "KPI desconocido"
     asset = _valid_field(payload, "Asset", str) or "activo desconocido"
@@ -254,45 +267,57 @@ async def run_rca_analysis(notification_payload: dict) -> None:
     log.info("=" * 60)
 
     # -------------------------------------------------------------------------
-    # Step 2: Preparar el contexto estructurado para Claude
+    # TODO — Step 2: Consultar la estructura real del AF (afkg-graph-mcp)
+    # -------------------------------------------------------------------------
+    # Se llamará a afkg-graph-mcp (graph_search / graph_neighborhood) con el
+    # "Asset" de la alerta para obtener los atributos reales disponibles en el
+    # AF (con su piApiPath). Esta lista se le pasará al Step 3 para incluirla
+    # en el mensaje al modelo -- así el modelo (Step 4) elige únicamente entre
+    # variables que existen de verdad, en vez de proponer nombres "de libro"
+    # que luego no se pueden consultar en PI Web API.
+    #
+    # NOTA: build_analysis_context() (Step 3, más abajo) todavía no recibe
+    # esta lista -- hay que actualizarla para incorporarla a "claude_prompt".
+    # -------------------------------------------------------------------------
+
+    # -------------------------------------------------------------------------
+    # Step 3: Preparar el contexto estructurado para el modelo
     # -------------------------------------------------------------------------
     context = build_analysis_context(notification_payload)
-    log.info("Contexto construido para Claude:")
+    log.info("Contexto construido para el modelo:")
     log.info(context["claude_prompt"])
 
     # -------------------------------------------------------------------------
-    # TODO — Step 3: Claude responde con las variables que necesita analizar
+    # TODO — Step 4: el modelo responde con las variables que necesita analizar
     # -------------------------------------------------------------------------
-    # Se llamará a la API de Anthropic (Claude) con el contexto del Step 2.
-    # Claude analizará la situación y responderá con una lista estructurada
-    # de los atributos de PI que necesita para el diagnóstico:
-    #   - Temperatura del fluido de entrada
-    #   - Caudal de refrigeración
-    #   - Posición de la válvula de control
-    #   - etc.
+    # Se llamará a llm_client.generate() con el contexto del Step 3 (una vez
+    # incluya los atributos reales del Step 2). El modelo responderá con una
+    # lista de los atributos reales del AF que necesita para el diagnóstico,
+    # eligiendo entre las variables disponibles en vez de inventar nombres.
     #
     # Estas variables son rutas (piApiPath) que el MCP Server puede consultar
     # directamente en PI Web API.
     # -------------------------------------------------------------------------
 
     # -------------------------------------------------------------------------
-    # TODO — Step 4: Obtener datos históricos de PI vía MCP Server
+    # TODO — Step 5: Obtener datos históricos de PI vía MCP Server
     # -------------------------------------------------------------------------
-    # Con la lista de atributos del Step 3, se llamará al MCP Server
+    # Con la lista de atributos del Step 4, se llamará al MCP Server
     # "aveva-pi-mcp" (que ya está funcionando en C:\MCPServer\MCP Server) para:
     #   a) Crear un bucket de timestamps con create_timeseries_bucket()
     #      (ventana temporal alrededor del momento de la alerta)
     #   b) Consultar los valores históricos con query_by_path()
-    #      usando los piApiPath devueltos por Claude en el Step 3
+    #      usando los piApiPath devueltos por el modelo en el Step 4
     #
     # El resultado será una tabla de valores en el tiempo para cada atributo.
     # -------------------------------------------------------------------------
 
     # -------------------------------------------------------------------------
-    # TODO — Step 5: Claude analiza los datos y produce el diagnóstico final
+    # TODO — Step 6: el modelo analiza los datos y produce el diagnóstico final
     # -------------------------------------------------------------------------
-    # Se volverá a llamar a Claude, esta vez con los datos históricos del Step 4.
-    # Claude analizará las tendencias y correlaciones entre variables y producirá:
+    # Se volverá a llamar a llm_client.generate(), esta vez con los datos
+    # históricos del Step 5. El modelo analizará las tendencias y correlaciones
+    # entre variables y producirá:
     #   - Lista de posibles causas raíz, ordenadas por probabilidad
     #   - Explicación de por qué cada causa es plausible
     #   - Recomendación de acciones correctivas para cada causa
@@ -300,4 +325,7 @@ async def run_rca_analysis(notification_payload: dict) -> None:
     # El resultado se presentará al usuario (log, notificación, interfaz web...)
     # -------------------------------------------------------------------------
 
-    log.info("AGENTE RCA: Step 2 completado. Steps 3-5 pendientes de implementar.")
+    log.info(
+        "AGENTE RCA: Step 3 completado (pendiente de actualizar para incluir "
+        "atributos reales del AF). Steps 2, 4, 5 y 6 pendientes de implementar."
+    )
