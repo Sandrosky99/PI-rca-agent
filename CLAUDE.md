@@ -11,17 +11,21 @@ consulta datos históricos en PI Web API y usa Claude para diagnosticar causas r
 | Step | Descripción | Estado |
 |---|---|---|
 | 1 | Recibir notificación HTTP POST de PI System | ✅ Completado |
-| 2 | **(Nuevo)** Consultar la estructura del AF (afkg-graph-mcp) para el asset de la alerta → obtener los atributos reales disponibles (`piApiPath`) | 🔲 Pendiente |
-| 3 | Preparar contexto estructurado para el modelo (antes Step 2) | 🔶 Implementado, pendiente de actualizar — debe incorporar los atributos reales del Step 2 |
-| 4 | El modelo identifica, de esas variables reales, cuáles necesita analizar (antes Step 3) | 🔲 Pendiente |
-| 5 | Obtener datos históricos de PI vía MCP Server (antes Step 4) | 🔲 Pendiente |
-| 6 | El modelo produce diagnóstico y recomendaciones (antes Step 5) | 🔲 Pendiente |
+| 2 | Consultar la estructura del AF (afkg-graph-mcp) para el `Asset`/`Subsystem` de la alerta → `main_asset_context`/`nearby_elements_context` con atributos reales (`piApiPath`) | ✅ Completado (`graph_client.py`) |
+| 3 | Preparar el mensaje de 4 secciones (objetivo, payload, modelo de datos, JSON del AF) para el modelo | ✅ Completado (`build_analysis_context()`) |
+| 4 | El modelo identifica, de esas variables reales, cuáles necesita analizar | ✅ Completado (llamada a `llm_client.generate()`, respuesta solo logueada — falta parsear/usar la lista) |
+| 5 | Obtener datos históricos de PI vía MCP Server | 🔲 Pendiente |
+| 6 | El modelo produce diagnóstico y recomendaciones | 🔲 Pendiente |
 
-**Motivo del cambio (2026-07-03):** con el flujo original, el modelo proponía nombres de atributos "de libro" (p.ej. `Discharge Flow Rate`) que no necesariamente existen con ese naming en la estructura real del AF, y el agente no tenía forma de saber si esas variables estaban realmente disponibles. Se añade un paso intermedio (nuevo Step 2) para consultar primero la estructura real del AF y pasarle esa lista de atributos disponibles al modelo, de forma que elija **solo entre lo que existe** en vez de proponer variables que luego no se podrán consultar.
+**Motivo del cambio (2026-07-03):** con el flujo original, el modelo proponía nombres de atributos "de libro" (p.ej. `Discharge Flow Rate`) que no necesariamente existen con ese naming en la estructura real del AF, y el agente no tenía forma de saber si esas variables estaban realmente disponibles. Se añadió un paso intermedio (Step 2) para consultar primero la estructura real del AF y pasarle esa lista de atributos disponibles al modelo, de forma que elija **solo entre lo que existe** en vez de proponer variables que luego no se podrán consultar.
 
-**Próximo paso:** Implementar el nuevo Step 2 en `agent.py` (consulta a `afkg-graph-mcp` — `graph_search`/`graph_neighborhood` — para el `Asset` de la alerta) y después actualizar `build_analysis_context()` (Step 3) para incluir esa lista de atributos reales en `claude_prompt`, de modo que el Step 4 elija únicamente entre variables existentes en el AF.
+**Detalle del Step 2 (implementado, 2026-07-13):** `graph_client.py` lanza `afkg-graph-mcp` como subproceso (protocolo MCP sobre stdio, vía el SDK `mcp`) y usa `graph_neighborhood` para recorrer recursivamente el árbol PARENT_OF del `Asset` (→ `main_asset_context`) y del `Subsystem` (→ `nearby_elements_context`, excluyendo la rama del propio `Asset` para no duplicarla). Los nodos organizativos sin atributos propios (`Meters`, `Indicators`) no generan grupo propio — su nombre solo queda reflejado en el breadcrumb (`>`) de sus descendientes. Se filtran los atributos de metadatos/bookkeeping (`Area Code`, `Asset Code`, `Path`, `Tag Name`, `Manufacturer`, etc. — ver `_METADATA_ATTRS`) que no aportan al diagnóstico. La desambiguación entre elementos con nombre repetido (p.ej. varios "Level Alert"/"Reference" bajo distintos indicadores) usa el `path` único que cada hijo ya trae en la respuesta de su padre, en vez de reconstruirlo a mano. Probado end-to-end contra el servidor y Neo4j reales el 2026-07-13 con `PS20102 A03 PS02 Pump 02`/`Pumping Station 01` (15 grupos en `main_asset_context`, 5 en `nearby_elements_context`).
 
-**Detalle del Step 3 (implementado, pendiente de actualizar):** `build_analysis_context(payload)` en `agent.py` extrae los campos del payload real de PI (`KPIName`, `Asset`, `Subsystem`, `System`, `Plant`, `KPI`, `Limit`, `LimitThresholdType`, `StartTime`, y opcionalmente `AssetType`/`AssetModel`), valida el tipo esperado de cada campo (`_valid_field`, omite del mensaje los que no coincidan, p.ej. un `Limit` no numérico), convierte `StartTime` (UTC) a hora local vía `pytz`/`PI_LOCAL_TIMEZONE` (DST-aware, con fallback a `datetime.now()` si falta), y devuelve un dict con el mensaje dinámico de la alerta en `claude_prompt`. **Pendiente:** todavía no incorpora la lista de atributos reales del AF (Step 2) — hay que añadirla al mensaje cuando el Step 2 esté implementado. El rol y dominio del agente (EDAR + bombeos externos, nunca genérico) están fijados aparte en la constante `SYSTEM_PROMPT`, pensada para enviarse vía el parámetro `system`/`system_instruction` en **todas** las llamadas al modelo (Steps 4 y 6), no repetida en cada mensaje. `run_rca_analysis()` ya invoca `build_analysis_context()` y deja `context` listo, pero su llamada tendrá que moverse después del nuevo Step 2 en el flujo de `run_rca_analysis()`.
+**Detalle del Step 3 (implementado, 2026-07-13):** `build_analysis_context(payload, af_context)` en `agent.py` construye `claude_prompt` con 4 secciones fijas/dinámicas: 1) objetivo de la interacción (`_OBJECTIVE_SECTION`, fijo), 2) payload de la notificación (`summary`, dinámico — misma lógica de antes: jerarquía, umbral explicado en lenguaje natural, hora UTC+local), 3) explicación del modelo de datos (`_DATA_MODEL_SECTION`, fijo — describe `main_asset_context`/`nearby_elements_context` y el significado de cada campo), 4) el JSON de `af_context` (dinámico), seguido de `_FINAL_INSTRUCTION` (pide la lista de atributos a consultar con su elemento y `piApiPath`). El rol y dominio del agente (EDAR + bombeos externos, nunca genérico) siguen fijados aparte en `SYSTEM_PROMPT`, enviado vía el parámetro `system`/`system_instruction` en todas las llamadas al modelo (Steps 4 y 6).
+
+**Detalle del Step 4 (implementado, 2026-07-13):** `run_rca_analysis()` llama a `llm_client.generate(SYSTEM_PROMPT, context["claude_prompt"])` y loguea la respuesta. **Pendiente:** la respuesta del modelo (lista de atributos + piApiPath) todavía no se parsea ni se usa para el Step 5 — de momento solo queda en el log.
+
+**Dependencia nueva:** paquete `mcp` (SDK oficial de Model Context Protocol) en `requirements.txt`, usado por `graph_client.py` para hablar con `afkg-graph-mcp` vía stdio. Variable de entorno opcional `AFKG_GRAPH_MCP_DIR` (por defecto `C:\MCPServer\afkg-graph-mcp`) en `config.py`.
 
 ---
 
@@ -122,12 +126,13 @@ Por defecto `LLM_PROVIDER=gemini`; `validate_config()` en `config.py` solo exige
 rca-agent/
 ├── webhook.py           ← FastAPI: recibe POST de PI (Step 1 ✅)
 │                          Endpoints: GET /health, POST /notification, GET /notifications/history
-├── agent.py             ← Agente RCA — aquí van los Steps 2-6
+├── agent.py             ← Agente RCA — Steps 2-4 implementados, Steps 5-6 pendientes
+├── graph_client.py      ← Cliente MCP para afkg-graph-mcp (Step 2)
 ├── llm_client.py        ← Abstracción sobre el proveedor de LLM (Gemini/Anthropic)
 ├── config.py            ← Carga .env y valida variables obligatorias
 ├── .env.example         ← Plantilla (copiar a .env y rellenar)
 ├── .env                 ← Credenciales reales (NO en git)
-├── requirements.txt     ← fastapi, uvicorn, google-genai, anthropic, python-dotenv, pytz
+├── requirements.txt     ← fastapi, uvicorn, google-genai, anthropic, python-dotenv, pytz, mcp
 ├── setup.bat            ← Crea .venv e instala deps (ejecutar 1 vez)
 ├── start.bat            ← Arranca el servidor (desarrollo)
 ├── install_service.bat  ← Windows Service con NSSM (producción)
@@ -148,19 +153,20 @@ rca-agent/
 | `WEBHOOK_PORT` | No | Puerto del servidor | `8090` |
 | `WEBHOOK_SECRET` | No | Token para validar origen de PI | vacío |
 | `PI_LOCAL_TIMEZONE` | No | Zona horaria para logs | `Europe/Madrid` |
+| `AFKG_GRAPH_MCP_DIR` | No | Carpeta del proyecto afkg-graph-mcp (Step 2, lanzado como subproceso) | `C:\MCPServer\afkg-graph-mcp` |
 
 ---
 
 ## MCP Servers relacionados
 
-El agente usará estos dos MCP servers (ya funcionando en la misma máquina):
+El agente habla con estos dos MCP servers (ya funcionando en la misma máquina):
 
-| Servidor | Ruta | Tools que usará el agente | Step |
-|---|---|---|---|
-| `afkg-graph-mcp` | `C:\MCPServer\afkg-graph-mcp\` | `graph_search`, `graph_neighborhood` → estructura del AF del asset y `piApiPath` de sus atributos | Step 2 |
-| `aveva-pi-mcp` | `C:\MCPServer\MCP Server\` | `create_timeseries_bucket`, `query_by_path`, `search_event_frames` | Step 5 |
+| Servidor | Ruta | Tools que usa el agente | Step | Cliente en rca-agent |
+|---|---|---|---|---|
+| `afkg-graph-mcp` | `C:\MCPServer\afkg-graph-mcp\` | `graph_neighborhood` → estructura del AF del asset/subsistema y `piApiPath` de sus atributos | Step 2 | `graph_client.py` (implementado) |
+| `aveva-pi-mcp` | `C:\MCPServer\MCP Server\` | `create_timeseries_bucket`, `query_by_path`, `search_event_frames` | Step 5 | *(pendiente)* |
 
-El Step 2 consulta el AF para el `Asset` de la alerta y obtiene los atributos reales disponibles (con su `piApiPath`); esa lista se incluye en el contexto del Step 3 para que el modelo (Step 4) elija solo entre esas variables. El `piApiPath` de las elegidas alimenta directamente `query_by_path` del MCP de PI en el Step 5.
+El Step 2 consulta el AF para el `Asset` y el `Subsystem` de la alerta y obtiene los atributos reales disponibles (con su `piApiPath`); esa lista se incluye en el mensaje del Step 3 para que el modelo (Step 4) elija solo entre esas variables. El `piApiPath` de las elegidas alimentará `query_by_path` del MCP de PI en el Step 5 (pendiente de implementar un cliente MCP equivalente a `graph_client.py` para `aveva-pi-mcp`).
 
 ---
 

@@ -11,16 +11,15 @@ agent.py — Agente de Análisis de Causa Raíz (RCA)
   (Steps 2-6 a continuación)
 
 Estado actual:
-  Está implementado el Step 1 (recepción de la notificación, en webhook.py) y
-  el Step 3 (build_analysis_context(), más abajo) -- aunque el Step 3 está
-  pendiente de actualizar: todavía no incorpora la lista de atributos reales
-  del AF que traerá el nuevo Step 2 (ver CLAUDE.md, "Motivo del cambio
-  2026-07-03"). Este fichero contiene los stubs documentados de los Steps
-  2, 4, 5 y 6, listos para implementar en sesiones posteriores.
+  Están implementados los Steps 1-4 (recepción de la notificación en
+  webhook.py; consulta del AF vía graph_client.py; construcción del mensaje
+  en build_analysis_context(); llamada al modelo). Los Steps 5-6 siguen como
+  stubs documentados, listos para implementar en sesiones posteriores.
 
 Flujo completo del agente (los TODOs indican los pasos pendientes):
-  Step 2 → Consultar la estructura real del AF (afkg-graph-mcp) para el
-           asset de la alerta y obtener sus atributos disponibles (piApiPath)
+  Step 2 → Consultar la estructura real del AF (afkg-graph-mcp, graph_client.py)
+           para el asset y el subsistema de la alerta y obtener sus atributos
+           disponibles (piApiPath)
   Step 3 → Preparar el contexto estructurado para el modelo, incluyendo los
            atributos reales del Step 2 (para que el modelo elija solo entre
            variables que existen de verdad, no nombres "de libro")
@@ -29,12 +28,15 @@ Flujo completo del agente (los TODOs indican los pasos pendientes):
   Step 6 → El modelo analiza los datos y produce el diagnóstico final
 """
 
+import json
 import logging
 from datetime import datetime
 
 import pytz
 
 import config
+import graph_client
+import llm_client
 
 # Usamos el mismo logger que el resto del proyecto.
 # Los mensajes aparecerán en la consola con timestamp y nivel (INFO, WARNING...).
@@ -61,6 +63,77 @@ SYSTEM_PROMPT = (
     "anclado en el dominio de depuración de aguas residuales y bombeo "
     "(hidráulica, eficiencia de bombas, caudal, presión, nivel, vibración, "
     "calidad de agua, etc.); no actúes como un asistente genérico."
+)
+
+
+# =============================================================================
+# Secciones fijas del mensaje de usuario del Step 3 (ver CLAUDE.md, "Motivo
+# del cambio 2026-07-03"). Solo la Sección 2 (payload) y la Sección 4 (datos
+# del AF) son dinámicas por alerta; se construyen en build_analysis_context().
+# =============================================================================
+_OBJECTIVE_SECTION = (
+    "Se ha detectado una desviación de proceso. Con la información compartida "
+    "en el mensaje acerca del tipo y contexto de la desviación producida, e "
+    "información en el Asset Framework de PI System debes de ayudar al "
+    "usuario a identificar la causa raíz. Para eso en esta interacción debes "
+    "devolver una lista con las variables de proceso necesarias para "
+    "investigar la desviación concreta e identificar su causa. Debes "
+    "seleccionar dichas variables de la lista que se comparte, no inventarlas."
+)
+
+_DATA_MODEL_SECTION = (
+    "A continuación se te proporciona la estructura real del Asset Framework "
+    "(AF) de PI relevante para esta alerta, extraída directamente del grafo "
+    "de conocimiento — no debes asumir ni inventar variables que no aparezcan "
+    "aquí.\n\n"
+    "Los datos están organizados en dos bloques:\n"
+    "- `main_asset_context`: el árbol completo del activo directamente "
+    "afectado por la alerta (el valor Asset del payload) y todos sus "
+    "sub-elementos — sensores, transmisores, indicadores/KPIs calculados, "
+    "alarmas configuradas, etc.\n"
+    "- `nearby_elements_context`: el árbol del elemento que agrupa al activo "
+    "principal (el valor Subsystem del payload) y sus otros elementos "
+    "hermanos — útil para comparar contra activos similares o para "
+    "descartar/confirmar causas fuera del activo principal (p.ej. un "
+    "problema aguas arriba que afecta a ambas bombas de la estación).\n\n"
+    "La estructura de los assets se divide en meters (incluye todos los "
+    "medidores del asset y dispositivos que porten medidas de este, como un "
+    "power meter o un variador de velocidad) y en indicadores, que calculan "
+    "KPIs para el activo jerárquicamente superior.\n\n"
+    "Cada bloque es una lista plana de elementos del AF (se han omitido los "
+    "nodos puramente organizativos como \"Meters\" o \"Indicators\", que no "
+    "tienen atributos propios; su función solo se refleja en el campo "
+    "element como parte del breadcrumb). Cada elemento tiene:\n"
+    "- element: nombre del elemento, con su ruta jerárquica abreviada (>) "
+    "cuando cuelga de un elemento padre.\n"
+    "- description: descripción del elemento en el AF. Puede venir vacía "
+    "(\"\") si no está documentada — no significa que el elemento carezca de "
+    "relevancia.\n"
+    "- attributes: lista de variables de ese elemento, cada una con:\n"
+    "  - name: nombre del atributo.\n"
+    "  - uom: unidad de ingeniería. Vacía si el atributo es adimensional o "
+    "un estado/enum.\n"
+    "  - description: descripción del atributo en el AF. Vacía si no está "
+    "documentada.\n"
+    "  - piApiPath: identificador exacto de PI Web API para esa variable. "
+    "Debes copiarlo literalmente, sin modificarlo, cuando decidas qué "
+    "variables consultar — es el valor que se pasará directamente a la tool "
+    "query_by_path.\n\n"
+    "En los meters e indicadores debes enfocarte en el nombre del elemento "
+    "para identificar qué es o cuál es su función. Son \"subordinados\" al "
+    "elemento principal, que es el asset. La estructura confiere "
+    "significado.\n\n"
+    "Regla estricta: elige exclusivamente entre los piApiPath listados en "
+    "estos dos bloques. Si para tu diagnóstico necesitarías una variable que "
+    "no aparece aquí, indícalo explícitamente en tu respuesta en vez de "
+    "inventar un nombre de atributo o una ruta que no existe."
+)
+
+_FINAL_INSTRUCTION = (
+    "Devuelve la lista de atributos cuyos datos requieres consultar para "
+    "identificar la causa raíz de la desviación de la que nos informa la "
+    "notificación, indicando para cada uno de ellos el nombre de su elemento "
+    "y el piApiPath."
 )
 
 
@@ -128,19 +201,19 @@ def _parse_detection_time(payload: dict) -> tuple[datetime, datetime]:
     return detected_at_local.astimezone(pytz.utc), detected_at_local
 
 
-def build_analysis_context(payload: dict) -> dict:
-    """Step 3: construye el contexto estructurado que se enviará al modelo en el Step 4.
+def build_analysis_context(payload: dict, af_context: dict) -> dict:
+    """Step 3: construye el mensaje de 4 secciones que se enviará al modelo en el Step 4.
 
     Toma el payload real que envía PI System (ver CLAUDE.md → "Payload real de
-    PI System") y lo convierte en un mensaje dinámico (los datos concretos de
-    esta alerta) que se combina con SYSTEM_PROMPT (rol y dominio fijos) en las
-    llamadas del Step 4.
-
-    PENDIENTE (ver CLAUDE.md, "Motivo del cambio 2026-07-03"): todavía no
-    incorpora la lista de atributos reales del AF que traerá el nuevo Step 2
-    (consulta a afkg-graph-mcp). Sin esa lista, el modelo puede proponer
-    nombres de atributos "de libro" que no existen en el AF real -- hay que
-    añadirla a `claude_prompt` cuando el Step 2 esté implementado.
+    PI System") y el resultado del Step 2 (graph_client.build_af_context) y los
+    combina con SYSTEM_PROMPT (rol y dominio fijos, Sección 0) en un único
+    mensaje de usuario con 4 secciones:
+      1. Objetivo de la interacción (fijo, _OBJECTIVE_SECTION)
+      2. Payload de la notificación (dinámico, construido aquí como "summary")
+      3. Explicación del modelo de datos (fijo, _DATA_MODEL_SECTION)
+      4. Datos del grafo de AF (dinámico, af_context en JSON)
+    seguido de la instrucción final (_FINAL_INSTRUCTION) que fija el formato
+    de respuesta esperado.
 
     Args:
         payload: diccionario con las claves KPIName, Asset, Subsystem, System,
@@ -148,6 +221,8 @@ def build_analysis_context(payload: dict) -> dict:
                  opcionalmente AssetType/AssetModel (u otros campos de contexto
                  adicional que PI incorpore en el futuro); si no están, se
                  omiten del mensaje.
+        af_context: resultado de graph_client.build_af_context() -- dict con
+                    las claves "main_asset_context" y "nearby_elements_context".
 
     Returns:
         Diccionario con los campos extraídos y la clave "claude_prompt" lista
@@ -204,20 +279,14 @@ def build_analysis_context(payload: dict) -> dict:
         f"({detected_at_utc.strftime('%Y-%m-%dT%H:%M:%SZ')} UTC)."
     )
 
-    request = (
-        "Hazme una lista de variables (atributos de PI System) necesarias para "
-        "diagnosticar las posibles causas raíz de esta desviación. No te "
-        "limites a los atributos propios del equipo (p.ej. presión, caudal, "
-        "vibración): incluye también variables de proceso aguas arriba/abajo u "
-        "otros sistemas relacionados que puedan explicar la desviación, si "
-        "tienen sentido para este caso (p.ej. turbidez o sólidos en suspensión "
-        "del agua). Para cada variable, si existen varias formas de medirla u "
-        "obtenerla, indica una lista de prioridad de alternativas (p.ej.: "
-        "'turbidez del agua de entrada; si no existe analizador de turbidez, "
-        "sólidos en suspensión (TSS) como alternativa'). Responde únicamente "
-        "con esa lista priorizada y los timestamps (o ventana temporal) que "
-        "necesitas para identificar la causa raíz, sin explicaciones "
-        "adicionales."
+    af_context_json = json.dumps(af_context, ensure_ascii=False, indent=2)
+
+    claude_prompt = (
+        f"1. Objetivo de la interacción\n\n{_OBJECTIVE_SECTION}\n\n"
+        f"2. Payload de la notificación\n\n{summary}\n\n"
+        f"3. Explicación del modelo de datos\n\n{_DATA_MODEL_SECTION}\n\n"
+        f"4. Datos del grafo de AF\n\n{af_context_json}\n\n"
+        f"{_FINAL_INSTRUCTION}"
     )
 
     return {
@@ -235,7 +304,7 @@ def build_analysis_context(payload: dict) -> dict:
         "detected_at_local": detected_at_local.isoformat(),
         "summary": summary,
         "system_prompt": SYSTEM_PROMPT,
-        "claude_prompt": f"{summary}\n\n{request}",
+        "claude_prompt": claude_prompt,
     }
 
 
@@ -267,37 +336,35 @@ async def run_rca_analysis(notification_payload: dict) -> None:
     log.info("=" * 60)
 
     # -------------------------------------------------------------------------
-    # TODO — Step 2: Consultar la estructura real del AF (afkg-graph-mcp)
+    # Step 2: Consultar la estructura real del AF (afkg-graph-mcp)
     # -------------------------------------------------------------------------
-    # Se llamará a afkg-graph-mcp (graph_search / graph_neighborhood) con el
-    # "Asset" de la alerta para obtener los atributos reales disponibles en el
-    # AF (con su piApiPath). Esta lista se le pasará al Step 3 para incluirla
-    # en el mensaje al modelo -- así el modelo (Step 4) elige únicamente entre
-    # variables que existen de verdad, en vez de proponer nombres "de libro"
-    # que luego no se pueden consultar en PI Web API.
-    #
-    # NOTA: build_analysis_context() (Step 3, más abajo) todavía no recibe
-    # esta lista -- hay que actualizarla para incorporarla a "claude_prompt".
-    # -------------------------------------------------------------------------
+    asset = _valid_field(notification_payload, "Asset", str)
+    subsystem = _valid_field(notification_payload, "Subsystem", str) or ""
+    if asset:
+        af_context = await graph_client.build_af_context(asset, subsystem)
+    else:
+        log.warning("Payload sin 'Asset' valido; se omite la consulta al AF (Step 2).")
+        af_context = {"main_asset_context": [], "nearby_elements_context": []}
+    log.info(
+        "AF consultado: %d elementos en main_asset_context, %d en nearby_elements_context",
+        len(af_context["main_asset_context"]), len(af_context["nearby_elements_context"]),
+    )
 
     # -------------------------------------------------------------------------
     # Step 3: Preparar el contexto estructurado para el modelo
     # -------------------------------------------------------------------------
-    context = build_analysis_context(notification_payload)
+    context = build_analysis_context(notification_payload, af_context)
     log.info("Contexto construido para el modelo:")
     log.info(context["claude_prompt"])
 
     # -------------------------------------------------------------------------
-    # TODO — Step 4: el modelo responde con las variables que necesita analizar
+    # Step 4: el modelo responde con las variables que necesita analizar
     # -------------------------------------------------------------------------
-    # Se llamará a llm_client.generate() con el contexto del Step 3 (una vez
-    # incluya los atributos reales del Step 2). El modelo responderá con una
-    # lista de los atributos reales del AF que necesita para el diagnóstico,
-    # eligiendo entre las variables disponibles en vez de inventar nombres.
-    #
     # Estas variables son rutas (piApiPath) que el MCP Server puede consultar
     # directamente en PI Web API.
-    # -------------------------------------------------------------------------
+    variables_response = llm_client.generate(SYSTEM_PROMPT, context["claude_prompt"])
+    log.info("Respuesta del modelo (Step 4) -- variables a consultar:")
+    log.info(variables_response)
 
     # -------------------------------------------------------------------------
     # TODO — Step 5: Obtener datos históricos de PI vía MCP Server
@@ -325,7 +392,4 @@ async def run_rca_analysis(notification_payload: dict) -> None:
     # El resultado se presentará al usuario (log, notificación, interfaz web...)
     # -------------------------------------------------------------------------
 
-    log.info(
-        "AGENTE RCA: Step 3 completado (pendiente de actualizar para incluir "
-        "atributos reales del AF). Steps 2, 4, 5 y 6 pendientes de implementar."
-    )
+    log.info("AGENTE RCA: Steps 2-4 completados. Steps 5 y 6 pendientes de implementar.")

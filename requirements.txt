@@ -29,3 +29,8 @@ python-dotenv>=1.0.0
 # pytz: gestión de zonas horarias con soporte de horario de verano (DST).
 # Misma versión que el MCP server de PI para coherencia en fechas y horas.
 pytz>=2024.2
+
+# SDK oficial de MCP (Model Context Protocol). Usado en graph_client.py (Step 2)
+# para lanzar afkg-graph-mcp como subproceso y llamar a graph_neighborhood vía
+# stdio, igual que hace Claude Code según .mcp.json.
+mcp>=1.0.0

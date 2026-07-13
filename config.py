@@ -69,6 +69,11 @@ WEBHOOK_SECRET: str = os.environ.get("WEBHOOK_SECRET", "")
 # Usa nombres de zona IANA, por ejemplo: Europe/Madrid, America/New_York
 PI_LOCAL_TIMEZONE: str = os.environ.get("PI_LOCAL_TIMEZONE", "Europe/Madrid")
 
+# Carpeta del proyecto afkg-graph-mcp (Step 2: consulta de la estructura del AF).
+# Se usa para lanzar el servidor MCP como subproceso vía "uv run --directory ...",
+# igual que hace Claude Code según C:\MCPServer\MCP Server\.mcp.json.
+AFKG_GRAPH_MCP_DIR: str = os.environ.get("AFKG_GRAPH_MCP_DIR") or r"C:\MCPServer\afkg-graph-mcp"
+
 
 # =============================================================================
 # Validación de configuración
