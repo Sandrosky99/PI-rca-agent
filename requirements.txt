@@ -34,3 +34,9 @@ pytz>=2024.2
 # para lanzar afkg-graph-mcp como subproceso y llamar a graph_neighborhood vía
 # stdio, igual que hace Claude Code según .mcp.json.
 mcp>=1.0.0
+
+# Reintentos con backoff exponencial. Usado en llm_client.py (Step 4) para
+# los errores transitorios del proveedor de LLM (5xx, rate limit, timeout).
+# Ya venía como dependencia transitoria de google-genai; se declara explícita
+# porque ahora la usamos directamente.
+tenacity>=8.0.0

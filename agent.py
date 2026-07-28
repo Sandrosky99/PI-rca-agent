@@ -132,8 +132,11 @@ _DATA_MODEL_SECTION = (
 _FINAL_INSTRUCTION = (
     "Devuelve la lista de atributos cuyos datos requieres consultar para "
     "identificar la causa raíz de la desviación de la que nos informa la "
-    "notificación, indicando para cada uno de ellos el nombre de su elemento "
-    "y el piApiPath."
+    "notificación, en formato JSON válido: un array de objetos, cada uno con "
+    "exactamente dos claves, \"element\" (nombre/ruta del elemento) y "
+    "\"piApiPath\" (el piApiPath exacto tal como aparece en los datos del AF). "
+    "Responde únicamente con ese JSON, sin bloques de código markdown (```), "
+    "sin texto introductorio, resumen ni explicación adicional antes o después."
 )
 
 
@@ -361,8 +364,16 @@ async def run_rca_analysis(notification_payload: dict) -> None:
     # Step 4: el modelo responde con las variables que necesita analizar
     # -------------------------------------------------------------------------
     # Estas variables son rutas (piApiPath) que el MCP Server puede consultar
-    # directamente en PI Web API.
-    variables_response = llm_client.generate(SYSTEM_PROMPT, context["claude_prompt"])
+    # directamente en PI Web API. llm_client.generate() ya reintenta errores
+    # transitorios (5xx, rate limit...) internamente; si aun así falla (o el
+    # error no es transitorio), cortamos aquí de forma controlada en vez de
+    # dejar que el traceback se propague sin control en la background task.
+    try:
+        variables_response = llm_client.generate(SYSTEM_PROMPT, context["claude_prompt"])
+    except llm_client.LLMGenerationError as exc:
+        log.error("Step 4 fallido: %s", exc)
+        log.info("AGENTE RCA: análisis interrumpido en el Step 4. Steps 5 y 6 no ejecutados.")
+        return
     log.info("Respuesta del modelo (Step 4) -- variables a consultar:")
     log.info(variables_response)
 

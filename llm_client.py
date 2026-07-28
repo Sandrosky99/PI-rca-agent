@@ -17,13 +17,29 @@ llm_client.py — Capa de abstracción sobre el proveedor de LLM (Gemini / Anthr
 
 ¿Cómo se elige el proveedor?
   Variable de entorno LLM_PROVIDER ("gemini" por defecto, o "anthropic").
+
+¿Qué pasa si el proveedor falla?
+  Visto en producción el 2026-07-28: Gemini devolvió un 503 "high demand"
+  (sobrecarga transitoria). _generate_gemini/_generate_anthropic reintentan
+  hasta 3 veces con backoff exponencial (2-30s) solo para errores que un
+  reintento puede arreglar (5xx, rate limit, timeout, conexión) -- errores
+  4xx por auth/payload inválido no se reintentan, porque reintentar no los
+  soluciona. Si se agotan los reintentos (o el error no es transitorio),
+  generate() lanza LLMGenerationError para que agent.py lo capture y corte
+  el análisis de forma controlada en vez de propagar un traceback crudo.
 """
 
 import logging
 
+import tenacity
+
 import config
 
 log = logging.getLogger(__name__)
+
+
+class LLMGenerationError(Exception):
+    """El proveedor de LLM no pudo generar una respuesta (tras agotar los reintentos si aplica)."""
 
 
 def generate(system_prompt: str, user_message: str) -> str:
@@ -39,17 +55,49 @@ def generate(system_prompt: str, user_message: str) -> str:
 
     Raises:
         ValueError: si LLM_PROVIDER no es "gemini" ni "anthropic".
+        LLMGenerationError: si el proveedor falla tras agotar los reintentos
+                             (o falla con un error no transitorio).
     """
     provider = config.LLM_PROVIDER
-    if provider == "gemini":
-        return _generate_gemini(system_prompt, user_message)
-    if provider == "anthropic":
+    if provider not in ("gemini", "anthropic"):
+        raise ValueError(
+            f"LLM_PROVIDER desconocido: '{provider}' (valores válidos: 'gemini', 'anthropic')"
+        )
+    try:
+        if provider == "gemini":
+            return _generate_gemini(system_prompt, user_message)
         return _generate_anthropic(system_prompt, user_message)
-    raise ValueError(
-        f"LLM_PROVIDER desconocido: '{provider}' (valores válidos: 'gemini', 'anthropic')"
-    )
+    except Exception as exc:
+        raise LLMGenerationError(f"El proveedor '{provider}' no respondió: {exc}") from exc
 
 
+def _is_transient_gemini_error(exc: BaseException) -> bool:
+    """5xx (sobrecarga, mantenimiento...) es reintentable; 4xx (auth, payload
+    inválido) no lo es -- reintentar no lo arregla."""
+    from google.genai import errors
+    return isinstance(exc, errors.ServerError)
+
+
+def _is_transient_anthropic_error(exc: BaseException) -> bool:
+    import anthropic
+    return isinstance(exc, (
+        anthropic.InternalServerError,
+        anthropic.OverloadedError,
+        anthropic.RateLimitError,
+        anthropic.APITimeoutError,
+        anthropic.APIConnectionError,
+    ))
+
+
+_RETRY_COMMON = dict(
+    wait=tenacity.wait_exponential(multiplier=2, min=2, max=30),
+    stop=tenacity.stop_after_attempt(3),
+    before_sleep=tenacity.before_sleep_log(log, logging.WARNING),
+    reraise=True,
+)
+
+
+@tenacity.retry(retry=tenacity.retry_if_exception(_is_transient_gemini_error), **_RETRY_COMMON)
 def _generate_gemini(system_prompt: str, user_message: str) -> str:
     """Llama a Gemini vía el SDK google-genai."""
     from google import genai
@@ -64,6 +112,7 @@ def _generate_gemini(system_prompt: str, user_message: str) -> str:
     return response.text
 
 
+@tenacity.retry(retry=tenacity.retry_if_exception(_is_transient_anthropic_error), **_RETRY_COMMON)
 def _generate_anthropic(system_prompt: str, user_message: str) -> str:
     """Llama a Claude vía el SDK anthropic."""
     import anthropic
