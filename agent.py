@@ -11,10 +11,10 @@ agent.py — Agente de Análisis de Causa Raíz (RCA)
   (Steps 2-6 a continuación)
 
 Estado actual:
-  Están implementados los Steps 1-4 (recepción de la notificación en
+  Están implementados los Steps 1-5 (recepción de la notificación en
   webhook.py; consulta del AF vía graph_client.py; construcción del mensaje
-  en build_analysis_context(); llamada al modelo). Los Steps 5-6 siguen como
-  stubs documentados, listos para implementar en sesiones posteriores.
+  en build_analysis_context(); llamada al modelo; datos históricos de PI vía
+  pi_client.py). El Step 6 sigue como stub documentado.
 
 Flujo completo del agente (los TODOs indican los pasos pendientes):
   Step 2 → Consultar la estructura real del AF (afkg-graph-mcp, graph_client.py)
@@ -24,12 +24,15 @@ Flujo completo del agente (los TODOs indican los pasos pendientes):
            atributos reales del Step 2 (para que el modelo elija solo entre
            variables que existen de verdad, no nombres "de libro")
   Step 4 → El modelo decide, de esas variables reales, cuáles necesita analizar
-  Step 5 → Obtener datos históricos de PI vía MCP Server
+  Step 5 → Obtener datos históricos de esas variables vía MCP Server
+           (aveva-pi-mcp, pi_client.py), en la ventana [StartTime -
+           PI_LOOKBACK_HOURS, StartTime] y resolución PI_QUERY_INTERVAL_*
   Step 6 → El modelo analiza los datos y produce el diagnóstico final
 """
 
 import json
 import logging
+import re
 from datetime import datetime
 
 import pytz
@@ -37,6 +40,7 @@ import pytz
 import config
 import graph_client
 import llm_client
+import pi_client
 
 # Usamos el mismo logger que el resto del proyecto.
 # Los mensajes aparecerán en la consola con timestamp y nivel (INFO, WARNING...).
@@ -181,6 +185,18 @@ def _describe_threshold(threshold_type: str) -> str:
     if threshold_type == "High":
         return "un umbral 'High': la alerta salta porque el valor ha superado el máximo aceptable"
     return "un umbral no especificado"
+
+
+_MARKDOWN_FENCE_RE = re.compile(r"^```(?:json)?\s*\n(.*)\n```$", re.DOTALL)
+
+
+def _strip_markdown_fence(text: str) -> str:
+    """Quita el bloque ```json ... ``` si el modelo lo añade pese a que
+    _FINAL_INSTRUCTION se lo prohíbe explícitamente (visto en pruebas reales:
+    el guardarraíl no es infalible, así que el parseo del Step 5 debe ser
+    tolerante a este caso concreto en vez de fallar)."""
+    match = _MARKDOWN_FENCE_RE.match(text.strip())
+    return match.group(1) if match else text
 
 
 def _parse_detection_time(payload: dict) -> tuple[datetime, datetime]:
@@ -378,17 +394,33 @@ async def run_rca_analysis(notification_payload: dict) -> None:
     log.info(variables_response)
 
     # -------------------------------------------------------------------------
-    # TODO — Step 5: Obtener datos históricos de PI vía MCP Server
+    # Step 5: Obtener datos históricos de esas variables vía MCP Server
     # -------------------------------------------------------------------------
-    # Con la lista de atributos del Step 4, se llamará al MCP Server
-    # "aveva-pi-mcp" (que ya está funcionando en C:\MCPServer\MCP Server) para:
-    #   a) Crear un bucket de timestamps con create_timeseries_bucket()
-    #      (ventana temporal alrededor del momento de la alerta)
-    #   b) Consultar los valores históricos con query_by_path()
-    #      usando los piApiPath devueltos por el modelo en el Step 4
-    #
-    # El resultado será una tabla de valores en el tiempo para cada atributo.
-    # -------------------------------------------------------------------------
+    try:
+        variables = json.loads(_strip_markdown_fence(variables_response))
+    except json.JSONDecodeError as exc:
+        log.error("Step 5: la respuesta del modelo no es JSON válido (%s): %r", exc, variables_response)
+        log.info("AGENTE RCA: análisis interrumpido en el Step 5. Step 6 no ejecutado.")
+        return
+
+    try:
+        historical_data = await pi_client.fetch_historical_data(variables, context["detected_at_utc"])
+    except pi_client.PIQueryError as exc:
+        log.error("Step 5 fallido: %s", exc)
+        log.info("AGENTE RCA: análisis interrumpido en el Step 5. Step 6 no ejecutado.")
+        return
+
+    log.info(
+        "Step 5: datos históricos obtenidos para %d piApiPath, ventana %s -> %s (bucket %s)",
+        len(historical_data["piApiPaths"]), historical_data["start_date"],
+        historical_data["end_date"], historical_data["bucket_id"],
+    )
+    if historical_data["excluded_piApiPaths"]:
+        log.warning(
+            "Step 5: %d piApiPath no resolvieron a WebID y se excluyeron: %s",
+            len(historical_data["excluded_piApiPaths"]), historical_data["excluded_piApiPaths"],
+        )
+    log.info(historical_data["data"])
 
     # -------------------------------------------------------------------------
     # TODO — Step 6: el modelo analiza los datos y produce el diagnóstico final
@@ -403,4 +435,4 @@ async def run_rca_analysis(notification_payload: dict) -> None:
     # El resultado se presentará al usuario (log, notificación, interfaz web...)
     # -------------------------------------------------------------------------
 
-    log.info("AGENTE RCA: Steps 2-4 completados. Steps 5 y 6 pendientes de implementar.")
+    log.info("AGENTE RCA: Steps 2-5 completados. Step 6 pendiente de implementar.")

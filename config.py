@@ -74,6 +74,20 @@ PI_LOCAL_TIMEZONE: str = os.environ.get("PI_LOCAL_TIMEZONE", "Europe/Madrid")
 # igual que hace Claude Code según C:\MCPServer\MCP Server\.mcp.json.
 AFKG_GRAPH_MCP_DIR: str = os.environ.get("AFKG_GRAPH_MCP_DIR") or r"C:\MCPServer\afkg-graph-mcp"
 
+# Carpeta del proyecto aveva-pi-mcp (Step 5: datos históricos de PI Web API).
+AVEVA_PI_MCP_DIR: str = os.environ.get("AVEVA_PI_MCP_DIR") or r"C:\MCPServer\MCP Server"
+
+# Ventana de lookback (horas antes de StartTime) para las consultas del Step 5.
+# Las alertas son desviaciones de KPI (degradación gradual), así que se mira
+# hacia atrás desde la detección, nunca hacia adelante.
+PI_LOOKBACK_HOURS: int = int(os.environ.get("PI_LOOKBACK_HOURS", "24"))
+
+# Resolución temporal (intervalo entre puntos) para las consultas del Step 5.
+# Uniforme para todas las variables del bucket, para poder correlacionarlas
+# directamente por timestamp.
+PI_QUERY_INTERVAL_VALUE: int = int(os.environ.get("PI_QUERY_INTERVAL_VALUE", "15"))
+PI_QUERY_INTERVAL_UNIT: str = os.environ.get("PI_QUERY_INTERVAL_UNIT") or "minutes"
+
 
 # =============================================================================
 # Validación de configuración
