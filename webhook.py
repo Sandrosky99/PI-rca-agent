@@ -23,6 +23,8 @@ Endpoints disponibles:
 
 import logging
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 import asyncio
 
@@ -68,11 +70,25 @@ _MAX_HISTORY = 50
 # El sistema de logs escribe mensajes en la consola con la hora, el nivel
 # (INFO, WARNING, ERROR) y el mensaje. Esto nos permite ver en tiempo real
 # qué notificaciones llegan y qué hace el servidor con ellas.
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+#
+# Además de la consola, se escribe lo mismo a un fichero rotativo
+# (webhook.log, junto a este script) para poder revisar notificaciones
+# pasadas aunque la consola ya no esté visible o se haya reiniciado el
+# servidor. Se rota a los 10 MB (5 ficheros de respaldo) porque una alerta
+# de PI mal configurada puede reenviar notificaciones cada pocos segundos
+# de forma indefinida (visto en real: NonrepetitionInterval=0 en la
+# Notification Rule de PI genera una notificación nueva por cada
+# evaluación periódica de la alarma, no solo al cruzar el umbral).
+_LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
+_LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
+_LOG_FILE = Path(__file__).parent / "webhook.log"
+
+logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT, datefmt=_LOG_DATEFMT)
+
+_file_handler = RotatingFileHandler(_LOG_FILE, maxBytes=10_000_000, backupCount=5, encoding="utf-8")
+_file_handler.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATEFMT))
+logging.getLogger().addHandler(_file_handler)
+
 log = logging.getLogger(__name__)
 
 
