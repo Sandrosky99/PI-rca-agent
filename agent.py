@@ -11,12 +11,13 @@ agent.py — Agente de Análisis de Causa Raíz (RCA)
   (Steps 2-6 a continuación)
 
 Estado actual:
-  Están implementados los Steps 1-5 (recepción de la notificación en
+  Están implementados los Steps 1-6 (recepción de la notificación en
   webhook.py; consulta del AF vía graph_client.py; construcción del mensaje
   en build_analysis_context(); llamada al modelo; datos históricos de PI vía
-  pi_client.py). El Step 6 sigue como stub documentado.
+  pi_client.py; diagnóstico final vía build_diagnosis_context()). Pendiente:
+  decidir el canal de salida del diagnóstico (hoy solo queda en el log).
 
-Flujo completo del agente (los TODOs indican los pasos pendientes):
+Flujo completo del agente:
   Step 2 → Consultar la estructura real del AF (afkg-graph-mcp, graph_client.py)
            para el asset y el subsistema de la alerta y obtener sus atributos
            disponibles (piApiPath)
@@ -32,7 +33,6 @@ Flujo completo del agente (los TODOs indican los pasos pendientes):
 
 import json
 import logging
-import re
 from datetime import datetime
 
 import pytz
@@ -82,7 +82,39 @@ _OBJECTIVE_SECTION = (
     "usuario a identificar la causa raíz. Para eso en esta interacción debes "
     "devolver una lista con las variables de proceso necesarias para "
     "investigar la desviación concreta e identificar su causa. Debes "
-    "seleccionar dichas variables de la lista que se comparte, no inventarlas."
+    "seleccionar dichas variables de la lista que se comparte, no inventarlas.\n\n"
+    "Un KPI calculado (como el que ha disparado esta alerta) casi nunca se "
+    "explica por una sola variable física: prioriza tu selección en este "
+    "orden, sin quedarte solo en el primer nivel:\n"
+    "1. El propio KPI en alerta y su 'Reference' o baseline homólogo, si "
+    "existe -- para saber si la desviación es real frente a su "
+    "comportamiento habitual, no solo frente al límite de alarma.\n"
+    "2. Otros indicadores calculados del mismo activo (bajo su nodo "
+    "'Indicators') que puedan compartir entradas físicas con el KPI en "
+    "alerta o mostrar una tendencia correlacionada -- una desviación "
+    "calculada suele dejar huella en más de un indicador del mismo equipo, "
+    "no solo en el que disparó la alerta. De cada indicador, quédate solo "
+    "con su resultado propio (atributos como 'Calculation', 'Reference', "
+    "'Deviation', 'Inhibition', o nombres del tipo 'Theoretical <algo>'); "
+    "ignora sus atributos que sean simplemente una copia de una magnitud "
+    "física de entrada a su fórmula (p. ej. Flow, Head, Pump Speed, Active "
+    "Power, Fluid Density, Gravity Acceleration) -- si esa magnitud es "
+    "relevante, pídela una sola vez desde su fuente física (ver punto 3), "
+    "no la repitas por cada indicador que la use como entrada.\n"
+    "3. Los meters/atributos físicos que alimentan directamente el cálculo "
+    "de esas variables. Si el mismo activo expone la misma magnitud física "
+    "en más de un sitio del árbol -- por ejemplo, un atributo directo del "
+    "elemento, un 'Value' bajo su rama 'Meters', o el mismo nombre repetido "
+    "como entrada de varios indicadores distintos -- con nombre o unidad "
+    "coincidentes, elige solo uno: probablemente sea la misma fuente de "
+    "datos vista desde varios puntos del AF, y pedir más de una copia no "
+    "aporta información nueva.\n"
+    "4. Contexto del nivel superior (el elemento que agrupa al activo) solo "
+    "si aporta una causa compartida plausible (p. ej. una condición aguas "
+    "arriba) o permite comparar con un activo equivalente.\n"
+    "No selecciones una variable solo porque aparece en los datos: cada una "
+    "debe tener una razón de causalidad o comparación plausible con la "
+    "desviación concreta, para no acumular variables irrelevantes."
 )
 
 _DATA_MODEL_SECTION = (
@@ -133,12 +165,63 @@ _DATA_MODEL_SECTION = (
     "inventar un nombre de atributo o una ruta que no existe."
 )
 
+_DIAGNOSIS_OBJECTIVE_SECTION = (
+    "Tienes los datos históricos de las variables de proceso que tú mismo "
+    "elegiste en la interacción anterior para investigar esta desviación. Tu "
+    "objetivo ahora es identificar qué ha provocado la desviación concreta "
+    "descrita más abajo, apoyándote únicamente en estos datos y en tu "
+    "conocimiento del dominio de depuración de aguas residuales y bombeo.\n\n"
+    "Devuelve entre 2 y 3 causas raíz plausibles, ordenadas de mayor a menor "
+    "probabilidad según la evidencia de los datos -- no rellenes hasta 3 si "
+    "los datos solo sustentan una o dos con confianza razonable. Para cada "
+    "causa, incluye una acción de resolución concreta que un ingeniero de "
+    "procesos pueda ejecutar."
+)
+
+_DIAGNOSIS_DATA_SECTION_INTRO = (
+    "A continuación tienes la serie histórica de cada variable en la ventana "
+    "previa a la desviación, en la resolución configurada. Cada entrada "
+    "incluye el elemento del AF de origen (mismo 'element' que elegiste en "
+    "la interacción anterior), la unidad de ingeniería, y la lista de pares "
+    "timestamp/valor en UTC.\n\n"
+    "Algunas variables no tienen historización real (son atributos estáticos "
+    "o de configuración, no series temporales) -- se marcan explícitamente "
+    "como tales en vez de mostrarte una lista de valores; no las trates "
+    "como una medición real. Algunos puntos pueden venir como un estado "
+    "digital (texto) en vez de un número -- por ejemplo, cuando el cálculo "
+    "no pudo evaluarse en ese instante; interprétalo como información de "
+    "contexto (el KPI no estaba disponible en ese momento), no como un "
+    "fallo que debas explicar."
+)
+
+_DIAGNOSIS_FINAL_INSTRUCTION = (
+    "Devuelve tu respuesta como un único objeto JSON válido con exactamente "
+    "una clave, \"root_causes\": un array de 2 o 3 objetos (nunca menos de 2 "
+    "ni más de 3), cada uno con exactamente tres claves:\n"
+    "- \"cause\": descripción breve de la causa raíz.\n"
+    "- \"explanation\": por qué los datos respaldan esta causa (referencia "
+    "las variables y la tendencia concreta que la sustentan).\n"
+    "- \"recommended_action\": acción de resolución concreta para esta causa.\n"
+    "El array debe estar ordenado de mayor a menor probabilidad (el primer "
+    "elemento es la causa más probable).\n"
+    "Responde únicamente con ese JSON, sin bloques de código markdown (```), "
+    "sin texto introductorio, resumen ni explicación adicional antes o después."
+)
+
+
 _FINAL_INSTRUCTION = (
-    "Devuelve la lista de atributos cuyos datos requieres consultar para "
-    "identificar la causa raíz de la desviación de la que nos informa la "
-    "notificación, en formato JSON válido: un array de objetos, cada uno con "
-    "exactamente dos claves, \"element\" (nombre/ruta del elemento) y "
-    "\"piApiPath\" (el piApiPath exacto tal como aparece en los datos del AF). "
+    "Devuelve tu respuesta como un único objeto JSON válido con exactamente "
+    "dos claves:\n"
+    "- \"variables\": un array de objetos, cada uno con exactamente dos "
+    "claves, \"element\" (nombre/ruta del elemento) y \"piApiPath\" (el "
+    "piApiPath exacto tal como aparece en los datos del AF) -- los atributos "
+    "cuyos datos requieres consultar para identificar la causa raíz.\n"
+    "- \"missing_variables\": un array de strings en lenguaje natural "
+    "describiendo qué tipo de variable adicional, que no aparece en los "
+    "datos del AF proporcionados, ayudaría a precisar el diagnóstico. Array "
+    "vacío si no falta ninguna. Esta clave es solo para informar al usuario "
+    "y no se usará para consultar datos, así que no inventes un piApiPath "
+    "para ella.\n"
     "Responde únicamente con ese JSON, sin bloques de código markdown (```), "
     "sin texto introductorio, resumen ni explicación adicional antes o después."
 )
@@ -187,16 +270,24 @@ def _describe_threshold(threshold_type: str) -> str:
     return "un umbral no especificado"
 
 
-_MARKDOWN_FENCE_RE = re.compile(r"^```(?:json)?\s*\n(.*)\n```$", re.DOTALL)
-
-
-def _strip_markdown_fence(text: str) -> str:
-    """Quita el bloque ```json ... ``` si el modelo lo añade pese a que
-    _FINAL_INSTRUCTION se lo prohíbe explícitamente (visto en pruebas reales:
-    el guardarraíl no es infalible, así que el parseo del Step 5 debe ser
-    tolerante a este caso concreto en vez de fallar)."""
-    match = _MARKDOWN_FENCE_RE.match(text.strip())
-    return match.group(1) if match else text
+def _extract_json_payload(text: str) -> str:
+    """Extrae el JSON de la respuesta del modelo (Step 4), tolerando que venga
+    envuelto en un bloque ```json ... ``` o con texto alrededor, pese a que
+    _FINAL_INSTRUCTION pide explícitamente que no sea así (visto en pruebas
+    reales: el guardarraíl no es infalible). En vez de exigir que el texto
+    completo sea *exactamente* un bloque de fence, busca las llaves/corchetes
+    más externos del primer objeto o array JSON que aparezca -- así no
+    depende del formato exacto con el que el modelo decida envolver la
+    respuesta (con fence, sin fence, o con texto antes/después)."""
+    candidates = [i for i in (text.find("{"), text.find("[")) if i != -1]
+    if not candidates:
+        return text
+    start = min(candidates)
+    closer = "}" if text[start] == "{" else "]"
+    end = text.rfind(closer)
+    if end == -1 or end < start:
+        return text
+    return text[start:end + 1]
 
 
 def _parse_detection_time(payload: dict) -> tuple[datetime, datetime]:
@@ -327,6 +418,102 @@ def build_analysis_context(payload: dict, af_context: dict) -> dict:
     }
 
 
+_EPOCH_MARKER = "1970-01-01T00:00:00Z"
+
+
+def _label_historical_data(variables: list[dict], raw_data) -> list[dict]:
+    """Combina las variables elegidas en el Step 4 con los valores del Step 5
+    en una lista etiquetada por elemento, lista para incluir en el prompt del
+    Step 6.
+
+    Simplifica los estados digitales (PI los representa como un dict
+    {"Name": ..., "Value": <código>, "IsSystem": true}, p.ej. "No Result"
+    cuando el cálculo no pudo evaluarse) a solo su nombre, y marca como sin
+    historización real las series compuestas enteramente por el timestamp
+    1970-01-01T00:00:00Z (visto en atributos "Reference"/estáticos del AF --
+    no son mediciones reales, PI simplemente no tiene nada que devolver).
+    """
+    if not isinstance(raw_data, dict):
+        log.warning("Step 6: los datos históricos no son un diccionario parseado; se omite el etiquetado.")
+        return []
+
+    labeled = []
+    for var in variables:
+        pi_path = var.get("piApiPath")
+        content = (raw_data.get(pi_path) or {}).get("Content", {})
+        items = content.get("Items", [])
+
+        if items and all(it.get("Timestamp") == _EPOCH_MARKER for it in items):
+            labeled.append({
+                "element": var.get("element"),
+                "piApiPath": pi_path,
+                "values": "sin historización real (atributo estático/de configuración, no una medición)",
+            })
+            continue
+
+        uom = ""
+        values = []
+        for it in items:
+            raw_value = it.get("Value")
+            if isinstance(raw_value, dict):
+                raw_value = raw_value.get("Name", str(raw_value))
+            uom = it.get("UnitsAbbreviation") or uom
+            values.append({"timestamp": it.get("Timestamp"), "value": raw_value})
+
+        labeled.append({
+            "element": var.get("element"),
+            "piApiPath": pi_path,
+            "uom": uom,
+            "values": values,
+        })
+
+    return labeled
+
+
+def build_diagnosis_context(
+    context: dict, variables: list[dict], historical_data: dict, missing_variables: list[str],
+) -> str:
+    """Step 6: construye el mensaje con los datos históricos etiquetados para
+    que el modelo produzca el diagnóstico final.
+
+    Args:
+        context: resultado de build_analysis_context() (Step 3) -- se
+                 reutiliza su "summary" para no repetir la descripción de la
+                 alerta.
+        variables: la lista {"element", "piApiPath"} que el modelo eligió en
+                   el Step 4.
+        historical_data: el dict que devuelve pi_client.fetch_historical_data
+                          (Step 5); se usa su clave "data".
+        missing_variables: las variables que el modelo señaló como no
+                            disponibles en el Step 4 (ver _FINAL_INSTRUCTION)
+                            -- se incluyen como limitación conocida del
+                            diagnóstico, no se inventan datos para ellas.
+
+    Returns:
+        El mensaje de usuario completo para la llamada al modelo del Step 6
+        (se envía junto con SYSTEM_PROMPT, igual que el Step 4).
+    """
+    labeled_data = _label_historical_data(variables, historical_data.get("data"))
+    data_json = json.dumps(labeled_data, ensure_ascii=False, indent=2)
+
+    limitations_note = ""
+    if missing_variables:
+        limitations_note = (
+            "\n\nLimitaciones conocidas: en la interacción anterior se identificó que "
+            "estas variables ayudarían a precisar el diagnóstico pero no estaban "
+            "disponibles en el Asset Framework proporcionado: "
+            f"{', '.join(missing_variables)}. Ten esto en cuenta al valorar tu "
+            "confianza en cada causa raíz -- no las inventes ni asumas su valor."
+        )
+
+    return (
+        f"1. Objetivo de la interacción\n\n{_DIAGNOSIS_OBJECTIVE_SECTION}\n\n"
+        f"2. Resumen de la alerta\n\n{context['summary']}{limitations_note}\n\n"
+        f"3. Datos históricos\n\n{_DIAGNOSIS_DATA_SECTION_INTRO}\n\n{data_json}\n\n"
+        f"{_DIAGNOSIS_FINAL_INSTRUCTION}"
+    )
+
+
 async def run_rca_analysis(notification_payload: dict) -> None:
     """Punto de entrada principal del agente RCA.
 
@@ -397,11 +584,33 @@ async def run_rca_analysis(notification_payload: dict) -> None:
     # Step 5: Obtener datos históricos de esas variables vía MCP Server
     # -------------------------------------------------------------------------
     try:
-        variables = json.loads(_strip_markdown_fence(variables_response))
+        parsed_response = json.loads(_extract_json_payload(variables_response))
     except json.JSONDecodeError as exc:
         log.error("Step 5: la respuesta del modelo no es JSON válido (%s): %r", exc, variables_response)
         log.info("AGENTE RCA: análisis interrumpido en el Step 5. Step 6 no ejecutado.")
         return
+
+    # El esquema esperado es un objeto {"variables": [...], "missing_variables": [...]}
+    # (ver _FINAL_INSTRUCTION), pero se tolera también un array plano por si el
+    # modelo ignora el esquema nuevo -- mismo motivo que _extract_json_payload:
+    # el guardarraíl del prompt no es infalible.
+    if isinstance(parsed_response, dict):
+        variables = parsed_response.get("variables", [])
+        missing_variables = parsed_response.get("missing_variables") or []
+    else:
+        variables = parsed_response
+        missing_variables = []
+
+    if missing_variables:
+        # Solo para informar al usuario -- no se usa para consultar PI, así se
+        # evita meter ruido externo (nombres de variable sin piApiPath real)
+        # en el bucket del Step 5. Cuando se implemente el Step 6, esto debería
+        # incluirse en el diagnóstico final presentado al usuario.
+        log.info(
+            "Step 4: el modelo indica que estas variables adicionales (no "
+            "disponibles en el AF proporcionado) mejorarian el diagnostico: %s",
+            missing_variables,
+        )
 
     try:
         historical_data = await pi_client.fetch_historical_data(variables, context["detected_at_utc"])
@@ -423,16 +632,36 @@ async def run_rca_analysis(notification_payload: dict) -> None:
     log.info(historical_data["data"])
 
     # -------------------------------------------------------------------------
-    # TODO — Step 6: el modelo analiza los datos y produce el diagnóstico final
+    # Step 6: el modelo analiza los datos y produce el diagnóstico final
     # -------------------------------------------------------------------------
-    # Se volverá a llamar a llm_client.generate(), esta vez con los datos
-    # históricos del Step 5. El modelo analizará las tendencias y correlaciones
-    # entre variables y producirá:
-    #   - Lista de posibles causas raíz, ordenadas por probabilidad
-    #   - Explicación de por qué cada causa es plausible
-    #   - Recomendación de acciones correctivas para cada causa
-    #
-    # El resultado se presentará al usuario (log, notificación, interfaz web...)
-    # -------------------------------------------------------------------------
+    diagnosis_prompt = build_diagnosis_context(context, variables, historical_data, missing_variables)
+    log.info("Contexto construido para el modelo (Step 6):")
+    log.info(diagnosis_prompt)
 
-    log.info("AGENTE RCA: Steps 2-5 completados. Step 6 pendiente de implementar.")
+    try:
+        diagnosis_response = llm_client.generate(SYSTEM_PROMPT, diagnosis_prompt)
+    except llm_client.LLMGenerationError as exc:
+        log.error("Step 6 fallido: %s", exc)
+        log.info("AGENTE RCA: análisis interrumpido en el Step 6.")
+        return
+    log.info("Respuesta del modelo (Step 6) -- diagnóstico:")
+    log.info(diagnosis_response)
+
+    try:
+        diagnosis = json.loads(_extract_json_payload(diagnosis_response))
+    except json.JSONDecodeError as exc:
+        log.error("Step 6: la respuesta del modelo no es JSON válido (%s): %r", exc, diagnosis_response)
+        log.info("AGENTE RCA: análisis interrumpido en el Step 6.")
+        return
+
+    # TODO: presentar esto al usuario final (interfaz web, notificación...) en
+    # vez de solo dejarlo en el log -- pendiente de decidir el canal de salida.
+    log.info("=" * 60)
+    log.info("AGENTE RCA: DIAGNÓSTICO FINAL")
+    for i, cause in enumerate(diagnosis.get("root_causes", []), 1):
+        log.info("%d. %s", i, cause.get("cause"))
+        log.info("   Explicación: %s", cause.get("explanation"))
+        log.info("   Acción recomendada: %s", cause.get("recommended_action"))
+    log.info("=" * 60)
+
+    log.info("AGENTE RCA: análisis completo (Steps 1-6).")

@@ -52,6 +52,30 @@ class PIQueryError(Exception):
     """No se pudo obtener el histórico de PI (bucket o query_by_path fallaron)."""
 
 
+def _parse_batch_json(raw_text: str) -> dict:
+    """Extrae el diccionario {piApiPath: {...}} embebido en el texto que
+    devuelve query_by_path (aveva-pi-mcp).
+
+    La tool antepone una cabecera legible ("📊 Consulta Batch...", "WebIDs
+    resueltos...", "Status: NNN") antes del JSON real de la respuesta (ver
+    query_attributes_batch en aveva_pi_mcp/server.py) -- json.loads(raw_text)
+    a secas siempre falla por esa cabecera. Además, PI Web API's /batch puede
+    devolver 207 Multi-Status (éxito parcial) en vez de 200 aunque cada
+    sub-respuesta interna sea válida; aveva-pi-mcp lo etiqueta igualmente
+    como "❌ Error en la petición" pese a que el JSON que sigue es utilizable,
+    así que se prueban ambos marcadores en vez de asumir que solo el de
+    éxito (200) puede traer datos reales."""
+    for marker in ("Petición exitosa\n\n", "Error en la petición\n"):
+        idx = raw_text.find(marker)
+        if idx == -1:
+            continue
+        try:
+            return json.loads(raw_text[idx + len(marker):])
+        except json.JSONDecodeError:
+            continue
+    return {}
+
+
 def _dedupe_pi_paths(variables: list[dict]) -> list[str]:
     """Extrae los piApiPath de la lista del Step 4 y elimina duplicados.
 
@@ -117,8 +141,11 @@ async def fetch_historical_data(variables: list[dict], detected_at_utc: str) -> 
     Returns:
         {"bucket_id": ..., "start_date": ..., "end_date": ..., "piApiPaths":
         [...consultados con éxito...], "excluded_piApiPaths": [...no
-        resolvieron a WebID...], "data": <resultado de query_by_path,
-        parseado si es JSON>} listo para incluirse en el mensaje del Step 6.
+        resolvieron a WebID...], "data": {piApiPath: {"Content": {"Items":
+        [{"Timestamp":..., "Value":...}, ...]}}, ...} -- dict parseado del
+        JSON embebido en la respuesta de query_by_path (ver
+        _parse_batch_json); si el parseo falla, el texto crudo tal cual.
+        Listo para pasarse a agent.build_diagnosis_context() en el Step 6.
 
     Raises:
         PIQueryError: si la llamada al MCP Server falla, o si ningún
@@ -156,9 +183,9 @@ async def fetch_historical_data(variables: list[dict], detected_at_utc: str) -> 
     except Exception as exc:
         raise PIQueryError(f"Fallo consultando aveva-pi-mcp: {exc}") from exc
 
-    try:
-        data = json.loads(raw_text)
-    except json.JSONDecodeError:
+    data = _parse_batch_json(raw_text)
+    if not data:
+        log.warning("No se pudo extraer el JSON de la respuesta de query_by_path; se guarda el texto crudo.")
         data = raw_text
 
     return {
