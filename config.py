@@ -79,7 +79,15 @@ AVEVA_PI_MCP_DIR: str = os.environ.get("AVEVA_PI_MCP_DIR") or r"C:\MCPServer\MCP
 
 # Ventana de lookback (horas antes de StartTime) para las consultas del Step 5.
 # Las alertas son desviaciones de KPI (degradación gradual), así que se mira
-# hacia atrás desde la detección, nunca hacia adelante.
+# hacia atrás desde la detección, nunca hacia adelante. El valor por defecto se
+# mantiene deliberadamente corto: (1) basta para diagnosticar este tipo de
+# desviación gradual -- validado en pruebas reales, donde la tendencia
+# relevante ya es visible en las últimas ~14h; y (2) al ser mucho menor que el
+# ciclo con el que se provocan las desviaciones de prueba en este entorno de
+# demo, el modelo del Step 6 nunca recibe suficiente histórico como para
+# notar esa periodicidad -- no hace falta pedírselo en el prompt si nunca ve
+# los datos que la revelarían. Evitar subir este valor sin pensarlo (p.ej. a
+# semanas/meses) por ese motivo.
 PI_LOOKBACK_HOURS: int = int(os.environ.get("PI_LOOKBACK_HOURS", "24"))
 
 # Resolución temporal (intervalo entre puntos) para las consultas del Step 5.
