@@ -5,8 +5,13 @@ llm_client.py — Capa de abstracción sobre el proveedor de LLM (Gemini / Anthr
   Aísla al resto del agente de qué proveedor de IA se usa para razonar.
   Expone una única función, generate(), que siempre recibe un system prompt
   y un mensaje de usuario en texto plano, y siempre devuelve texto plano.
-  Los Steps 3 y 5 de agent.py llaman a esta función sin saber si por debajo
+  Los Steps 4 y 6 de agent.py llaman a esta función sin saber si por debajo
   hay Gemini o Claude.
+
+  Nota: generate() nunca pasa el parámetro "tools" a ninguno de los dos
+  proveedores. El modelo solo ve texto y devuelve texto; quien llama a los
+  MCP servers es el código Python (graph_client.py, pi_client.py). Esto es
+  un workflow, no un agente -- ver CLAUDE.md, "Terminología".
 
 ¿Por qué existe esta capa?
   Anthropic y Google no comparten un estándar de API: cada uno define su

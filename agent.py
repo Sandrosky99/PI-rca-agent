@@ -602,10 +602,11 @@ async def run_rca_analysis(notification_payload: dict) -> None:
         missing_variables = []
 
     if missing_variables:
-        # Solo para informar al usuario -- no se usa para consultar PI, así se
-        # evita meter ruido externo (nombres de variable sin piApiPath real)
-        # en el bucket del Step 5. Cuando se implemente el Step 6, esto debería
-        # incluirse en el diagnóstico final presentado al usuario.
+        # No se usa para consultar PI, así se evita meter ruido externo
+        # (nombres de variable sin piApiPath real) en el bucket del Step 5. Sí
+        # se arrastra al Step 6 vía build_diagnosis_context(), como limitación
+        # declarada del diagnóstico: el modelo modula su confianza en vez de
+        # inventar valores para esas variables.
         log.info(
             "Step 4: el modelo indica que estas variables adicionales (no "
             "disponibles en el AF proporcionado) mejorarian el diagnostico: %s",
