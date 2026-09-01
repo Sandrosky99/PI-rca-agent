@@ -172,11 +172,29 @@ Primera llamada al LLM. Devuelve un JSON con dos claves:
 
 `missing_variables` es informativo: describe qué variable adicional ayudaría al diagnóstico pero no existe en el AF. No se usa para consultar PI, pero sí se arrastra al Step 6 como limitación declarada, para que el modelo module su confianza en vez de inventar datos.
 
+**El modelo propone; el código autoriza.** El prompt le dice que use solo los `piApiPath` del AF, pero eso es una instrucción, no una garantía. Antes de consultar nada, `_validate_selected_variables()` comprueba la respuesta contra la lista de atributos que el Step 2 puso delante del modelo:
+
+```
+Variables que existen en el AF  (Step 2)
+            ↓
+El modelo selecciona algunas   (Step 4)
+            ↓
+El código comprueba que siguen perteneciendo a la lista original
+            ↓
+Solo entonces se consulta PI   (Step 5)
+```
+
+Se descarta lo que no esté en esa lista, lo duplicado y las claves no previstas; si el modelo reescribió una ruta con otro espaciado o capitalización, se sustituye por la forma exacta del AF antes de enviarla. También se aplica un tope de variables (`MAX_SELECTED_VARIABLES`). Todo lo descartado queda en el log con su motivo.
+
+Descartar es preferible a abortar: una ruta inventada no debería invalidar las que sí eran buenas. El análisis solo se corta si no sobrevive ninguna variable.
+
+> **Esta comprobación no sustituye al reintento por WebID del Step 5.** Son dos fallos distintos: aquí se detecta que el modelo se ha inventado una ruta; en el Step 5 se detecta que una ruta legítima del grafo AF ya no existe en PI Web API. Lo segundo solo se puede ver consultando, y de hecho ocurrió en la ejecución del 2026-08-20.
+
 ### Step 5 — Obtener los datos históricos de PI ✅
 
 Se lanza `aveva-pi-mcp`, se crea un bucket temporal y se consultan todos los paths en una sola llamada:
 
-- **Ventana:** 24 h hacia atrás desde la detección de la alerta (configurable con `PI_LOOKBACK_HOURS`). Se mira siempre hacia atrás: son degradaciones graduales de KPI, no picos instantáneos.
+- **Ventana:** 24 h hacia atrás desde la detección de la alerta (`PI_LOOKBACK_HOURS`). Se mira siempre hacia atrás: son degradaciones graduales de KPI, no picos instantáneos. Es un **punto de partida**: el modelo puede pedir más en el Step 6 (ver abajo).
 - **Resolución:** 15 minutos, uniforme para todas las variables, para que los valores sean correlacionables directamente por timestamp.
 
 Si algún `piApiPath` no resuelve a WebID (existe en el grafo pero ya no en PI Web API), se excluye y se reintenta con el resto en vez de perder el lote entero.
@@ -198,6 +216,40 @@ Segunda y última llamada al LLM, con las series ya etiquetadas por elemento y u
 ```
 
 Entre 2 y 3 causas, ordenadas de mayor a menor probabilidad. El prompt pide explícitamente que no rellene hasta 3 si los datos solo sustentan una o dos con confianza razonable.
+
+#### Si la ventana no le encaja, puede pedir otra
+
+Un golpe de ariete se ve en minutos, una obstrucción en horas, el desgaste en semanas: una ventana fija sirve mal a todos. Pero elegirla *antes* de ver los datos obligaría al modelo a adivinar. Por eso la pide **después**, junto al diagnóstico, eligiendo de un catálogo cerrado:
+
+```json
+"history_request": {
+  "needed": true,
+  "window_option": "7d",
+  "trend_start": "",
+  "reason": "La eficiencia ya viene degradada desde el inicio de la ventana; sin ver antes no puedo distinguir desgaste progresivo de un cambio operativo puntual."
+}
+```
+
+| id | Ventana | Resolución | Puntos por variable |
+|---|---|---|---|
+| `2h` | 2 horas | 1 minuto | 120 |
+| `8h` | 8 horas | 5 minutos | 96 |
+| `24h` | 24 horas | 15 minutos | 96 |
+| `2d` | 2 días | 30 minutos | 96 |
+| `7d` | 7 días | 2 horas | 84 |
+| `14d` | 14 días | 3 horas | 112 |
+
+**La resolución es proporcional a la ventana**, así que el número de puntos —y con él el tamaño del prompt— se mantiene aproximadamente constante se elija lo que se elija. Ofrecerle un catálogo en vez de dejarle proponer horas libres hace visible ese intercambio: el modelo *ve* que ganar histórico cuesta detalle, en lugar de que la resolución cambie por debajo sin que lo sepa.
+
+**Hacia abajo también.** Las opciones cortas existen porque hay fallos que a 15 minutos son invisibles: cavitación, golpe de ariete, ciclado anómalo de arranques, oscilación de una válvula.
+
+> ⚠️ **Estrechar la ventana puede recortar la evidencia**, así que no es simétrico a ampliarla. Si el modelo elige una ventana más corta, debe indicar en `trend_start` cuándo arranca el cambio de tendencia, y el código comprueba que la ventana pedida lo sigue cubriendo. Si no lo cubre, se le concede la más corta que sí lo haga; si no aporta `trend_start`, no se estrecha en absoluto.
+
+**Requisito en PI: el atributo `step`.** Las consultas devuelven valores a intervalo fijo. PI resuelve cada punto según el `step` del PI Point: con `step=0` (señal continua — caudal, presión, temperatura) **interpola** entre los valores archivados; con `step=1` (señal escalonada — estados, consignas, digitales) devuelve el **último valor almacenado**, mantenido. Siempre con su timestamp. Que ese atributo esté bien configurado es parte del modelado de datos en PI y afecta por igual a cualquier aplicación que explote el histórico, **PI Vision incluida** — no es algo específico de este workflow ni algo que deba compensarse aquí.
+
+El código decide qué concede y cuántas veces (`MAX_HISTORY_ADJUSTMENTS`, 1 por defecto). El modelo debe diagnosticar igualmente con lo que tiene — la petición es adicional, nunca sustitutiva. Con los valores por defecto, la primera consulta son 24 h a 15 min, idéntica a la de siempre.
+
+> **Modo demostración.** En este entorno las desviaciones de prueba se generan con un ciclo periódico. Con `DEMO_MODE=true` se avisa al modelo de que un patrón repetitivo puede ser un artefacto del generador, para que no lo proponga como causa. Antes esto se resolvía recortando la ventana para que no llegase a verlo — ocultar evidencia para dirigir el diagnóstico. En producción debe quedarse en `false`.
 
 > ⚠️ **El diagnóstico solo se escribe en el log.** Falta decidir el canal de salida real (correo, interfaz web, o anotación del event frame en PI). Es la decisión pendiente principal del proyecto.
 
@@ -307,8 +359,13 @@ Solo se exige la clave del proveedor realmente seleccionado, no ambas.
 | `PI_LOOKBACK_HOURS` | No | Horas antes de la detección para la ventana de consulta | `24` |
 | `PI_QUERY_INTERVAL_VALUE` | No | Resolución temporal de las series (valor) | `15` |
 | `PI_QUERY_INTERVAL_UNIT` | No | Resolución temporal de las series (unidad) | `minutes` |
+| `PI_MAX_LOOKBACK_HOURS` | No | Techo absoluto de la ventana cuando el modelo pide ampliarla (14 días) | `336` |
+| `MAX_HISTORY_ADJUSTMENTS` | No | Ampliaciones de ventana permitidas por alerta. `0` desactiva el mecanismo. | `1` |
+| `PI_TARGET_POINTS_PER_VARIABLE` | No | Puntos por variable a los que se ajusta la resolución al ampliar la ventana | `120` |
+| `DEMO_MODE` | No | Avisa al modelo de que las desviaciones del entorno son sintéticas y periódicas. **En producción, `false`.** | `false` |
+| `MAX_SELECTED_VARIABLES` | No | Tope de variables que se aceptan de la selección del modelo. Si se supera, se conservan las primeras (el prompt pide orden de prioridad) y se descartan las sobrantes con un WARNING. Calibrado contra la ejecución del 2026-08-20, donde el modelo eligió 30 variables legítimas de 164 disponibles. | `40` |
 
-> ⚠️ **`PI_LOOKBACK_HOURS` es corto a propósito.** Además de ser suficiente para diagnosticar una degradación gradual, mantiene al modelo por debajo del ciclo con el que se provocan las desviaciones de prueba en este entorno de demo, evitando que confunda esa periodicidad artificial con una causa real. Conviene no subirlo sin tener esto en cuenta.
+> **`PI_LOOKBACK_HOURS` es un punto de partida, no un límite.** Basta para una degradación gradual y mantiene el prompt del Step 6 en un tamaño razonable; si el modelo necesita más, lo pide. Para el problema de la periodicidad sintética del entorno de demo, la solución es `DEMO_MODE`, no recortar la ventana.
 
 ---
 

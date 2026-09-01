@@ -77,24 +77,103 @@ AFKG_GRAPH_MCP_DIR: str = os.environ.get("AFKG_GRAPH_MCP_DIR") or r"C:\MCPServer
 # Carpeta del proyecto aveva-pi-mcp (Step 5: datos históricos de PI Web API).
 AVEVA_PI_MCP_DIR: str = os.environ.get("AVEVA_PI_MCP_DIR") or r"C:\MCPServer\MCP Server"
 
-# Ventana de lookback (horas antes de StartTime) para las consultas del Step 5.
-# Las alertas son desviaciones de KPI (degradación gradual), así que se mira
-# hacia atrás desde la detección, nunca hacia adelante. El valor por defecto se
-# mantiene deliberadamente corto: (1) basta para diagnosticar este tipo de
-# desviación gradual -- validado en pruebas reales, donde la tendencia
-# relevante ya es visible en las últimas ~14h; y (2) al ser mucho menor que el
-# ciclo con el que se provocan las desviaciones de prueba en este entorno de
-# demo, el modelo del Step 6 nunca recibe suficiente histórico como para
-# notar esa periodicidad -- no hace falta pedírselo en el prompt si nunca ve
-# los datos que la revelarían. Evitar subir este valor sin pensarlo (p.ej. a
-# semanas/meses) por ese motivo.
+# Ventana de lookback (horas antes de StartTime) para la PRIMERA consulta del
+# Step 5. Las alertas son desviaciones de KPI (degradación gradual), así que se
+# mira hacia atrás desde la detección, nunca hacia adelante.
+#
+# 24 h es un punto de partida, no un límite: basta para diagnosticar una
+# degradación gradual -- validado en pruebas reales, donde la tendencia
+# relevante ya es visible en las últimas ~14 h -- y mantiene el prompt del
+# Step 6 en un tamaño razonable. Si el modelo, ya con los datos delante,
+# concluye que necesita más histórico, puede pedirlo y el workflow repite los
+# Steps 5-6 con una ventana mayor (ver MAX_HISTORY_ADJUSTMENTS).
+#
+# NOTA (2026-08-31): hasta esta fecha, este valor se justificaba en parte por
+# mantener al modelo por debajo del ciclo con el que se generan las
+# desviaciones sintéticas del entorno de demo, para que no detectase esa
+# periodicidad. Eso era ocultar evidencia para dirigir el diagnóstico, y era
+# incompatible con dejar que la ventana se amplíe. Se ha sustituido por
+# DEMO_MODE, que se lo dice al modelo de forma explícita en vez de escondérselo.
 PI_LOOKBACK_HOURS: int = int(os.environ.get("PI_LOOKBACK_HOURS", "24"))
+
+# Techo absoluto de la ventana. El modelo puede pedir más histórico, pero el
+# código decide cuánto concede: la petición se recorta a este valor. Misma
+# filosofía que la puerta de autorización del Step 4 -- el modelo propone, el
+# código autoriza. 336 h = 14 días.
+PI_MAX_LOOKBACK_HOURS: int = int(os.environ.get("PI_MAX_LOOKBACK_HOURS", "336"))
+
+# Cuántas veces se permite repetir los Steps 5-6 con otra ventana, a petición
+# del modelo. Cuenta los reajustes en las dos direcciones: ampliaciones y
+# estrechamientos. Cada uno cuesta una consulta a PI (barata) y una llamada al
+# LLM (no tanto), así que por defecto se concede uno solo.
+# 0 desactiva el mecanismo y deja el comportamiento fijo de antes.
+MAX_HISTORY_ADJUSTMENTS: int = int(os.environ.get("MAX_HISTORY_ADJUSTMENTS", "1"))
+
+# Puntos por variable a los que se ajusta la resolución de cada ventana del
+# catálogo. Ventana y resolución se mueven juntas: ampliar manteniendo los
+# 15 min dispararía el tamaño del prompt (7 días a 15 min son ~672 puntos por
+# variable, y son decenas de variables). Con este objetivo, 7 días salen a 2 h
+# y ~84 puntos -- menos que la ventana corta de 24 h a 15 min -- y 2 h salen a
+# 1 minuto. Ver derive_interval en pi_client.py.
+PI_TARGET_POINTS_PER_VARIABLE: int = int(os.environ.get("PI_TARGET_POINTS_PER_VARIABLE", "120"))
+
+# Escalera de ventanas (en horas) que se le ofrecen al modelo como catálogo
+# cerrado en el Step 6. PI_LOOKBACK_HOURS debe estar en la lista: es la que se
+# usa en la primera pasada y la que el modelo ve como "actual".
+#
+# Se le ofrece un catálogo en vez de dejarle proponer un número libre de horas
+# por dos razones: elimina las respuestas inservibles (horas como texto, o que
+# no cambian nada), y le hace visible el coste de lo que pide -- cada opción
+# lleva su resolución al lado, así que ve el intercambio entre histórico y
+# detalle. La resolución de cada opción NO se configura aquí: la deriva
+# pi_client.window_menu() con derive_interval(), para que catálogo y cálculo
+# real no puedan desalinearse.
+#
+# El catálogo va en las dos direcciones. Hacia arriba (48 h, 7 d, 14 d) para
+# tendencias lentas; hacia abajo (8 h, 2 h) para fenómenos que a 15 minutos son
+# invisibles o quedan solapados -- cavitación, golpe de ariete, ciclado anómalo
+# de arranques, oscilación de una válvula. Estrechar la ventana solo se concede
+# si sigue cubriendo el inicio de la desviación: ver _parse_history_request.
+#
+# Las opciones por encima de PI_MAX_LOOKBACK_HOURS se descartan al construir el
+# menú. La resolución de cada una NO se configura aquí (ver arriba).
+PI_WINDOW_LADDER_HOURS: list[int] = [
+    int(h) for h in (os.environ.get("PI_WINDOW_LADDER_HOURS") or "2,8,24,48,168,336").split(",")
+    if h.strip()
+]
+
+# Modo demostración. En este entorno las desviaciones de prueba se generan de
+# forma sintética con un ciclo periódico. Con DEMO_MODE=true se le advierte al
+# modelo en el prompt del Step 6, para que sepa que un patrón repetitivo puede
+# ser un artefacto del generador y no del proceso.
+#
+# Sustituye a la práctica anterior de recortar la ventana para que no llegase a
+# ver esa periodicidad: si existe un patrón en los datos, el sistema debe poder
+# verlo, y la respuesta correcta es etiquetarlo, no ocultarlo. En producción
+# debe quedarse en false.
+DEMO_MODE: bool = os.environ.get("DEMO_MODE", "").strip().lower() in ("1", "true", "yes")
 
 # Resolución temporal (intervalo entre puntos) para las consultas del Step 5.
 # Uniforme para todas las variables del bucket, para poder correlacionarlas
 # directamente por timestamp.
 PI_QUERY_INTERVAL_VALUE: int = int(os.environ.get("PI_QUERY_INTERVAL_VALUE", "15"))
 PI_QUERY_INTERVAL_UNIT: str = os.environ.get("PI_QUERY_INTERVAL_UNIT") or "minutes"
+
+# Número máximo de variables que se aceptan de la selección del Step 4.
+# El prompt pide al modelo que elija solo lo que tenga una razón de causalidad
+# plausible, pero nada se lo impide: sin tope, una respuesta que liste medio AF
+# infla el batch del Step 5 y, sobre todo, el prompt del Step 6. Si se supera,
+# se recortan las sobrantes (no se aborta) -- ver _validate_selected_variables
+# en agent.py.
+#
+# El valor está calibrado contra la ejecución real del 2026-08-20 (alerta de
+# Hydraulic Efficiency en PS20102 A03 PS02 Pump 02): de 164 atributos
+# disponibles en el AF, el modelo seleccionó 30, todas legítimas. Un tope de 20
+# habría recortado 10, incluida la comparación con la bomba hermana
+# (PS20101 Pump 01) que el propio prompt pide como prioridad 4. Se deja en 40
+# para dar margen sobre ese caso sin dejar de frenar una respuesta desbocada.
+# Es un guardarraíl de coste y ruido, no un límite del dominio.
+MAX_SELECTED_VARIABLES: int = int(os.environ.get("MAX_SELECTED_VARIABLES", "40"))
 
 
 # =============================================================================

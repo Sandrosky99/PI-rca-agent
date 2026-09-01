@@ -52,6 +52,77 @@ class PIQueryError(Exception):
     """No se pudo obtener el histórico de PI (bucket o query_by_path fallaron)."""
 
 
+# Resoluciones admisibles, de más fina a más gruesa. Se usa una escalera de
+# valores "redondos" en vez de calcular un intervalo exacto porque el resultado
+# tiene que ser legible para quien lea el prompt del Step 6 o el log: "cada 2
+# horas" se entiende, "cada 137 minutos" no.
+_INTERVAL_LADDER: list[tuple[int, str]] = [
+    (1, "minutes"), (5, "minutes"), (10, "minutes"), (15, "minutes"),
+    (30, "minutes"), (1, "hours"), (2, "hours"), (3, "hours"),
+    (6, "hours"), (12, "hours"), (1, "days"),
+]
+
+_UNIT_MINUTES = {"minutes": 1, "hours": 60, "days": 1440}
+
+
+def derive_interval(lookback_hours: int, target_points: int) -> tuple[int, str]:
+    """Elige la resolución más fina que mantenga la serie por debajo de target_points.
+
+    Ventana y resolución tienen que moverse juntas: ampliar la ventana sin
+    tocar la resolución multiplica el tamaño del prompt del Step 6 por el mismo
+    factor, y son decenas de variables. Con el objetivo por defecto (120
+    puntos), 24 h siguen saliendo a 15 min -- exactamente la resolución fija
+    que había antes, así que la primera pasada no cambia -- y 7 días salen a
+    2 h, que son menos puntos que la ventana corta.
+
+    Si ni la resolución más gruesa de la escalera baja del objetivo, devuelve
+    esa (1 día): es preferible una serie larga y gruesa a no poder consultar.
+    """
+    for value, unit in _INTERVAL_LADDER:
+        points = lookback_hours * 60 / (value * _UNIT_MINUTES[unit])
+        if points <= target_points:
+            return value, unit
+    return _INTERVAL_LADDER[-1]
+
+
+def _window_id(hours: int) -> str:
+    """Identificador corto y legible de una ventana: '24h', '7d'."""
+    if hours < 48 or hours % 24:
+        return f"{hours}h"
+    return f"{hours // 24}d"
+
+
+def window_menu(hours_ladder: list[int], target_points: int) -> list[dict]:
+    """Construye el catálogo de pares ventana/resolución que se le ofrecen al modelo.
+
+    Un catálogo cerrado en vez de un número libre de horas tiene dos ventajas:
+    elimina de raíz las respuestas inservibles (horas como texto, o menores que
+    la ventana actual), y sobre todo **le enseña al modelo el coste de lo que
+    pide**. Antes solicitaba horas y la resolución se engrosaba por debajo sin
+    que lo supiera; ahora ve que ampliar el span cuesta detalle, y puede
+    decidir con esa información delante.
+
+    Cada opción se deriva de derive_interval(), así que el catálogo y el
+    cálculo real de la resolución no pueden desalinearse.
+
+    Returns:
+        Lista de {"id", "hours", "interval": (valor, unidad), "points"},
+        ordenada de menor a mayor ventana y sin duplicados.
+    """
+    menu: list[dict] = []
+    for hours in sorted(set(hours_ladder)):
+        if hours <= 0:
+            continue
+        value, unit = derive_interval(hours, target_points)
+        menu.append({
+            "id": _window_id(hours),
+            "hours": hours,
+            "interval": (value, unit),
+            "points": int(hours * 60 / (value * _UNIT_MINUTES[unit])),
+        })
+    return menu
+
+
 def _parse_batch_json(raw_text: str) -> dict:
     """Extrae el diccionario {piApiPath: {...}} embebido en el texto que
     devuelve query_by_path (aveva-pi-mcp).
@@ -128,7 +199,12 @@ async def _query_with_retry(session: ClientSession, pi_paths: list[str], bucket_
     raise PIQueryError(f"Ningún piApiPath resolvió a WebID (excluidos: {excluded})")
 
 
-async def fetch_historical_data(variables: list[dict], detected_at_utc: str) -> dict:
+async def fetch_historical_data(
+    variables: list[dict],
+    detected_at_utc: str,
+    lookback_hours: int | None = None,
+    interval: tuple[int, str] | None = None,
+) -> dict:
     """Step 5: crea un bucket y consulta los piApiPath elegidos por el modelo en el Step 4.
 
     Args:
@@ -137,9 +213,16 @@ async def fetch_historical_data(variables: list[dict], detected_at_utc: str) -> 
         detected_at_utc: momento de detección de la alerta en UTC, ISO 8601
                          con 'Z' (context["detected_at_utc"] de
                          build_analysis_context) -- extremo final de la ventana.
+        lookback_hours: horas hacia atrás desde detected_at_utc. Por defecto
+                        config.PI_LOOKBACK_HOURS. agent.py lo sobrescribe
+                        cuando el modelo pide más histórico en el Step 6.
+        interval: (valor, unidad) de la resolución. Por defecto la configurada
+                  en PI_QUERY_INTERVAL_*. En las ampliaciones, agent.py pasa
+                  aquí el resultado de derive_interval().
 
     Returns:
-        {"bucket_id": ..., "start_date": ..., "end_date": ..., "piApiPaths":
+        {"bucket_id": ..., "start_date": ..., "end_date": ...,
+        "lookback_hours": ..., "interval": (valor, unidad), "piApiPaths":
         [...consultados con éxito...], "excluded_piApiPaths": [...no
         resolvieron a WebID...], "data": {piApiPath: {"Content": {"Items":
         [{"Timestamp":..., "Value":...}, ...]}}, ...} -- dict parseado del
@@ -155,8 +238,14 @@ async def fetch_historical_data(variables: list[dict], detected_at_utc: str) -> 
     if not pi_paths:
         raise PIQueryError("La lista de variables del Step 4 no contiene ningún piApiPath.")
 
+    if lookback_hours is None:
+        lookback_hours = config.PI_LOOKBACK_HOURS
+    if interval is None:
+        interval = (config.PI_QUERY_INTERVAL_VALUE, config.PI_QUERY_INTERVAL_UNIT)
+    interval_value, interval_unit = interval
+
     end_dt = datetime.fromisoformat(detected_at_utc.replace("Z", "+00:00"))
-    start_dt = end_dt - timedelta(hours=config.PI_LOOKBACK_HOURS)
+    start_dt = end_dt - timedelta(hours=lookback_hours)
     start_date = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     end_date = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     bucket_id = f"rca_{uuid.uuid4().hex[:8]}"
@@ -172,8 +261,8 @@ async def fetch_historical_data(variables: list[dict], detected_at_utc: str) -> 
                         "bucket_id": bucket_id,
                         "start_date": start_date,
                         "end_date": end_date,
-                        "interval_value": config.PI_QUERY_INTERVAL_VALUE,
-                        "interval_unit": config.PI_QUERY_INTERVAL_UNIT,
+                        "interval_value": interval_value,
+                        "interval_unit": interval_unit,
                     },
                 )
 
@@ -192,6 +281,8 @@ async def fetch_historical_data(variables: list[dict], detected_at_utc: str) -> 
         "bucket_id": bucket_id,
         "start_date": start_date,
         "end_date": end_date,
+        "lookback_hours": lookback_hours,
+        "interval": (interval_value, interval_unit),
         "piApiPaths": used_paths,
         "excluded_piApiPaths": excluded_paths,
         "data": data,

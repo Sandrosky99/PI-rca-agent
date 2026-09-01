@@ -200,6 +200,58 @@ Formato de respuesta esperado (`_FINAL_INSTRUCTION`): un objeto JSON con dos cla
 - Si `llm_client` agota los reintentos, se captura `LLMGenerationError` y el análisis se corta de
   forma controlada — sin dejar que el traceback se propague sin control en la background task.
 
+#### Puerta de autorización antes del Step 5 (añadida 2026-08-27)
+
+`_DATA_MODEL_SECTION` le dice al modelo, como «regla estricta», que elija solo entre los
+`piApiPath` del `af_context`. **Eso es una instrucción, no una garantía.** Antes la respuesta se
+pasaba tal cual a `query_by_path`, y el fallo aparecía tarde y mal: `aveva-pi-mcp` resuelve *todos*
+los paths a WebID antes de consultar nada, así que una sola ruta inventada tumbaba el batch entero.
+
+`_validate_selected_variables(parsed_response, af_context)` invierte la responsabilidad — **el
+modelo propone, el código autoriza**. Comprobaciones, en orden:
+
+1. **Forma de la respuesta.** Objeto de dos claves; se tolera un array plano (esquema anterior).
+   Cualquier otra cosa aborta el análisis.
+2. **Cada entrada** debe ser un objeto con un `piApiPath` de texto no vacío.
+3. **Pertenencia a la lista blanca.** `_collect_authorized_paths()` indexa todos los `piApiPath` de
+   `main_asset_context` + `nearby_elements_context`; lo que no esté ahí se descarta.
+4. **Canonicalización.** El *lookup* usa `_normalize_pi_path()` (colapsa espacios, ignora
+   mayúsculas) porque el modelo reescribe el path más a menudo de lo que admite el prompt y un
+   espacio de más no debería costar una variable legítima. **A PI siempre se le manda la cadena
+   canónica del AF**, nunca la del modelo.
+5. **Duplicados y claves no previstas** se descartan; la variable se normaliza a `element` +
+   `piApiPath`.
+6. **Tope `MAX_SELECTED_VARIABLES`** (40 por defecto): se conservan las primeras, porque
+   `_OBJECTIVE_SECTION` pide al modelo que priorice.
+
+**Calibración del tope (2026-08-27):** reproduciendo la ejecución real del 2026-08-20 contra esta
+puerta, de **164 atributos** en la lista blanca el modelo seleccionó **30, todas legítimas** — cero
+rechazos por validación. Un tope de 20 habría recortado 10, incluida la comparación con la bomba
+hermana (`PS20101 A03 PS01 Pump 01`: `Flow`, `Active Power`, `Hydraulic Effiency`), que es
+justamente la prioridad 4 que pide `_OBJECTIVE_SECTION`. De ahí el 40: margen sobre el caso real
+sin dejar de frenar una respuesta desbocada.
+
+⚠️ **Esta puerta NO sustituye a `_query_with_retry`.** Son dos fallos distintos y hay que mantener
+los dos guardarraíles:
+
+| | Ruta inventada | WebID que no resuelve |
+|---|---|---|
+| Qué pasa | El modelo se saca un `piApiPath` que no está en el AF | El path existe en el grafo AF pero ya no en PI Web API |
+| Quién lo detecta | `_validate_selected_variables` (antes de salir de `agent.py`) | `_query_with_retry` (respuesta de `aveva-pi-mcp`) |
+
+Comprobado con el caso real: `Hydraulic Effiency|Mechanic Power`, el path que tumbó el batch el
+2026-08-20, **sí está** en el `af_context` — la puerta lo autoriza correctamente y el fallo aparece
+después, en PI. El grafo y PI Web API no están sincronizados, y eso solo se puede ver consultando.
+
+**Descartar en vez de abortar es deliberado**, y es la misma política de `_query_with_retry` con los
+WebID: una ruta inventada no debería invalidar las que sí eran buenas. Solo se lanza
+`VariableSelectionError` (y se corta antes de lanzar el subproceso MCP) si no sobrevive **ninguna**
+variable, o si el `af_context` viene vacío — sin lista blanca no hay nada que autorizar.
+
+Todo lo descartado queda en el log con su motivo. Ese log es el que permite detectar si el prompt
+se está degradando: si empiezan a aparecer WARNINGs de rutas inventadas, el problema está en el
+Step 3, no aquí.
+
 ### Step 5 — Datos históricos de PI (`pi_client.py`, implementado 2026-07-28)
 
 Lanza `aveva-pi-mcp` como subproceso (MCP sobre stdio, igual que `graph_client.py`) y usa
@@ -254,10 +306,99 @@ normaliza dos casos que confundían al modelo:
   nombre, y el prompt indica explícitamente que se interpreten como contexto (el KPI no estaba
   disponible en ese instante), no como un fallo que haya que explicar.
 
-**Formato de respuesta** (`_DIAGNOSIS_FINAL_INSTRUCTION`): un objeto JSON con una única clave
-`root_causes`, array de 2 o 3 objetos con exactamente `cause`, `explanation` y
-`recommended_action`, ordenado de mayor a menor probabilidad. Se parsea con el mismo
-`_extract_json_payload()` del Step 4.
+**Formato de respuesta** (`_DIAGNOSIS_FINAL_INSTRUCTION`): un objeto JSON con dos claves —
+`root_causes` (array de 2 o 3 objetos con `cause`, `explanation` y `recommended_action`, ordenado
+por probabilidad) y `history_request` (ver abajo). Se parsea con el mismo `_extract_json_payload()`
+del Step 4.
+
+#### Ventana variable: el modelo puede pedir más histórico (añadido 2026-08-31)
+
+Una ventana fija sirve mal a problemas de escalas distintas: un golpe de ariete se ve en minutos,
+una obstrucción en horas, el desgaste en semanas. Pero hacer que el modelo elija la ventana *antes*
+de ver los datos es peor — tendría que adivinar. La solución es que la pida **después**, ya
+informado, y que el código decida si se la concede:
+
+1. El Step 6 se ejecuta con `PI_LOOKBACK_HOURS` (24 h). El prompt ahora **le dice al modelo qué
+   ventana y qué resolución está mirando** — antes solo recibía timestamps y tenía que deducirlo.
+2. Junto al diagnóstico, devuelve `history_request`:
+   `{"needed": bool, "window_option": "7d", "trend_start": "...", "reason": "..."}`. El prompt
+   exige que diagnostique **igualmente** con lo que tiene; la petición es adicional, no sustitutiva.
+3. `_parse_history_request()` valida la elección contra el catálogo (ver abajo) y, si estrecha,
+   comprueba la cobertura de la tendencia.
+4. Se repiten los Steps 5 y 6 con la ventana nueva, hasta `MAX_HISTORY_ADJUSTMENTS` veces (1 por
+   defecto; `0` desactiva el mecanismo).
+
+**Catálogo cerrado en vez de un número libre de horas.** El modelo elige un `window_option` de una
+lista, no propone una cifra. Elimina de raíz las respuestas inservibles (horas como texto, o que no
+cambian nada) y sobre todo **le hace visible el coste de lo que pide**: antes solicitaba horas y la
+resolución se engrosaba por debajo sin que lo supiera. El catálogo lo construye
+`pi_client.window_menu()` a partir de `PI_WINDOW_LADDER_HOURS`, derivando cada resolución con
+`derive_interval()`, así que catálogo y cálculo real no pueden desalinearse:
+
+| id | Ventana | Resolución | Puntos/variable |
+|---|---|---|---|
+| `2h` | 2 horas | 1 minuto | 120 |
+| `8h` | 8 horas | 5 minutos | 96 |
+| `24h` | 24 horas | 15 minutos | 96 |
+| `2d` | 2 días | 30 minutos | 96 |
+| `7d` | 7 días | 2 horas | 84 |
+| `14d` | 14 días | 3 horas | 112 |
+
+**La resolución es proporcional a la ventana**: los puntos por variable se mantienen entre 84 y 120
+en todo el rango, así que el tamaño del prompt del Step 6 es aproximadamente constante se elija lo
+que se elija. Ampliar sin tocar la resolución lo multiplicaría por el mismo factor, y son decenas
+de variables. **24 h siguen saliendo a 15 min**, así que la primera pasada es idéntica a la de
+antes: nada cambia hasta que el modelo pide algo.
+
+**El catálogo va en las dos direcciones** (añadido 2026-09-01). Hacia arriba para tendencias
+lentas; hacia abajo (`8h`, `2h`) porque hay modos de fallo que a 15 minutos son invisibles o quedan
+solapados — cavitación, golpe de ariete, ciclado anómalo de arranques, oscilación de una válvula.
+Se le ofrecen todas las opciones distintas de la actual, anotadas con su dirección («más detalle,
+menos histórico» / «más histórico, menos detalle»).
+
+⚠️ **Estrechar no es simétrico a ampliar: puede recortar la evidencia.** Ampliar solo añade
+contexto, así que se concede sin más. Estrechar exige que el modelo indique en `trend_start` cuándo
+arranca el cambio de tendencia, y `_enforce_trend_coverage()` comprueba **aritméticamente** que la
+ventana pedida lo sigue cubriendo. El modelo aporta el dato; el código hace la comprobación, no se
+fía de que la haya hecho él. Reglas:
+
+- Sin `trend_start`, con formato no interpretable, o posterior a la detección → **no se estrecha**.
+- Si la ventana pedida no cubre el inicio de la tendencia → se concede la más corta que sí lo cubra.
+- Si ninguna ventana más corta lo cubre → no se estrecha.
+- Nunca se estrecha por defecto: ante una petición sin opción utilizable se concede la ampliación
+  mínima, no un estrechamiento.
+
+**Protección contra oscilación.** El bucle recuerda las ventanas ya analizadas (`visitadas`) y
+corta si el modelo vuelve a pedir una. Con `MAX_HISTORY_ADJUSTMENTS=1` no puede darse, pero con un
+presupuesto mayor un catálogo bidireccional permitiría 24 h → 8 h → 24 h sin converger.
+
+**Sobre los datos interpolados (aclarado 2026-09-01).** `create_timeseries_bucket` devuelve valores
+a intervalo fijo, y eso es el comportamiento correcto y esperado, no una limitación que haya que
+sortear. PI resuelve cada punto según el atributo `step` del PI Point:
+
+| `step` | Tipo de señal | Qué devuelve PI en el intervalo |
+|---|---|---|
+| `0` | Continua / analógica (caudal, presión, temperatura) | Valor **interpolado** entre los archivados |
+| `1` | Escalonada (estados, consignas, digitales) | El **último valor almacenado**, mantenido |
+
+En ambos casos con su timestamp asociado. Lo que importa es que **`step` esté bien configurado en
+PI**, y esa es una responsabilidad del modelado de datos en PI, no de este workflow: afecta por
+igual a cualquier aplicación que explote esos datos, PI Vision incluida. Si una señal escalonada
+está marcada como continua, PI la interpolará mal para todo el mundo, no solo aquí.
+
+Corolario para las ventanas finas (`2h` a 1 minuto): no hay nada que verificar en el lado del
+workflow. Si los datos a 1 minuto no reflejan bien un transitorio, el sitio donde mirar es la
+configuración del PI Point, no el catálogo de ventanas.
+
+**Sigue siendo un workflow.** El modelo no controla el bucle: no decide cuántas iteraciones hay
+(`MAX_HISTORY_ADJUSTMENTS`), ni cuánta ventana obtiene (`PI_MAX_LOOKBACK_HOURS`), ni qué resolución
+(`derive_interval`). Emite una petición estructurada dentro de un paso fijo y el código la
+autoriza, recorta o deniega — la misma forma que la puerta del Step 4.
+
+**Señal de evaluación.** Con qué frecuencia el modelo pide más ventana, y si el diagnóstico cambia
+tras ampliarla, dice si `PI_LOOKBACK_HOURS` está bien dimensionado para cada tipo de alerta. Las
+peticiones se registran siempre, **incluidas las denegadas por presupuesto agotado** (WARNING
+distinto), para poder contarlas.
 
 ---
 
@@ -393,17 +534,20 @@ rca-agent/
 | `PI_LOCAL_TIMEZONE` | No | Zona horaria para logs | `Europe/Madrid` |
 | `AFKG_GRAPH_MCP_DIR` | No | Carpeta del proyecto afkg-graph-mcp (Step 2) | `C:\MCPServer\afkg-graph-mcp` |
 | `AVEVA_PI_MCP_DIR` | No | Carpeta del proyecto aveva-pi-mcp (Step 5) | `C:\MCPServer\MCP Server` |
-| `PI_LOOKBACK_HOURS` | No | Horas antes de `StartTime` para la ventana del Step 5 | `24` |
-| `PI_QUERY_INTERVAL_VALUE` | No | Resolución temporal del Step 5 (valor) | `15` |
-| `PI_QUERY_INTERVAL_UNIT` | No | Resolución temporal del Step 5 (unidad) | `minutes` |
+| `PI_LOOKBACK_HOURS` | No | Ventana de la **primera** consulta del Step 5, en horas | `24` |
+| `PI_QUERY_INTERVAL_VALUE` | No | Resolución de la primera consulta (valor) | `15` |
+| `PI_QUERY_INTERVAL_UNIT` | No | Resolución de la primera consulta (unidad) | `minutes` |
+| `PI_MAX_LOOKBACK_HOURS` | No | Techo absoluto de la ventana al ampliar (14 días) | `336` |
+| `MAX_HISTORY_ADJUSTMENTS` | No | Ampliaciones de ventana permitidas por alerta. `0` desactiva | `1` |
+| `PI_TARGET_POINTS_PER_VARIABLE` | No | Puntos por variable a los que se ajusta la resolución al ampliar | `120` |
+| `DEMO_MODE` | No | Avisa al modelo de que las desviaciones son sintéticas y periódicas | `false` |
+| `MAX_SELECTED_VARIABLES` | No | Tope de variables aceptadas de la selección del Step 4 | `40` |
 
-⚠️ **`PI_LOOKBACK_HOURS` es corto a propósito.** Dos razones, y la segunda no es obvia: (1) basta
-para diagnosticar este tipo de desviación gradual — validado en pruebas reales, donde la tendencia
-relevante ya es visible en las últimas ~14 h; y (2) al ser mucho menor que el ciclo con el que se
-provocan las desviaciones de prueba en este entorno de demo, el modelo del Step 6 nunca recibe
-suficiente histórico como para notar esa periodicidad y señalarla como causa. No hace falta
-prohibírselo en el prompt si nunca ve los datos que la revelarían. **Evitar subir este valor sin
-pensarlo** (p.ej. a semanas/meses) por ese motivo.
+**`PI_LOOKBACK_HOURS` es un punto de partida, no un límite** (cambiado el 2026-08-27; ver «Ventana
+variable» en el Step 6). Hasta esa fecha el valor se justificaba en parte por mantener al modelo
+por debajo del ciclo de las desviaciones sintéticas de la demo, para que no detectase esa
+periodicidad. Eso era ocultar evidencia para dirigir el diagnóstico, y además era incompatible con
+dejar que la ventana crezca. Lo sustituye `DEMO_MODE`, que se lo dice al modelo explícitamente.
 
 ---
 

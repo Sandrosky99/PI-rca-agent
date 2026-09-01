@@ -25,6 +25,8 @@ Flujo completo del agente:
            atributos reales del Step 2 (para que el modelo elija solo entre
            variables que existen de verdad, no nombres "de libro")
   Step 4 → El modelo decide, de esas variables reales, cuáles necesita analizar
+           (su respuesta pasa por _validate_selected_variables antes de usarse:
+           el modelo propone, el código autoriza)
   Step 5 → Obtener datos históricos de esas variables vía MCP Server
            (aveva-pi-mcp, pi_client.py), en la ventana [StartTime -
            PI_LOOKBACK_HOURS, StartTime] y resolución PI_QUERY_INTERVAL_*
@@ -175,12 +177,38 @@ _DIAGNOSIS_OBJECTIVE_SECTION = (
     "probabilidad según la evidencia de los datos -- no rellenes hasta 3 si "
     "los datos solo sustentan una o dos con confianza razonable. Para cada "
     "causa, incluye una acción de resolución concreta que un ingeniero de "
-    "procesos pueda ejecutar."
+    "procesos pueda ejecutar.\n\n"
+    "La ventana de histórico que se te entrega (indicada más abajo) es un "
+    "punto de partida, no un límite del sistema. Si al analizarla concluyes "
+    "que la causa no puede determinarse sin mirar más atrás -- porque la "
+    "tendencia ya viene degradada desde el inicio de la ventana, porque "
+    "necesitas comparar contra el comportamiento habitual del activo, o "
+    "porque el fenómeno tiene un periodo más largo que la ventana -- puedes "
+    "solicitar una ventana mayor mediante la clave history_request del "
+    "formato de respuesta, eligiendo una de las opciones concretas que se te "
+    "ofrecen allí. No propongas una ventana distinta de esas. Pídela solo si "
+    "de verdad cambiaría tu diagnóstico: cada ampliación repite la consulta a "
+    "PI y este análisis, y una ventana más larga se entrega con menos "
+    "resolución. Y pídela además de diagnosticar, nunca en lugar de hacerlo: "
+    "devuelve siempre tus mejores causas con los datos que ya tienes."
+)
+
+# Advertencia que se inyecta solo si config.DEMO_MODE está activo. Sustituye a
+# la práctica anterior de recortar la ventana para que el modelo no llegase a
+# ver la periodicidad del generador de pruebas: si el patrón está en los datos,
+# se etiqueta, no se esconde.
+_DEMO_MODE_NOTE = (
+    "\n\nAviso sobre el origen de los datos: este análisis se ejecuta sobre un "
+    "entorno de demostración, en el que las desviaciones de este activo se "
+    "provocan de forma sintética siguiendo un ciclo periódico. Si observas un "
+    "patrón repetitivo o una periodicidad regular en las series, considera "
+    "que probablemente sea un artefacto del generador de pruebas y no un "
+    "comportamiento real del proceso, y no lo propongas como causa raíz. El "
+    "resto del análisis debe ser el que harías sobre datos reales."
 )
 
 _DIAGNOSIS_DATA_SECTION_INTRO = (
-    "A continuación tienes la serie histórica de cada variable en la ventana "
-    "previa a la desviación, en la resolución configurada. Cada entrada "
+    "A continuación tienes la serie histórica de cada variable. Cada entrada "
     "incluye el elemento del AF de origen (mismo 'element' que elegiste en "
     "la interacción anterior), la unidad de ingeniería, y la lista de pares "
     "timestamp/valor en UTC.\n\n"
@@ -196,17 +224,101 @@ _DIAGNOSIS_DATA_SECTION_INTRO = (
 
 _DIAGNOSIS_FINAL_INSTRUCTION = (
     "Devuelve tu respuesta como un único objeto JSON válido con exactamente "
-    "una clave, \"root_causes\": un array de 2 o 3 objetos (nunca menos de 2 "
-    "ni más de 3), cada uno con exactamente tres claves:\n"
+    "dos claves.\n\n"
+    "1. \"root_causes\": un array de 2 o 3 objetos (nunca menos de 2 ni más "
+    "de 3), cada uno con exactamente tres claves:\n"
     "- \"cause\": descripción breve de la causa raíz.\n"
     "- \"explanation\": por qué los datos respaldan esta causa (referencia "
     "las variables y la tendencia concreta que la sustentan).\n"
     "- \"recommended_action\": acción de resolución concreta para esta causa.\n"
     "El array debe estar ordenado de mayor a menor probabilidad (el primer "
-    "elemento es la causa más probable).\n"
+    "elemento es la causa más probable).\n\n"
+    "2. \"history_request\": un objeto con exactamente tres claves, para "
+    "solicitar más histórico si lo necesitas:\n"
+    "- \"needed\": true o false. Pon false si la ventana actual te basta.\n"
+    "- \"window_option\": el identificador de UNA de las opciones del "
+    "catálogo que aparece justo debajo, copiado literalmente. No inventes "
+    "otro valor ni propongas un número de horas propio. Cadena vacía si "
+    "needed es false.\n"
+    "- \"trend_start\": instante en el que, según los datos que tienes, "
+    "empieza el cambio de tendencia de las variables que te interesan, en "
+    "UTC y formato ISO 8601 (por ejemplo \"2026-08-31T14:00:00Z\"). "
+    "**Obligatorio si eliges una ventana más corta que la actual**: se usa "
+    "para comprobar que la ventana más corta sigue cubriendo el inicio de la "
+    "desviación, y si no lo cubre se te concederá la más corta que sí lo "
+    "haga. Si no sabes situarlo, no elijas una ventana más corta. Cadena "
+    "vacía si needed es false o si amplías la ventana.\n"
+    "- \"reason\": por qué esa ventana cambiaría tu diagnóstico. Cadena "
+    "vacía si needed es false.\n"
+    "Puede concederse una opción distinta de la que pidas, o ninguna; en ese "
+    "caso recibirás los datos igualmente y podrás revisar tu diagnóstico.\n"
+    "{window_menu}\n"
     "Responde únicamente con ese JSON, sin bloques de código markdown (```), "
     "sin texto introductorio, resumen ni explicación adicional antes o después."
 )
+
+# Unidades de intervalo en castellano. El valor que viaja a aveva-pi-mcp es el
+# inglés ("minutes"), que es lo que espera su tool; esto es solo para el texto
+# que lee el modelo, donde "cada 15 minutes" en mitad de una frase en español
+# chirriaba.
+_UNIT_ES = {"minutes": "minutos", "hours": "horas", "days": "días"}
+
+
+def _describe_interval(value: int, unit: str) -> str:
+    """'15 minutos', '1 hora', '2 horas' -- singular incluido."""
+    nombre = _UNIT_ES.get(unit, unit)
+    if value == 1 and nombre.endswith("s"):
+        nombre = nombre[:-1] if nombre != "días" else "día"
+    return f"{value} {nombre}"
+
+
+def _describe_window(hours: int) -> str:
+    """'24 horas', '7 días' -- se pasa a días cuando es múltiplo exacto."""
+    if hours >= 48 and hours % 24 == 0:
+        return f"{hours // 24} días"
+    return f"{hours} hora" + ("s" if hours != 1 else "")
+
+
+def _format_window_menu(options: list[dict], current_hours: int) -> str:
+    """Renderiza el catálogo de ventanas para el prompt del Step 6.
+
+    Se coloca junto a la definición de history_request, no en la sección del
+    objetivo: es el conjunto de valores legales de un campo, y tenerlo al lado
+    del campo evita que el modelo tenga que recordar una tabla leída 50.000
+    tokens antes.
+
+    Cada opción se anota con la dirección respecto a la ventana actual, para
+    que el intercambio span/detalle sea explícito en vez de tener que
+    deducirlo comparando cifras.
+    """
+    if not options:
+        return (
+            "\nNo hay otras ventanas disponibles: la que estás analizando es la única "
+            "que este sistema puede consultar. Pon needed en false."
+        )
+    filas = []
+    for o in options:
+        if o["hours"] > current_hours:
+            marca = "más histórico, menos detalle"
+        else:
+            marca = "más detalle, menos histórico"
+        filas.append(
+            f"  - \"{o['id']}\": {_describe_window(o['hours'])} de histórico, "
+            f"un punto cada {_describe_interval(*o['interval'])} "
+            f"({o['points']} puntos por variable) -- {marca}."
+        )
+    return (
+        "\nOpciones disponibles para window_option (elige exactamente una de "
+        "estas, o pon needed en false):\n" + "\n".join(filas) + "\n"
+        "El número de puntos es aproximadamente constante: la resolución es "
+        "proporcional a la ventana, así que ganar histórico cuesta detalle y "
+        "al revés. Elige en función de la escala del fenómeno que quieras "
+        "descartar, no por defecto la ventana más larga.\n"
+        "Si eliges una ventana MÁS CORTA que la actual, la nueva ventana debe "
+        "seguir conteniendo el inicio del cambio de tendencia: indícalo en "
+        "trend_start. Si la que pides se quedara corta, se te concederá "
+        "automáticamente la más corta que sí lo cubra."
+    )
 
 
 _FINAL_INSTRUCTION = (
@@ -288,6 +400,186 @@ def _extract_json_payload(text: str) -> str:
     if end == -1 or end < start:
         return text
     return text[start:end + 1]
+
+
+# =============================================================================
+# Puerta de autorización entre el Step 4 y el Step 5
+# =============================================================================
+# El Step 3 le pone delante al modelo la lista cerrada de atributos que existen
+# de verdad en el AF, y _DATA_MODEL_SECTION se lo dice como "regla estricta".
+# Eso es una instrucción, no una garantía: nada impide que la respuesta traiga
+# un piApiPath retocado, inventado o traído de otro activo. Antes se pasaba tal
+# cual a query_by_path, y el fallo aparecía tarde y mal -- aveva-pi-mcp resuelve
+# TODOS los paths a WebID antes de consultar nada, así que una sola ruta que no
+# existe tumbaba el batch entero (ver _query_with_retry en pi_client.py).
+#
+# Aquí se invierte la responsabilidad: el modelo propone, el código autoriza.
+# Solo se consulta lo que se puede volver a encontrar en el af_context que se le
+# entregó.
+
+
+class VariableSelectionError(Exception):
+    """La selección del Step 4 no dejó ninguna variable autorizada que consultar."""
+
+
+def _normalize_pi_path(path: str) -> str:
+    """Clave de comparación tolerante para un piApiPath.
+
+    Se usa SOLO para buscar en la lista blanca; a PI siempre se le manda la
+    cadena canónica del AF, nunca esta. Colapsa espacios y compara sin
+    distinguir mayúsculas porque el modelo reescribe el path en vez de copiarlo
+    literalmente más a menudo de lo que admite el prompt, y un espacio de más
+    no debería costar una variable legítima.
+    """
+    return " ".join(path.split()).casefold()
+
+
+def _collect_authorized_paths(af_context: dict) -> dict[str, str]:
+    """Índice {clave normalizada: piApiPath canónico} con todos los atributos
+    que el Step 2 puso delante del modelo. Es la lista blanca del Step 5."""
+    index: dict[str, str] = {}
+    for block in ("main_asset_context", "nearby_elements_context"):
+        for group in af_context.get(block) or []:
+            for attr in group.get("attributes") or []:
+                path = attr.get("piApiPath") or ""
+                if path:
+                    index.setdefault(_normalize_pi_path(path), path)
+    return index
+
+
+def _validate_selected_variables(parsed_response, af_context: dict) -> tuple[list[dict], list[str]]:
+    """Valida la respuesta del Step 4 contra el af_context del Step 2.
+
+    Comprobaciones, en orden:
+      1. Forma de la respuesta (objeto de dos claves; se tolera un array plano).
+      2. Cada entrada es un objeto con un piApiPath utilizable.
+      3. Ese piApiPath aparece en el af_context -- si no, se descarta.
+      4. Se sustituye por la cadena canónica del AF, por si el modelo la
+         reescribió con otro espaciado o capitalización.
+      5. Se descartan duplicados y se ignoran claves no previstas.
+      6. Se recorta a config.MAX_SELECTED_VARIABLES.
+
+    Descartar en vez de abortar es deliberado, y es la misma política que ya
+    sigue _query_with_retry con los WebID: una ruta inventada no debería
+    invalidar las que sí eran buenas. Todo lo descartado queda en el log con su
+    motivo -- es lo que permite detectar si el prompt se está degradando.
+
+    Args:
+        parsed_response: el JSON ya parseado de la respuesta del Step 4.
+        af_context: el resultado del Step 2 (graph_client.build_af_context).
+
+    Returns:
+        (variables autorizadas, missing_variables saneadas)
+
+    Raises:
+        VariableSelectionError: si no sobrevive ninguna variable, o si la
+                                respuesta no tiene una forma aprovechable.
+    """
+    if isinstance(parsed_response, dict):
+        raw_variables = parsed_response.get("variables")
+        raw_missing = parsed_response.get("missing_variables")
+    elif isinstance(parsed_response, list):
+        # Array plano: esquema anterior a missing_variables. Se tolera por el
+        # mismo motivo que _extract_json_payload -- el prompt no es infalible.
+        raw_variables = parsed_response
+        raw_missing = None
+    else:
+        raise VariableSelectionError(
+            f"la respuesta no es un objeto ni un array JSON (tipo {type(parsed_response).__name__})"
+        )
+
+    if not isinstance(raw_variables, list):
+        raise VariableSelectionError(
+            f"la clave 'variables' no es un array (tipo {type(raw_variables).__name__})"
+        )
+
+    authorized = _collect_authorized_paths(af_context)
+    if not authorized:
+        # Sin lista blanca no hay nada que autorizar. Pasa si el Step 2 no
+        # encontró el activo; seguir consultando PI a ciegas no tiene sentido.
+        raise VariableSelectionError(
+            "el af_context del Step 2 no contiene ningun piApiPath contra el que validar"
+        )
+
+    variables: list[dict] = []
+    seen: set[str] = set()
+    rejected: list = []
+    unknown_keys: set[str] = set()
+    duplicates = 0
+
+    for entry in raw_variables:
+        if not isinstance(entry, dict):
+            rejected.append(entry)
+            continue
+
+        unknown_keys.update(set(entry) - {"element", "piApiPath"})
+
+        raw_path = entry.get("piApiPath")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            rejected.append(entry)
+            continue
+
+        canonical = authorized.get(_normalize_pi_path(raw_path))
+        if canonical is None:
+            # El caso que motiva toda esta función: ruta inventada, retocada
+            # más allá de espacios/mayúsculas, o copiada de otro activo.
+            rejected.append(raw_path)
+            continue
+
+        if canonical != raw_path:
+            log.info(
+                "Step 4: piApiPath reescrito por el modelo; se usa la forma canonica del AF. "
+                "Recibido %r -> AF %r", raw_path, canonical,
+            )
+
+        if canonical in seen:
+            duplicates += 1
+            continue
+        seen.add(canonical)
+
+        element = entry.get("element")
+        variables.append({
+            "element": element if isinstance(element, str) and element else canonical,
+            "piApiPath": canonical,
+        })
+
+    if rejected:
+        log.warning(
+            "Step 4: %d variable(s) descartadas por no existir en el af_context del Step 2: %s",
+            len(rejected), rejected,
+        )
+    if unknown_keys:
+        log.warning(
+            "Step 4: claves no previstas en las variables (se ignoran): %s", sorted(unknown_keys),
+        )
+    if duplicates:
+        log.info("Step 4: %d variable(s) repetidas descartadas.", duplicates)
+
+    if not variables:
+        raise VariableSelectionError(
+            f"ninguna de las {len(raw_variables)} variables propuestas existe en el af_context"
+        )
+
+    if len(variables) > config.MAX_SELECTED_VARIABLES:
+        # Se conservan las primeras: _OBJECTIVE_SECTION pide al modelo que
+        # priorice (KPI en alerta -> indicadores del activo -> meters físicos ->
+        # nivel superior), así que la cabeza de la lista es lo más relevante.
+        dropped = [v["piApiPath"] for v in variables[config.MAX_SELECTED_VARIABLES:]]
+        log.warning(
+            "Step 4: %d variables superan el maximo de %d; se recortan las ultimas: %s",
+            len(variables), config.MAX_SELECTED_VARIABLES, dropped,
+        )
+        variables = variables[:config.MAX_SELECTED_VARIABLES]
+
+    missing_variables: list[str] = []
+    if isinstance(raw_missing, list):
+        missing_variables = [m for m in raw_missing if isinstance(m, str) and m.strip()]
+        if len(missing_variables) != len(raw_missing):
+            log.warning("Step 4: se ignoran entradas no textuales en 'missing_variables'.")
+    elif raw_missing is not None:
+        log.warning("Step 4: 'missing_variables' no es un array (se ignora): %r", raw_missing)
+
+    return variables, missing_variables
 
 
 def _parse_detection_time(payload: dict) -> tuple[datetime, datetime]:
@@ -506,12 +798,203 @@ def build_diagnosis_context(
             "confianza en cada causa raíz -- no las inventes ni asumas su valor."
         )
 
-    return (
-        f"1. Objetivo de la interacción\n\n{_DIAGNOSIS_OBJECTIVE_SECTION}\n\n"
-        f"2. Resumen de la alerta\n\n{context['summary']}{limitations_note}\n\n"
-        f"3. Datos históricos\n\n{_DIAGNOSIS_DATA_SECTION_INTRO}\n\n{data_json}\n\n"
-        f"{_DIAGNOSIS_FINAL_INSTRUCTION}"
+    # El modelo tiene que saber qué ventana está mirando para poder juzgar si
+    # le basta: antes solo recibía los timestamps y tenía que deducirlo.
+    hours = historical_data.get("lookback_hours", config.PI_LOOKBACK_HOURS)
+    int_value, int_unit = historical_data.get(
+        "interval", (config.PI_QUERY_INTERVAL_VALUE, config.PI_QUERY_INTERVAL_UNIT),
     )
+    # La invitación a pedir más ventana vive solo en la sección 1: repetirla
+    # aquí insistía de más y podía empujar al modelo a pedir ampliación con
+    # más frecuencia de la necesaria.
+    window_note = (
+        f"Ventana consultada: las {_describe_window(hours)} anteriores a la "
+        f"detección de la alerta ({historical_data.get('start_date')} a "
+        f"{historical_data.get('end_date')} UTC), con un punto cada "
+        f"{_describe_interval(int_value, int_unit)}."
+    )
+
+    demo_note = _DEMO_MODE_NOTE if config.DEMO_MODE else ""
+    final_instruction = _DIAGNOSIS_FINAL_INSTRUCTION.replace(
+        "{window_menu}", _format_window_menu(_available_window_options(hours), hours),
+    )
+
+    return (
+        f"1. Objetivo de la interacción\n\n{_DIAGNOSIS_OBJECTIVE_SECTION}{demo_note}\n\n"
+        f"2. Resumen de la alerta\n\n{context['summary']}{limitations_note}\n\n"
+        f"3. Datos históricos\n\n{window_note}\n\n{_DIAGNOSIS_DATA_SECTION_INTRO}\n\n"
+        f"{data_json}\n\n"
+        f"{final_instruction}"
+    )
+
+
+def _available_window_options(current_hours: int) -> list[dict]:
+    """Opciones del catálogo distintas de la ventana actual, en ambas direcciones.
+
+    Única fuente para las dos caras del mecanismo: lo que se le ofrece al
+    modelo en el prompt y lo que se le acepta al validar su respuesta. Si
+    divergieran, se le estaría ofreciendo algo que luego se le rechaza.
+    """
+    menu = pi_client.window_menu(
+        config.PI_WINDOW_LADDER_HOURS, config.PI_TARGET_POINTS_PER_VARIABLE,
+    )
+    return [
+        o for o in menu
+        if o["hours"] != current_hours and o["hours"] <= config.PI_MAX_LOOKBACK_HOURS
+    ]
+
+
+def _parse_history_request(
+    diagnosis: dict, current_hours: int, detected_at_utc: str,
+) -> tuple[int, tuple[int, str], str] | None:
+    """Lee history_request del Step 6 y decide qué ventana se concede.
+
+    El modelo elige del catálogo; el código valida la elección -- misma
+    filosofía que _validate_selected_variables con los piApiPath. Al ser un
+    catálogo cerrado, la ventana concedida es siempre uno de los pares
+    ventana/resolución que se le ofrecieron, así que no hace falta recortar
+    nada a posteriori: el techo ya está aplicado al construir las opciones.
+
+    El catálogo va en las dos direcciones. Ampliar es seguro (solo añade
+    contexto), así que se concede sin más. **Estrechar puede recortar la
+    evidencia**, así que exige que el modelo indique en trend_start cuándo
+    arranca la desviación, y el código comprueba aritméticamente que la
+    ventana pedida lo sigue cubriendo (ver _enforce_trend_coverage).
+
+    Args:
+        diagnosis: el JSON ya parseado del Step 6.
+        current_hours: la ventana con la que se generó ese diagnóstico.
+        detected_at_utc: momento de detección de la alerta (ISO 8601 con 'Z'),
+                         extremo final de la ventana. Necesario para comprobar
+                         la cobertura de la tendencia al estrechar.
+
+    Returns:
+        (horas, (valor, unidad) del intervalo, motivo) si procede repetir los
+        Steps 5-6 con otra ventana; None si el modelo no la pide, si no hay
+        alternativa, o si el estrechamiento pedido no es admisible.
+    """
+    if not isinstance(diagnosis, dict):
+        return None
+    request = diagnosis.get("history_request")
+    if not isinstance(request, dict) or not request.get("needed"):
+        return None
+
+    options = _available_window_options(current_hours)
+    if not options:
+        log.info(
+            "Step 6: el modelo pide otra ventana, pero el catálogo no ofrece "
+            "ninguna alternativa a las %d h actuales.", current_hours,
+        )
+        return None
+
+    reason = request.get("reason")
+    reason = reason.strip() if isinstance(reason, str) and reason.strip() else "no indicado"
+
+    chosen = None
+    raw_option = request.get("window_option")
+    if isinstance(raw_option, str) and raw_option.strip():
+        clave = raw_option.strip().casefold()
+        chosen = next((o for o in options if o["id"].casefold() == clave), None)
+        if chosen is None:
+            log.warning(
+                "Step 6: window_option %r no está en el catálogo ofrecido (%s).",
+                raw_option, [o["id"] for o in options],
+            )
+
+    if chosen is None:
+        # Compatibilidad con el esquema anterior, que pedía un número libre de
+        # horas: si viene, se ajusta a la opción más pequeña que lo cubra.
+        raw_hours = request.get("hours")
+        if not isinstance(raw_hours, bool) and isinstance(raw_hours, (int, float)):
+            chosen = next((o for o in options if o["hours"] >= raw_hours), options[-1])
+            log.info(
+                "Step 6: sin window_option válido, pero llega hours=%r; se ajusta "
+                "a la opción '%s' (%d h).", raw_hours, chosen["id"], chosen["hours"],
+            )
+
+    if chosen is None:
+        # Petición sin ninguna referencia utilizable. Se concede la ampliación
+        # más pequeña en vez de descartarla: que la cifra sea inservible no
+        # invalida la observación de que la ventana se le queda corta. Nunca se
+        # estrecha por defecto -- estrechar pierde datos y solo se hace cuando
+        # el modelo lo pide explícitamente y justifica la cobertura.
+        ampliaciones = [o for o in options if o["hours"] > current_hours]
+        if not ampliaciones:
+            log.info("Step 6: history_request sin opción utilizable y sin ampliación posible.")
+            return None
+        chosen = ampliaciones[0]
+        log.info(
+            "Step 6: history_request sin opción utilizable; se concede la ampliación "
+            "mínima '%s' (%d h).", chosen["id"], chosen["hours"],
+        )
+
+    # Estrechar la ventana solo vale si sigue conteniendo el inicio de la
+    # desviación: si no, se recortaría justo la evidencia que explica la
+    # alerta. El modelo aporta el dato (trend_start) y el código comprueba la
+    # aritmética -- no se fía de que la comprobación la haya hecho él.
+    if chosen["hours"] < current_hours:
+        chosen = _enforce_trend_coverage(chosen, options, request, current_hours, detected_at_utc)
+        if chosen is None:
+            return None
+
+    return chosen["hours"], chosen["interval"], reason
+
+
+def _enforce_trend_coverage(
+    chosen: dict, options: list[dict], request: dict, current_hours: int, detected_at_utc: str,
+) -> dict | None:
+    """Comprueba que una ventana más corta sigue cubriendo el inicio de la tendencia.
+
+    Devuelve la opción concedida (la pedida, o la más corta que sí cubra el
+    inicio de la desviación), o None si no procede estrechar.
+    """
+    raw = request.get("trend_start")
+    if not isinstance(raw, str) or not raw.strip():
+        log.warning(
+            "Step 6: el modelo pide estrechar a '%s' sin indicar trend_start; no se "
+            "estrecha (estrechar sin saber dónde empieza la desviación puede recortarla).",
+            chosen["id"],
+        )
+        return None
+
+    try:
+        trend_start = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+        detected_at = datetime.fromisoformat(detected_at_utc.replace("Z", "+00:00"))
+    except ValueError:
+        log.warning(
+            "Step 6: trend_start con formato no interpretable (%r); no se estrecha.", raw,
+        )
+        return None
+
+    if trend_start >= detected_at:
+        log.warning(
+            "Step 6: trend_start (%s) no es anterior a la detección (%s); no se estrecha.",
+            raw, detected_at_utc,
+        )
+        return None
+
+    horas_tendencia = (detected_at - trend_start).total_seconds() / 3600
+    if chosen["hours"] >= horas_tendencia:
+        return chosen
+
+    # La ventana pedida cortaría el inicio de la desviación: se sube al escalón
+    # más corto que sí lo cubra, sin pasar de la ventana actual (si hiciera
+    # falta más que la actual, no es un estrechamiento y no se toca nada).
+    cubren = [o for o in options if horas_tendencia <= o["hours"] < current_hours]
+    if not cubren:
+        log.warning(
+            "Step 6: la tendencia arranca %.1f h antes de la alerta; ninguna ventana "
+            "más corta que las %d h actuales la cubre. No se estrecha.",
+            horas_tendencia, current_hours,
+        )
+        return None
+
+    log.warning(
+        "Step 6: '%s' (%d h) no cubre la tendencia, que arranca %.1f h antes de la "
+        "alerta; se concede '%s' (%d h) en su lugar.",
+        chosen["id"], chosen["hours"], horas_tendencia, cubren[0]["id"], cubren[0]["hours"],
+    )
+    return cubren[0]
 
 
 async def run_rca_analysis(notification_payload: dict) -> None:
@@ -590,16 +1073,16 @@ async def run_rca_analysis(notification_payload: dict) -> None:
         log.info("AGENTE RCA: análisis interrumpido en el Step 5. Step 6 no ejecutado.")
         return
 
-    # El esquema esperado es un objeto {"variables": [...], "missing_variables": [...]}
-    # (ver _FINAL_INSTRUCTION), pero se tolera también un array plano por si el
-    # modelo ignora el esquema nuevo -- mismo motivo que _extract_json_payload:
-    # el guardarraíl del prompt no es infalible.
-    if isinstance(parsed_response, dict):
-        variables = parsed_response.get("variables", [])
-        missing_variables = parsed_response.get("missing_variables") or []
-    else:
-        variables = parsed_response
-        missing_variables = []
+    # Puerta de autorización: el modelo propone, el código decide qué se
+    # consulta. Nada que no esté en el af_context del Step 2 llega a PI.
+    try:
+        variables, missing_variables = _validate_selected_variables(parsed_response, af_context)
+    except VariableSelectionError as exc:
+        log.error("Step 5: seleccion de variables no valida (%s): %r", exc, variables_response)
+        log.info("AGENTE RCA: análisis interrumpido en el Step 5. Step 6 no ejecutado.")
+        return
+
+    log.info("Step 4: %d variables autorizadas para consultar en PI.", len(variables))
 
     if missing_variables:
         # No se usa para consultar PI, así se evita meter ruido externo
@@ -613,47 +1096,103 @@ async def run_rca_analysis(notification_payload: dict) -> None:
             missing_variables,
         )
 
-    try:
-        historical_data = await pi_client.fetch_historical_data(variables, context["detected_at_utc"])
-    except pi_client.PIQueryError as exc:
-        log.error("Step 5 fallido: %s", exc)
-        log.info("AGENTE RCA: análisis interrumpido en el Step 5. Step 6 no ejecutado.")
-        return
+    # La ventana inicial es un punto de partida, no una decisión definitiva. Si
+    # el modelo, ya con los datos delante, concluye que necesita más histórico,
+    # lo pide en history_request y se repite el par Step 5 + Step 6 con una
+    # ventana mayor. Quién decide cuánto se concede y cuántas veces es el
+    # código (_parse_history_request + MAX_HISTORY_ADJUSTMENTS), no el modelo:
+    # sigue siendo un workflow acotado, no un bucle agéntico.
+    #
+    # Al ampliar, la resolución se recalcula con derive_interval() para que el
+    # número de puntos por variable se mantenga: ampliar la ventana sin tocar
+    # la resolución multiplicaría el prompt del Step 6 por el mismo factor.
+    lookback_hours = config.PI_LOOKBACK_HOURS
+    interval = (config.PI_QUERY_INTERVAL_VALUE, config.PI_QUERY_INTERVAL_UNIT)
+    adjustments = 0
+    visitadas = {lookback_hours}
 
-    log.info(
-        "Step 5: datos históricos obtenidos para %d piApiPath, ventana %s -> %s (bucket %s)",
-        len(historical_data["piApiPaths"]), historical_data["start_date"],
-        historical_data["end_date"], historical_data["bucket_id"],
-    )
-    if historical_data["excluded_piApiPaths"]:
-        log.warning(
-            "Step 5: %d piApiPath no resolvieron a WebID y se excluyeron: %s",
-            len(historical_data["excluded_piApiPaths"]), historical_data["excluded_piApiPaths"],
+    while True:
+        # --- Step 5 ---
+        try:
+            historical_data = await pi_client.fetch_historical_data(
+                variables, context["detected_at_utc"], lookback_hours, interval,
+            )
+        except pi_client.PIQueryError as exc:
+            log.error("Step 5 fallido: %s", exc)
+            log.info("AGENTE RCA: análisis interrumpido en el Step 5. Step 6 no ejecutado.")
+            return
+
+        log.info(
+            "Step 5: datos históricos obtenidos para %d piApiPath, ventana %s -> %s "
+            "(%d h, un punto cada %d %s, bucket %s)",
+            len(historical_data["piApiPaths"]), historical_data["start_date"],
+            historical_data["end_date"], lookback_hours, interval[0], interval[1],
+            historical_data["bucket_id"],
         )
-    log.info(historical_data["data"])
+        if historical_data["excluded_piApiPaths"]:
+            log.warning(
+                "Step 5: %d piApiPath no resolvieron a WebID y se excluyeron: %s",
+                len(historical_data["excluded_piApiPaths"]), historical_data["excluded_piApiPaths"],
+            )
+        log.info(historical_data["data"])
 
-    # -------------------------------------------------------------------------
-    # Step 6: el modelo analiza los datos y produce el diagnóstico final
-    # -------------------------------------------------------------------------
-    diagnosis_prompt = build_diagnosis_context(context, variables, historical_data, missing_variables)
-    log.info("Contexto construido para el modelo (Step 6):")
-    log.info(diagnosis_prompt)
+        # --- Step 6 ---
+        diagnosis_prompt = build_diagnosis_context(context, variables, historical_data, missing_variables)
+        log.info("Contexto construido para el modelo (Step 6):")
+        log.info(diagnosis_prompt)
 
-    try:
-        diagnosis_response = llm_client.generate(SYSTEM_PROMPT, diagnosis_prompt)
-    except llm_client.LLMGenerationError as exc:
-        log.error("Step 6 fallido: %s", exc)
-        log.info("AGENTE RCA: análisis interrumpido en el Step 6.")
-        return
-    log.info("Respuesta del modelo (Step 6) -- diagnóstico:")
-    log.info(diagnosis_response)
+        try:
+            diagnosis_response = llm_client.generate(SYSTEM_PROMPT, diagnosis_prompt)
+        except llm_client.LLMGenerationError as exc:
+            log.error("Step 6 fallido: %s", exc)
+            log.info("AGENTE RCA: análisis interrumpido en el Step 6.")
+            return
+        log.info("Respuesta del modelo (Step 6) -- diagnóstico:")
+        log.info(diagnosis_response)
 
-    try:
-        diagnosis = json.loads(_extract_json_payload(diagnosis_response))
-    except json.JSONDecodeError as exc:
-        log.error("Step 6: la respuesta del modelo no es JSON válido (%s): %r", exc, diagnosis_response)
-        log.info("AGENTE RCA: análisis interrumpido en el Step 6.")
-        return
+        try:
+            diagnosis = json.loads(_extract_json_payload(diagnosis_response))
+        except json.JSONDecodeError as exc:
+            log.error("Step 6: la respuesta del modelo no es JSON válido (%s): %r", exc, diagnosis_response)
+            log.info("AGENTE RCA: análisis interrumpido en el Step 6.")
+            return
+
+        # ¿Pide el modelo más histórico? Se registra siempre, se conceda o no:
+        # con qué frecuencia lo pide es una métrica de si la ventana inicial
+        # está bien dimensionada para este tipo de alerta.
+        granted = _parse_history_request(diagnosis, lookback_hours, context["detected_at_utc"])
+        if granted is None:
+            break
+        if adjustments >= config.MAX_HISTORY_ADJUSTMENTS:
+            log.warning(
+                "Step 6: el modelo pide reajustar la ventana a %d h pero se ha agotado el "
+                "presupuesto (MAX_HISTORY_ADJUSTMENTS=%d). Se conserva el diagnóstico "
+                "con %d h. Motivo alegado: %s",
+                granted[0], config.MAX_HISTORY_ADJUSTMENTS, lookback_hours, granted[2],
+            )
+            break
+        if granted[0] in visitadas:
+            # Con el catálogo en las dos direcciones, un presupuesto mayor que 1
+            # permitiría oscilar (24 h -> 8 h -> 24 h) sin converger nunca.
+            log.warning(
+                "Step 6: el modelo vuelve a pedir una ventana ya analizada (%d h); "
+                "se corta para no oscilar.", granted[0],
+            )
+            break
+
+        # La resolución viene ya fijada por la opción del catálogo: es el par
+        # ventana/resolución que el propio modelo vio al elegir.
+        anterior = lookback_hours
+        lookback_hours, interval, reason = granted
+        visitadas.add(lookback_hours)
+        adjustments += 1
+        log.info(
+            "Step 6: el modelo pide %s la ventana (reajuste %d/%d): de %d h a %d h, "
+            "un punto cada %d %s. Motivo: %s",
+            "ampliar" if lookback_hours > anterior else "estrechar",
+            adjustments, config.MAX_HISTORY_ADJUSTMENTS, anterior, lookback_hours,
+            interval[0], interval[1], reason,
+        )
 
     # TODO: presentar esto al usuario final (interfaz web, notificación...) en
     # vez de solo dejarlo en el log -- pendiente de decidir el canal de salida.
@@ -665,4 +1204,8 @@ async def run_rca_analysis(notification_payload: dict) -> None:
         log.info("   Acción recomendada: %s", cause.get("recommended_action"))
     log.info("=" * 60)
 
-    log.info("AGENTE RCA: análisis completo (Steps 1-6).")
+    log.info(
+        "AGENTE RCA: análisis completo (Steps 1-6). Ventana final: %d h "
+        "(un punto cada %d %s), reajustes: %d.",
+        lookback_hours, interval[0], interval[1], adjustments,
+    )
