@@ -4,6 +4,15 @@
 # Entorno virtual de Python — se regenera con setup.bat
 .venv/
 
+# Logs del webhook — NUNCA subir a git.
+# webhook.log registra el request completo de PI y los prompts enteros de los
+# Steps 3 y 6, incluyendo la estructura del AF y las series de datos de planta.
+# El patrón con * cubre también los ficheros de rotación (webhook.log.1 … .5).
+webhook.log*
+
+# Logs del servicio de Windows (NSSM, ver install_service.bat)
+logs/
+
 # Carpetas de caché que Python genera automáticamente
 __pycache__/
 *.pyc
