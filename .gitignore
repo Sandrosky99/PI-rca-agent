@@ -13,6 +13,13 @@ webhook.log*
 # Logs del servicio de Windows (NSSM, ver install_service.bat)
 logs/
 
+# Registro de incidentes — NUNCA subir a git.
+# Cada fichero guarda el payload completo de una alerta real y el diagnóstico
+# producido: nombres de activos, valores de proceso y datos de planta. Mismo
+# motivo que webhook.log. Es el archivo de casos, no material desechable:
+# si hay que respaldarlo, que sea fuera del repositorio.
+incidents/
+
 # Carpetas de caché que Python genera automáticamente
 __pycache__/
 *.pyc

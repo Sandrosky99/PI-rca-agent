@@ -1,5 +1,5 @@
 """
-config.py — Carga y validación de la configuración del Agente RCA
+config.py — Carga y validación de la configuración del Workflow RCA
 
 ¿Qué hace este fichero?
   Lee las variables de entorno definidas en el fichero ".env" y las pone
@@ -26,7 +26,7 @@ load_dotenv(Path(__file__).parent / ".env")
 # =============================================================================
 # Proveedor de LLM (Gemini por defecto, o Anthropic)
 # =============================================================================
-# Ver llm_client.py: el resto del agente llama siempre a llm_client.generate()
+# Ver llm_client.py: el resto del workflow llama siempre a llm_client.generate()
 # sin conocer qué proveedor hay detrás. Solo se exige la clave de API del
 # proveedor realmente seleccionado (ver validate_config()).
 
@@ -51,6 +51,38 @@ ANTHROPIC_API_KEY: str = os.environ.get("ANTHROPIC_API_KEY", "")
 # Modelo de Claude a usar si LLM_PROVIDER=anthropic.
 ANTHROPIC_MODEL: str = os.environ.get("ANTHROPIC_MODEL") or "claude-opus-4-8"
 
+# Techo de tokens de la respuesta del modelo, para AMBOS proveedores.
+#
+# Es un techo duro que la API aplica cortando la generación en seco: el modelo
+# no sabe que existe y no se autorregula. Si el Step 4 o el Step 6 lo alcanzan,
+# la respuesta se trunca a mitad del JSON, json.loads() falla y el análisis se
+# corta habiendo pagado ya todos los pasos anteriores.
+#
+# Estaba en 2048 (hardcodeado en llm_client.py desde el 2026-07-02) y se
+# quedaba CORTO: la respuesta del Step 4 de la ejecución real del 2026-08-20
+# ocupa 8.394 caracteres (~2.100-2.800 tokens) con 30 variables, y con
+# MAX_SELECTED_VARIABLES=40 puede llegar a ~3.700. No llegó a fallar porque el
+# proveedor por defecto es Gemini, cuya llamada no fijaba ningún tope.
+#
+# 16000 cubre el peor caso con holgura, deja sitio para los tokens de thinking
+# si algún día se activa (cuentan contra este mismo tope en Anthropic) y se
+# mantiene por debajo de los timeouts HTTP del SDK sin necesitar streaming.
+# Subirlo no cuesta nada: solo se pagan los tokens realmente generados.
+#
+# Por qué se aplica también a Gemini, que no lo exige (decisión 2026-09-03):
+# los dos SDK tienen el mismo concepto, pero Anthropic lo hace OBLIGATORIO
+# (messages.create falla sin max_tokens) y Gemini lo deja opcional, aplicando
+# el máximo de salida del modelo si se omite. De ahí venía el fallo: en
+# Anthropic hubo que poner un número sí o sí y se eligió mal; en Gemini nunca
+# hubo techo bajo porque nunca se declaró ninguno.
+#
+# Ponérselo a Gemini BAJA su techo efectivo, no lo alinea sin más. Se hace a
+# propósito: coste acotado y predecible por llamada, y el mismo comportamiento
+# en ambas rutas, que es justo para lo que existe llm_client. Si alguna vez
+# truncara, se vería en el log como un JSONDecodeError del Step 4 o 6, no en
+# silencio.
+LLM_MAX_TOKENS: int = int(os.environ.get("LLM_MAX_TOKENS", "16000"))
+
 
 # =============================================================================
 # Variables OPCIONALES (tienen valor por defecto)
@@ -68,6 +100,31 @@ WEBHOOK_SECRET: str = os.environ.get("WEBHOOK_SECRET", "")
 # Zona horaria local para mostrar timestamps en el log.
 # Usa nombres de zona IANA, por ejemplo: Europe/Madrid, America/New_York
 PI_LOCAL_TIMEZONE: str = os.environ.get("PI_LOCAL_TIMEZONE", "Europe/Madrid")
+
+# =============================================================================
+# Registro de incidentes (deduplicación y persistencia) -- ver incidents.py
+# =============================================================================
+
+# Carpeta donde se guarda un fichero JSON por incidente. Es a la vez el
+# mecanismo de deduplicación (la creación exclusiva del fichero es la reserva
+# atómica) y el registro que sobrevive a un reinicio. NO se purga sola: esos
+# ficheros son el archivo de casos, y serán la base de la revisión humana y de
+# las métricas de evaluación.
+INCIDENTS_DIR: str = os.environ.get("INCIDENTS_DIR") or str(Path(__file__).parent / "incidents")
+
+# Minutos durante los cuales una alerta del mismo activo y KPI se considera el
+# mismo incidente, aunque llegue con otro StartTime. Es la capa que protege si
+# PI abre un event frame nuevo en cada evaluación de la alarma.
+#
+# 20 min: el caso a cortar son re-notificaciones cada pocos minutos, así que
+# 20 va sobrado. Se bajó desde 60 (2026-09-03) porque una hora suprimiría
+# también una desviación genuinamente nueva sobre el mismo activo y KPI.
+# 0 desactiva esta capa y deja solo la deduplicación exacta por StartTime.
+#
+# Recordatorio: esto es una red de seguridad. La deduplicación se arregla en PI
+# (NonrepetitionInterval de la Notification Rule y deadband del análisis).
+INCIDENT_COOLDOWN_MINUTES: int = int(os.environ.get("INCIDENT_COOLDOWN_MINUTES", "20"))
+
 
 # Carpeta del proyecto afkg-graph-mcp (Step 2: consulta de la estructura del AF).
 # Se usa para lanzar el servidor MCP como subproceso vía "uv run --directory ...",
@@ -164,7 +221,7 @@ PI_QUERY_INTERVAL_UNIT: str = os.environ.get("PI_QUERY_INTERVAL_UNIT") or "minut
 # plausible, pero nada se lo impide: sin tope, una respuesta que liste medio AF
 # infla el batch del Step 5 y, sobre todo, el prompt del Step 6. Si se supera,
 # se recortan las sobrantes (no se aborta) -- ver _validate_selected_variables
-# en agent.py.
+# en workflow.py.
 #
 # El valor está calibrado contra la ejecución real del 2026-08-20 (alerta de
 # Hydraulic Efficiency en PS20102 A03 PS02 Pump 02): de 164 atributos
@@ -184,9 +241,9 @@ def validate_config() -> list[str]:
     """Comprueba que todas las variables obligatorias están definidas.
 
     Devuelve una lista con los nombres de las variables que faltan.
-    Si la lista está vacía, la configuración es correcta y el agente puede arrancar.
+    Si la lista está vacía, la configuración es correcta y el workflow puede arrancar.
     Solo se exige la clave de API del proveedor seleccionado en LLM_PROVIDER
-    (no ambas), ya que el agente solo llama a uno de los dos.
+    (no ambas), ya que el workflow solo llama a uno de los dos.
 
     Uso típico al arrancar el servidor:
         missing = validate_config()

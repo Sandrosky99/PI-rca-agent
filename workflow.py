@@ -1,8 +1,8 @@
 """
-agent.py — Agente de Análisis de Causa Raíz (RCA)
+workflow.py — Workflow de Análisis de Causa Raíz (RCA)
 
 ¿Qué hace este fichero?
-  Contiene la lógica central del agente: recibe la información de la alerta
+  Contiene la lógica central del workflow: recibe la información de la alerta
   de PI System y, paso a paso, usa el modelo de IA Claude para identificar
   las posibles causas raíz y recomendar acciones correctivas.
 
@@ -17,7 +17,7 @@ Estado actual:
   pi_client.py; diagnóstico final vía build_diagnosis_context()). Pendiente:
   decidir el canal de salida del diagnóstico (hoy solo queda en el log).
 
-Flujo completo del agente:
+Flujo completo del workflow:
   Step 2 → Consultar la estructura real del AF (afkg-graph-mcp, graph_client.py)
            para el asset y el subsistema de la alerta y obtener sus atributos
            disponibles (piApiPath)
@@ -50,17 +50,17 @@ log = logging.getLogger(__name__)
 
 
 # =============================================================================
-# System prompt del agente (dominio fijo, se envía en TODAS las llamadas al
+# System prompt del workflow (dominio fijo, se envía en TODAS las llamadas al
 # modelo — Step 4 y Step 6 — vía el parámetro system/system_instruction).
 # =============================================================================
 # La API del modelo es stateless entre llamadas: no hay "memoria" real entre el
 # Step 4 y el Step 6 salvo lo que se envíe en cada request. Por eso el rol y el
-# dominio del agente se fijan aquí como constante, separados del mensaje
+# dominio del workflow se fijan aquí como constante, separados del mensaje
 # dinámico de cada alerta (build_analysis_context), en vez de repetirlos "a
-# mano" en cada prompt: así el agente nunca actúa como un asistente genérico,
+# mano" en cada prompt: así el workflow nunca actúa como un asistente genérico,
 # pase lo que pase en el mensaje concreto.
 SYSTEM_PROMPT = (
-    "Eres el agente de análisis de causa raíz (RCA) de una planta de tratamiento "
+    "Eres el analista de causa raíz (RCA) de una planta de tratamiento "
     "de aguas residuales (WWTP) y sus estaciones de bombeo externas, "
     "monitorizadas con AVEVA PI System. Tu función es ayudar a un ingeniero de "
     "procesos a diagnosticar desviaciones operacionales detectadas por el "
@@ -997,11 +997,17 @@ def _enforce_trend_coverage(
     return cubren[0]
 
 
-async def run_rca_analysis(notification_payload: dict) -> None:
-    """Punto de entrada principal del agente RCA.
+async def run_rca_analysis(notification_payload: dict) -> dict | None:
+    """Punto de entrada principal del workflow RCA.
 
     Se llama desde webhook.py cada vez que llega una notificación de PI System.
     Se ejecuta en segundo plano (no bloquea la respuesta al servidor de PI).
+
+    Returns:
+        El diagnóstico ya parseado ({"root_causes": [...]}) si el análisis llegó
+        al final, o None si se cortó de forma controlada en cualquier paso. El
+        que llama lo usa para registrar el resultado del incidente; los motivos
+        del corte quedan siempre en el log.
 
     Args:
         notification_payload: Diccionario Python con los datos de la alerta
@@ -1020,7 +1026,7 @@ async def run_rca_analysis(notification_payload: dict) -> None:
                               }
     """
     log.info("=" * 60)
-    log.info("AGENTE RCA: Iniciando análisis de causa raíz")
+    log.info("WORKFLOW RCA: Iniciando análisis de causa raíz")
     log.info("Alerta recibida: %s", notification_payload)
     log.info("=" * 60)
 
@@ -1058,7 +1064,7 @@ async def run_rca_analysis(notification_payload: dict) -> None:
         variables_response = llm_client.generate(SYSTEM_PROMPT, context["claude_prompt"])
     except llm_client.LLMGenerationError as exc:
         log.error("Step 4 fallido: %s", exc)
-        log.info("AGENTE RCA: análisis interrumpido en el Step 4. Steps 5 y 6 no ejecutados.")
+        log.info("WORKFLOW RCA: análisis interrumpido en el Step 4. Steps 5 y 6 no ejecutados.")
         return
     log.info("Respuesta del modelo (Step 4) -- variables a consultar:")
     log.info(variables_response)
@@ -1070,7 +1076,7 @@ async def run_rca_analysis(notification_payload: dict) -> None:
         parsed_response = json.loads(_extract_json_payload(variables_response))
     except json.JSONDecodeError as exc:
         log.error("Step 5: la respuesta del modelo no es JSON válido (%s): %r", exc, variables_response)
-        log.info("AGENTE RCA: análisis interrumpido en el Step 5. Step 6 no ejecutado.")
+        log.info("WORKFLOW RCA: análisis interrumpido en el Step 5. Step 6 no ejecutado.")
         return
 
     # Puerta de autorización: el modelo propone, el código decide qué se
@@ -1079,7 +1085,7 @@ async def run_rca_analysis(notification_payload: dict) -> None:
         variables, missing_variables = _validate_selected_variables(parsed_response, af_context)
     except VariableSelectionError as exc:
         log.error("Step 5: seleccion de variables no valida (%s): %r", exc, variables_response)
-        log.info("AGENTE RCA: análisis interrumpido en el Step 5. Step 6 no ejecutado.")
+        log.info("WORKFLOW RCA: análisis interrumpido en el Step 5. Step 6 no ejecutado.")
         return
 
     log.info("Step 4: %d variables autorizadas para consultar en PI.", len(variables))
@@ -1119,7 +1125,7 @@ async def run_rca_analysis(notification_payload: dict) -> None:
             )
         except pi_client.PIQueryError as exc:
             log.error("Step 5 fallido: %s", exc)
-            log.info("AGENTE RCA: análisis interrumpido en el Step 5. Step 6 no ejecutado.")
+            log.info("WORKFLOW RCA: análisis interrumpido en el Step 5. Step 6 no ejecutado.")
             return
 
         log.info(
@@ -1145,7 +1151,7 @@ async def run_rca_analysis(notification_payload: dict) -> None:
             diagnosis_response = llm_client.generate(SYSTEM_PROMPT, diagnosis_prompt)
         except llm_client.LLMGenerationError as exc:
             log.error("Step 6 fallido: %s", exc)
-            log.info("AGENTE RCA: análisis interrumpido en el Step 6.")
+            log.info("WORKFLOW RCA: análisis interrumpido en el Step 6.")
             return
         log.info("Respuesta del modelo (Step 6) -- diagnóstico:")
         log.info(diagnosis_response)
@@ -1154,7 +1160,7 @@ async def run_rca_analysis(notification_payload: dict) -> None:
             diagnosis = json.loads(_extract_json_payload(diagnosis_response))
         except json.JSONDecodeError as exc:
             log.error("Step 6: la respuesta del modelo no es JSON válido (%s): %r", exc, diagnosis_response)
-            log.info("AGENTE RCA: análisis interrumpido en el Step 6.")
+            log.info("WORKFLOW RCA: análisis interrumpido en el Step 6.")
             return
 
         # ¿Pide el modelo más histórico? Se registra siempre, se conceda o no:
@@ -1197,7 +1203,7 @@ async def run_rca_analysis(notification_payload: dict) -> None:
     # TODO: presentar esto al usuario final (interfaz web, notificación...) en
     # vez de solo dejarlo en el log -- pendiente de decidir el canal de salida.
     log.info("=" * 60)
-    log.info("AGENTE RCA: DIAGNÓSTICO FINAL")
+    log.info("WORKFLOW RCA: DIAGNÓSTICO FINAL")
     for i, cause in enumerate(diagnosis.get("root_causes", []), 1):
         log.info("%d. %s", i, cause.get("cause"))
         log.info("   Explicación: %s", cause.get("explanation"))
@@ -1205,7 +1211,8 @@ async def run_rca_analysis(notification_payload: dict) -> None:
     log.info("=" * 60)
 
     log.info(
-        "AGENTE RCA: análisis completo (Steps 1-6). Ventana final: %d h "
+        "WORKFLOW RCA: análisis completo (Steps 1-6). Ventana final: %d h "
         "(un punto cada %d %s), reajustes: %d.",
         lookback_hours, interval[0], interval[1], adjustments,
     )
+    return diagnosis

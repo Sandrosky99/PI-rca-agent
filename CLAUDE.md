@@ -1,4 +1,4 @@
-# PI RCA Agent — Instrucciones para Claude Code
+# PI RCA Workflow — Instrucciones para Claude Code
 
 Workflow de análisis de causa raíz (RCA) para alertas operacionales de AVEVA PI System.
 Cuando PI detecta una desviación en un KPI monitorizado, este sistema recibe la notificación,
@@ -9,9 +9,11 @@ LLM para diagnosticar causas raíz y proponer acciones correctivas.
 
 ## Terminología: esto es un workflow, no un agente
 
-Los nombres del proyecto dicen «agente» (`PI-rca-agent`, `agent.py`, `run_rca_analysis()`, el log
-imprime `AGENTE RCA`). **La arquitectura es la de un workflow.** La distinción importa al leer y
-modificar el código, porque induce a buscar un bucle de decisión que no existe:
+**La arquitectura es la de un workflow**, y desde el 2026-09-03 los nombres lo dicen también: el
+módulo es `workflow.py`, el log imprime `WORKFLOW RCA` y el servicio es `RCA-Workflow-Webhook`.
+**Queda una excepción: el repositorio sigue llamándose `PI-rca-agent`** — renombrarlo en GitHub es
+una acción pendiente. La distinción importa al leer y modificar el código, porque induce a buscar
+un bucle de decisión que no existe:
 
 | | Este sistema | Lo que haría un agente |
 |---|---|---|
@@ -61,21 +63,32 @@ con otros KPIs y otros tipos de activo.
 
 ### Próximo paso
 
-**Decidir el canal de salida del diagnóstico.** Hoy el resultado del Step 6 solo se escribe en el
-log — hay un `TODO` explícito al final de `run_rca_analysis()`. Opciones a valorar: correo al
-ingeniero de proceso, interfaz web, o devolverlo a PI como anotación del event frame. Es una
-decisión de producto, no técnica.
+**Decidir el canal de salida del diagnóstico.** Desde el 2026-09-03 el diagnóstico se guarda en el
+fichero del incidente (`incidents/<id>.json`), junto al payload que lo originó, así que ya no se
+pierde en el log. Lo que falta es el **aviso**: correo al ingeniero de proceso, interfaz web, o
+devolverlo a PI como anotación del event frame. Es una decisión de producto, no técnica.
+
+Ese fichero es además la base natural de la revisión humana: añadirle campos de `revision` y
+`causa_confirmada` no requiere diseñar nada nuevo.
 
 Otros cabos sueltos, por orden de urgencia:
 
-1. **`webhook.log` no está en `.gitignore`** y contiene los prompts completos con datos de planta.
-   Un `git add .` distraído lo sube al repositorio público. Añadir `webhook.log*` antes del próximo
-   push.
-2. **La llamada a Anthropic no usa adaptive thinking.** `_generate_anthropic()` llama a
-   `claude-opus-4-8` sin el parámetro `thinking`; en Opus 4.8, omitirlo significa ejecutar **sin**
-   thinking. Para una tarea de diagnóstico causal probablemente convenga `thinking: {type:
-   "adaptive"}`. Además `max_tokens=2048` va justo para el Step 6. Sin probar todavía.
-3. **Ampliar la validación** a más KPIs y tipos de activo antes de dar por buena la calidad del
+1. **El servicio no está registrado en Windows.** El proceso corre a mano desde el 2026-08-07
+   (uvicorn, PID 29548). `RCA-Workflow-Webhook` no aparece en `services.msc`: si la máquina
+   reinicia, el webhook no vuelve solo y PI enviará a un puerto muerto. Ejecutar
+   `install_service.bat` como administrador.
+2. **La llamada a Anthropic no usa adaptive thinking**, mientras que Gemini sí razona por defecto
+   (ver «Asimetría de razonamiento» más abajo). Activar `thinking: {type: "adaptive"}` en
+   `_generate_anthropic()` igualaría las dos rutas, y `LLM_MAX_TOKENS=16000` ya deja sitio para
+   ello. Pendiente de decidir: sin la evaluación del punto 8 no habría forma de medir si mejora el
+   diagnóstico. Si se activa, hacerlo detrás de un flag y en ambos proveedores.
+3. **Renombrar el repositorio** en GitHub: `PI-rca-agent` → `PI-rca-workflow`. Es lo único que
+   sigue diciendo «agente» tras el renombrado del 2026-09-03. GitHub deja una redirección, así que
+   el remoto local sigue funcionando, pero conviene actualizarlo con `git remote set-url`.
+4. **Las pruebas no están en el repositorio.** Las cuatro suites (~110 comprobaciones sobre la
+   puerta del Step 4, el catálogo de ventanas, el bucle de reajuste y el registro de incidentes)
+   viven fuera del proyecto. Deberían entrar como `tests/`.
+5. **Ampliar la validación** a más KPIs y tipos de activo antes de dar por buena la calidad del
    diagnóstico de forma general.
 
 ---
@@ -89,7 +102,7 @@ PI System (172.21.28.55)
 webhook.py  (FastAPI :8090)          Step 1 ✅
     │ background task
     ▼
-agent.py  (run_rca_analysis)         ← el control de flujo vive aquí, de principio a fin
+workflow.py  (run_rca_analysis)      ← el control de flujo vive aquí, de principio a fin
     ├── Step 2 ✅ graph_client.py  → afkg-graph-mcp  → estructura real del AF
     ├── Step 3 ✅ build_analysis_context()           → mensaje de 4 secciones
     ├── Step 4 ✅ llm_client.generate()              → qué atributos reales necesita
@@ -97,7 +110,7 @@ agent.py  (run_rca_analysis)         ← el control de flujo vive aquí, de prin
     └── Step 6 ✅ llm_client.generate()              → diagnóstico final (JSON)
                      │
                      ▼
-              log  ← TODO: decidir canal de salida real
+        incidents/<id>.json  +  log   ← falta un canal de aviso (correo, web...)
 ```
 
 ---
@@ -118,6 +131,71 @@ El log va a consola **y** a `webhook.log` con rotación a los 10 MB y 5 ficheros
 rotativo se añadió el 2026-08-06 porque una Notification Rule de PI con `NonrepetitionInterval=0`
 genera una notificación nueva en *cada* evaluación periódica de la alarma, no solo al cruzar el
 umbral (visto en real).
+
+#### Registro de incidentes: deduplicación y persistencia (`incidents.py`, añadido 2026-09-03)
+
+Resuelve dos problemas de fiabilidad que comparten el mismo estado.
+
+**Deduplicación.** PI puede enviar varias notificaciones del mismo incidente — con
+`NonrepetitionInterval=0`, una por cada evaluación de la alarma. Sin guarda, cada una lanzaría un
+análisis completo, con su coste de LLM, sus subprocesos MCP y diagnósticos potencialmente
+contradictorios sobre el mismo suceso.
+
+⚠️ **Esto se arregla ANTES en PI**, con el `NonrepetitionInterval` de la Notification Rule y el
+deadband del análisis que calcula el KPI. Lo del código es una red de seguridad, no el mecanismo.
+
+**Identidad de un incidente — no es el payload completo.** Los campos se reparten en tres grupos:
+
+| Grupo | Campos | Papel |
+|---|---|---|
+| **Fijos** | `Asset`, `KPIName`, `LimitThresholdType`, `Subsystem`, `System`, `Plant` | Identifican el elemento y qué alarma suya ha saltado. Forman la clave. |
+| **Volátil** | `KPI`, `Limit` | `KPI` es el valor actual y cambia entre re-evaluaciones (58.4 → 58.1 → `"No Result"`). Fuera de la clave: incluirlo no deduplicaría nada. |
+| **Cercano** | `StartTime` | No se repite exacto, pero queda próximo: la re-notificación llega minutos después. No sirve como igualdad, sirve como proximidad. |
+
+```
+incidents/a3f19c2b4e01__20260819T221000Z.json
+          └─ hash de los 6 campos fijos   └─ StartTime
+```
+
+Cada campo fijo se **normaliza** (espacios colapsados, sin distinguir mayúsculas) antes de
+mezclarlo en el hash. Con una clave de seis campos basta que uno llegue con un espacio de más para
+que el hash cambie y la deduplicación falle justo cuando debía actuar.
+
+Dos capas, **por orden de importancia**:
+
+1. **Enfriamiento** (`INCIDENT_COOLDOWN_MINUTES`, 20) — misma identidad dentro de la ventana, aunque
+   el `StartTime` sea otro. **Es la capa que hace el trabajo**: corta la re-notificación que llega
+   dos minutos después con un valor de KPI ligeramente distinto.
+2. **Clave exacta** — misma identidad *y* mismo `StartTime` al carácter. Red secundaria: solo
+   dispara si PI reenvía literalmente el mismo POST sin recalcular el campo.
+
+**Por qué ficheros y no SQLite.** El sistema de ficheros ya da la primitiva necesaria:
+`open(ruta, "x")` es una creación exclusiva que falla si el fichero existe. **Eso es la reserva del
+incidente**, atómica y sin ventana de carrera entre consultar e insertar — y sigue funcionando con
+varios workers de uvicorn, donde un diccionario en memoria no serviría. Además el fichero ya es el
+registro del caso: cuando llegue la revisión humana, se le añaden campos al mismo JSON.
+
+Lo que se pierde: no hay consultas ni agregación. Para las métricas de evaluación habrá que leer
+todos los ficheros y agregarlos en Python — trivial con unas pocas alertas al día. Migrar a SQLite
+después es mecánico: cada fichero es una fila.
+
+**Persistencia.** Estados: `recibido` → `analizando` → `finalizado` / `fallido`. Las escrituras son
+atómicas (temporal + `os.replace`, que también lo es en Windows). Al arrancar,
+`sweep_interrupted()` marca como `interrumpido` lo que quedó en curso: si hay un incidente en
+`analizando`, el proceso murió durante su análisis y nadie lo va a terminar. **No se relanzan
+automáticamente** a propósito — un payload problemático provocaría un bucle en cada arranque.
+
+**El diagnóstico se guarda en el fichero del incidente**, no solo en el log. Es el primer paso
+hacia un canal de salida de verdad. Para ello `run_rca_analysis()` devuelve ahora el diagnóstico
+(o `None` si cortó de forma controlada).
+
+**Sobre el enfriamiento (20 min).** El caso a cortar son re-notificaciones cada pocos minutos, así
+que 20 va sobrado y cubre unas diez repeticiones. Se bajó desde 60 el 2026-09-03: una hora
+suprimiría también una desviación **genuinamente nueva** sobre el mismo activo y KPI, y ese margen
+no hacía falta para el escenario real.
+
+`incidents/` está en `.gitignore`: cada fichero guarda el payload completo y el diagnóstico, con
+datos de planta.
 
 ### Step 2 — Estructura real del AF (`graph_client.py`, implementado 2026-07-13)
 
@@ -237,7 +315,7 @@ los dos guardarraíles:
 | | Ruta inventada | WebID que no resuelve |
 |---|---|---|
 | Qué pasa | El modelo se saca un `piApiPath` que no está en el AF | El path existe en el grafo AF pero ya no en PI Web API |
-| Quién lo detecta | `_validate_selected_variables` (antes de salir de `agent.py`) | `_query_with_retry` (respuesta de `aveva-pi-mcp`) |
+| Quién lo detecta | `_validate_selected_variables` (antes de salir de `workflow.py`) | `_query_with_retry` (respuesta de `aveva-pi-mcp`) |
 
 Comprobado con el caso real: `Hydraulic Effiency|Mechanic Power`, el path que tumbó el batch el
 2026-08-20, **sí está** en el `af_context` — la puerta lo autoriza correctamente y el fallo aparece
@@ -405,7 +483,7 @@ distinto), para poder contarlas.
 ## Entorno técnico
 
 ### Red
-- **IP servidor RCA Agent:** `172.21.28.72`
+- **IP servidor RCA Workflow:** `172.21.28.72`
 - **IP PI System:** `172.21.28.55`
 - **Puerto webhook:** `8090` (el 8080 está ocupado por IIS — no usar)
 - **Firewall Windows Defender:** deshabilitado en ambas VMs
@@ -453,13 +531,13 @@ Confirmado el 2026-07-02 (con `StartTime` desde las 09:16 UTC). PI envía este J
 | `KPI` | Valor actual que disparó la alerta |
 | `Limit` | Umbral configurado en PI |
 | `LimitThresholdType` | `"Low"` (por debajo del límite) o `"High"` (por encima) |
-| `StartTime` | Momento de detección en UTC (ISO 8601 con `Z`). Usado por `agent.py` para la ventana temporal del análisis (conversión a local vía pytz, igual que `search_event_frames` en aveva-pi-mcp). Si falta, se aproxima con la hora actual del servidor. |
+| `StartTime` | Momento de detección en UTC (ISO 8601 con `Z`). Usado por `workflow.py` para la ventana temporal del análisis (conversión a local vía pytz, igual que `search_event_frames` en aveva-pi-mcp). Si falta, se aproxima con la hora actual del servidor. |
 | `AssetType` | Confirmado 2026-07-02. Tipo de equipo (p.ej. `"pump"`). Genérico, no limitado a bombas. Se añade al mensaje de contexto para el modelo. |
 | `AssetModel` | Confirmado 2026-07-02. Modelo/descripción del equipo (p.ej. `"single-channel centrifugal pump"`). Se añade al mensaje de contexto para el modelo. |
 
 ⚠️ **Anomalía detectada 2026-07-02:** en una prueba real, `Limit` llegó como `"1970-01-01T00:00:00Z"` en vez de un valor numérico — probable fallo de mapeo en la configuración de PI Notifications para esa alerta concreta. Revisar la variable enlazada a `Limit` en PI si se repite.
 
-**Validación de tipos (Step 3):** `_valid_field(payload, key, expected_type)` en `agent.py` comprueba el tipo de cada campo del payload contra el tipo esperado (`str` para nombres/jerarquía, `(int, float)` para `KPI`/`Limit`, excluyendo `bool`). Si un campo no coincide con el tipo esperado, se omite del mensaje al modelo (no se pasa el dato "roto") y se registra un `WARNING` en el log, para poder detectar fallos de configuración en PI. `build_analysis_context()` construye la frase del resumen de forma condicional según qué combinación de `KPI`/`Limit` sea válida.
+**Validación de tipos (Step 3):** `_valid_field(payload, key, expected_type)` en `workflow.py` comprueba el tipo de cada campo del payload contra el tipo esperado (`str` para nombres/jerarquía, `(int, float)` para `KPI`/`Limit`, excluyendo `bool`). Si un campo no coincide con el tipo esperado, se omite del mensaje al modelo (no se pasa el dato "roto") y se registra un `WARNING` en el log, para poder detectar fallos de configuración en PI. `build_analysis_context()` construye la frase del resumen de forma condicional según qué combinación de `KPI`/`Limit` sea válida.
 
 ---
 
@@ -487,13 +565,42 @@ backoff exponencial (2–30 s) vía `tenacity`, **solo** para errores que un rei
 reintentar no los soluciona. Si se agotan (o el error no es transitorio), `generate()` lanza
 `LLMGenerationError`.
 
-**Notas por proveedor:**
+**Techo de tokens de salida (`LLM_MAX_TOKENS`, 16000, revisado 2026-09-03).** Los dos SDK tienen el
+mismo concepto, pero con defaults opuestos:
+
+| | Parámetro | ¿Obligatorio? | Si se omite |
+|---|---|---|---|
+| Anthropic | `max_tokens` | **Sí** | `messages.create()` falla |
+| Gemini | `max_output_tokens` | No | Se aplica el máximo de salida del modelo |
+
+De ahí venía un fallo latente: en Anthropic hubo que poner un número al escribir la ruta (julio) y
+se puso 2048, que envejeció mal. La respuesta del Step 4 de la ejecución real del 2026-08-20 ocupa
+**~2.800 tokens** con 30 variables (y hasta ~3.700 con `MAX_SELECTED_VARIABLES=40`), así que
+`LLM_PROVIDER=anthropic` habría truncado el JSON y matado el análisis en el Step 5. No llegó a
+pasar porque el proveedor por defecto es Gemini, que no llevaba tope.
+
+Se aplica también a Gemini, que no lo exige. Eso **baja** su techo efectivo, y es deliberado: coste
+acotado por llamada y mismo comportamiento en ambas rutas, que es para lo que existe `llm_client`.
+Si truncara, se vería como un `JSONDecodeError` en el log, no en silencio.
+
+**⚠️ Asimetría de razonamiento entre proveedores (verificado 2026-09-03).** Los dos proveedores
+**no** están en igualdad de condiciones, y conviene saberlo antes de comparar su calidad:
+
+| | Razonamiento |
+|---|---|
+| `gemini-2.5-flash` | **Activado por defecto.** Se configura con `thinking_level` (`low`/`medium`/`high`) y no puede apagarse del todo; lo más bajo es `low`. Los tokens de pensamiento se facturan como salida. El código no fija el parámetro, así que usa el default: **activado**. |
+| `claude-opus-4-8` | **Desactivado.** `_generate_anthropic()` no pasa `thinking`, y en Opus 4.8 omitirlo significa ejecutar sin razonar. |
+
+Consecuencia práctica: **el único diagnóstico real que existe (2026-08-20) se produjo con
+razonamiento**, porque lo hizo Gemini. Cambiar a `anthropic` tal como está el código daría
+diagnósticos sin razonar, y sería fácil atribuir el empeoramiento al modelo en vez de a la
+configuración. Activar `thinking: {type: "adaptive"}` en la ruta de Anthropic *corregiría* esta
+asimetría en vez de crearla — pero sin la evaluación del punto 8 no habría forma de medir si mejora.
+
+**Otras notas por proveedor:**
 
 - `gemini-2.5-pro` requiere facturación activada en el proyecto de Google Cloud; sin ella da error
   429 de cuota 0. Por eso el default es `gemini-2.5-flash`.
-- La llamada a Anthropic usa `claude-opus-4-8` con `max_tokens=2048` y **sin** el parámetro
-  `thinking`. En Opus 4.8, omitir `thinking` significa ejecutar sin thinking — ver «Próximo paso»,
-  es una mejora pendiente de probar, no el estado deseado documentado.
 
 ---
 
@@ -503,9 +610,10 @@ reintentar no los soluciona. Si se agotan (o el error no es transitorio), `gener
 rca-agent/
 ├── webhook.py           ← FastAPI: recibe POST de PI (Step 1)
 │                          Endpoints: GET /health, POST /notification, GET /notifications/history
-├── agent.py             ← Orquestación del workflow (run_rca_analysis) + Steps 3, 4 y 6
+├── workflow.py             ← Orquestación del workflow (run_rca_analysis) + Steps 3, 4 y 6
 ├── graph_client.py      ← Cliente MCP para afkg-graph-mcp (Step 2)
 ├── pi_client.py         ← Cliente MCP para aveva-pi-mcp (Step 5)
+├── incidents.py         ← Registro de incidentes: deduplicación y persistencia
 ├── llm_client.py        ← Abstracción sobre el proveedor de LLM (Gemini/Anthropic)
 ├── config.py            ← Carga .env y valida variables obligatorias
 ├── .env.example         ← Plantilla (copiar a .env y rellenar)
@@ -514,7 +622,8 @@ rca-agent/
 ├── setup.bat            ← Crea .venv e instala deps (ejecutar 1 vez)
 ├── start.bat            ← Arranca el servidor (desarrollo)
 ├── install_service.bat  ← Windows Service con NSSM (producción)
-├── webhook.log          ← Log rotativo (10 MB × 5). ⚠️ NO está en .gitignore
+├── webhook.log          ← Log rotativo (10 MB × 5). En .gitignore
+├── incidents/           ← Un JSON por incidente. En .gitignore (datos de planta)
 └── CLAUDE.md            ← Este fichero
 ```
 
@@ -529,9 +638,12 @@ rca-agent/
 | `GEMINI_MODEL` | No | Modelo de Gemini a usar | `gemini-2.5-flash` |
 | `ANTHROPIC_API_KEY` | ✅ si `LLM_PROVIDER=anthropic` | Clave API de Anthropic para Claude | — |
 | `ANTHROPIC_MODEL` | No | Modelo de Claude a usar | `claude-opus-4-8` |
+| `LLM_MAX_TOKENS` | No | Techo de tokens de la respuesta, para ambos proveedores | `16000` |
 | `WEBHOOK_PORT` | No | Puerto del servidor | `8090` |
 | `WEBHOOK_SECRET` | No | Token para validar origen de PI (cabecera `X-PI-Secret`) | vacío |
 | `PI_LOCAL_TIMEZONE` | No | Zona horaria para logs | `Europe/Madrid` |
+| `INCIDENTS_DIR` | No | Carpeta del registro de incidentes | `<proyecto>\incidents` |
+| `INCIDENT_COOLDOWN_MINUTES` | No | Ventana en que una alerta del mismo activo+KPI se considera el mismo incidente. `0` deja solo la dedup exacta | `20` |
 | `AFKG_GRAPH_MCP_DIR` | No | Carpeta del proyecto afkg-graph-mcp (Step 2) | `C:\MCPServer\afkg-graph-mcp` |
 | `AVEVA_PI_MCP_DIR` | No | Carpeta del proyecto aveva-pi-mcp (Step 5) | `C:\MCPServer\MCP Server` |
 | `PI_LOOKBACK_HOURS` | No | Ventana de la **primera** consulta del Step 5, en horas | `24` |

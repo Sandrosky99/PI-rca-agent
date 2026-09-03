@@ -5,7 +5,7 @@ webhook.py — Servidor HTTP que recibe notificaciones de PI System (Step 1)
   Levanta un servidor web ligero que está siempre escuchando en segundo plano.
   Cuando PI System detecta una desviación en un parámetro monitorizado, envía
   una notificación HTTP POST a este servidor. El servidor la recibe, la registra
-  en el log y activa el agente RCA para iniciar el análisis.
+  en el log y activa el workflow RCA para iniciar el análisis.
 
 ¿Cómo arrancarlo?
   Ejecuta start.bat  (o bien: .venv\Scripts\python -m uvicorn webhook:app --host 0.0.0.0 --port 8080)
@@ -33,7 +33,30 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 import config
-import agent
+import incidents
+import workflow
+
+
+async def _analizar_incidente(payload: dict, registro: dict) -> None:
+    """Envuelve el análisis para dejar constancia de cómo terminó.
+
+    El workflow ya captura sus propios errores y corta de forma controlada
+    devolviendo None; el try/except de aquí es para lo imprevisto, de forma que
+    un incidente nunca se quede colgado en 'analizando' mientras el proceso
+    sigue vivo. El diagnóstico se guarda en el fichero del incidente, que es el
+    primer paso hacia un canal de salida de verdad (hoy solo iba al log).
+    """
+    incidents.mark(registro, incidents.ANALIZANDO)
+    try:
+        diagnostico = await workflow.run_rca_analysis(payload)
+    except Exception:
+        log.exception("Análisis abortado por un error no controlado.")
+        incidents.mark(registro, incidents.FALLIDO)
+        return
+    if diagnostico is None:
+        incidents.mark(registro, incidents.FALLIDO)
+    else:
+        incidents.mark(registro, incidents.FINALIZADO, diagnostico=diagnostico)
 
 
 class Expect100ContinueMiddleware(BaseHTTPMiddleware):
@@ -99,10 +122,10 @@ log = logging.getLogger(__name__)
 # HTTP. La descripción y versión aparecen en la documentación automática que
 # FastAPI genera en http://localhost:8090/docs
 app = FastAPI(
-    title="RCA Agent — Webhook de PI System",
+    title="RCA Workflow — Webhook de PI System",
     description=(
         "Servidor HTTP que recibe notificaciones de AVEVA PI System y "
-        "activa el agente de análisis de causa raíz (RCA)."
+        "activa el workflow de análisis de causa raíz (RCA)."
     ),
     version="1.0.0",
 )
@@ -129,7 +152,7 @@ async def startup_event() -> None:
         log.info("Configuracion correcta.")
 
     log.info("-" * 60)
-    log.info("Servidor RCA Agent arrancado y escuchando en:")
+    log.info("Servidor RCA Workflow arrancado y escuchando en:")
     log.info("  http://0.0.0.0:%s/notification  <- PI envia aqui sus alertas", config.WEBHOOK_PORT)
     log.info("  http://localhost:%s/health       <- comprobacion de estado", config.WEBHOOK_PORT)
     log.info("  http://localhost:%s/docs         <- documentacion de la API", config.WEBHOOK_PORT)
@@ -139,6 +162,19 @@ async def startup_event() -> None:
         log.info("Validacion de origen: ACTIVA (cabecera X-PI-Secret requerida)")
     else:
         log.info("Validacion de origen: DESACTIVADA (acepta notificaciones de cualquier origen)")
+
+    log.info("Registro de incidentes: %s", config.INCIDENTS_DIR)
+    log.info("Enfriamiento de duplicados: %d min", config.INCIDENT_COOLDOWN_MINUTES)
+
+    # Si el proceso murio a mitad de un analisis, esos incidentes quedaron en
+    # 'analizando' y nadie los va a terminar. Se marcan para que no queden
+    # colgados en silencio (ver incidents.sweep_interrupted).
+    interrumpidos = incidents.sweep_interrupted()
+    if interrumpidos:
+        log.warning(
+            "%d incidente(s) quedaron a medias en la ejecucion anterior y se han marcado "
+            "como interrumpidos. No se relanzan automaticamente.", interrumpidos,
+        )
 
 
 # =============================================================================
@@ -159,7 +195,7 @@ async def health_check() -> dict:
     return {
         "status": "ok",
         "timestamp": datetime.utcnow().isoformat() + "Z",
-        "service": "rca-agent-webhook",
+        "service": "rca-workflow-webhook",
     }
 
 
@@ -180,7 +216,7 @@ async def receive_notification(
     request: Request,
     background_tasks: BackgroundTasks,
 ) -> JSONResponse:
-    """Recibe la notificación HTTP POST de PI System y activa el agente RCA.
+    """Recibe la notificación HTTP POST de PI System y activa el workflow RCA.
 
     Flujo interno:
       1. Lee y parsea el cuerpo JSON de la petición.
@@ -253,7 +289,7 @@ async def receive_notification(
     # ------------------------------------------------------------------
     # Si en .env definiste un WEBHOOK_SECRET, comprobamos que PI lo envía
     # en la cabecera HTTP "X-PI-Secret". Así evitamos que sistemas no
-    # autorizados puedan enviar alertas falsas al agente.
+    # autorizados puedan enviar alertas falsas al workflow.
     if config.WEBHOOK_SECRET:
         received_token = request.headers.get("X-PI-Secret", "")
         if received_token != config.WEBHOOK_SECRET:
@@ -272,8 +308,25 @@ async def receive_notification(
     # BackgroundTasks permite que el análisis (que puede tardar varios segundos)
     # se ejecute después de que este endpoint ya haya respondido a PI.
     # De este modo PI recibe su confirmación inmediatamente y no se bloquea.
-    background_tasks.add_task(agent.run_rca_analysis, payload)
-    log.info("Analisis RCA iniciado en segundo plano.")
+    # ------------------------------------------------------------------
+    # Paso 4: Deduplicar — ¿es este incidente uno que ya estamos tratando?
+    # ------------------------------------------------------------------
+    # Va después de validar el token para no crear registros a partir de
+    # peticiones no autenticadas. Si es un duplicado se responde 202 igual: un
+    # error solo conseguiria que PI reintentase.
+    registro = incidents.claim(payload)
+    if registro is None:
+        return JSONResponse(
+            content={
+                "status": "duplicate",
+                "message": "Notificacion duplicada: ya hay un analisis para este incidente.",
+                "received_at": received_at,
+            },
+            status_code=202,
+        )
+
+    background_tasks.add_task(_analizar_incidente, payload, registro)
+    log.info("Analisis RCA iniciado en segundo plano (incidente %s).", registro["id"])
 
     # ------------------------------------------------------------------
     # Paso 5: Responder a PI System con confirmación inmediata

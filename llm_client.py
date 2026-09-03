@@ -2,10 +2,10 @@
 llm_client.py — Capa de abstracción sobre el proveedor de LLM (Gemini / Anthropic)
 
 ¿Qué hace este fichero?
-  Aísla al resto del agente de qué proveedor de IA se usa para razonar.
+  Aísla al resto del workflow de qué proveedor de IA se usa para razonar.
   Expone una única función, generate(), que siempre recibe un system prompt
   y un mensaje de usuario en texto plano, y siempre devuelve texto plano.
-  Los Steps 4 y 6 de agent.py llaman a esta función sin saber si por debajo
+  Los Steps 4 y 6 de workflow.py llaman a esta función sin saber si por debajo
   hay Gemini o Claude.
 
   Nota: generate() nunca pasa el parámetro "tools" a ninguno de los dos
@@ -17,7 +17,7 @@ llm_client.py — Capa de abstracción sobre el proveedor de LLM (Gemini / Anthr
   Anthropic y Google no comparten un estándar de API: cada uno define su
   propio SDK, su propio formato de mensajes y su propio formato de
   respuesta (ver CLAUDE.md). Aislar esa diferencia aquí evita que el resto
-  del agente tenga que conocerla, y permite cambiar de proveedor cambiando
+  del workflow tenga que conocerla, y permite cambiar de proveedor cambiando
   una sola variable de entorno.
 
 ¿Cómo se elige el proveedor?
@@ -30,7 +30,7 @@ llm_client.py — Capa de abstracción sobre el proveedor de LLM (Gemini / Anthr
   reintento puede arreglar (5xx, rate limit, timeout, conexión) -- errores
   4xx por auth/payload inválido no se reintentan, porque reintentar no los
   soluciona. Si se agotan los reintentos (o el error no es transitorio),
-  generate() lanza LLMGenerationError para que agent.py lo capture y corte
+  generate() lanza LLMGenerationError para que workflow.py lo capture y corte
   el análisis de forma controlada en vez de propagar un traceback crudo.
 """
 
@@ -51,7 +51,7 @@ def generate(system_prompt: str, user_message: str) -> str:
     """Llama al proveedor de LLM configurado y devuelve su respuesta en texto.
 
     Args:
-        system_prompt: rol y dominio fijos del agente (ver agent.SYSTEM_PROMPT).
+        system_prompt: rol y dominio fijos del workflow (ver workflow.SYSTEM_PROMPT).
         user_message: mensaje dinámico de la petición concreta (p.ej.
                       context["claude_prompt"] de build_analysis_context()).
 
@@ -112,7 +112,10 @@ def _generate_gemini(system_prompt: str, user_message: str) -> str:
     response = client.models.generate_content(
         model=config.GEMINI_MODEL,
         contents=user_message,
-        config=types.GenerateContentConfig(system_instruction=system_prompt),
+        config=types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            max_output_tokens=config.LLM_MAX_TOKENS,
+        ),
     )
     return response.text
 
@@ -125,7 +128,7 @@ def _generate_anthropic(system_prompt: str, user_message: str) -> str:
     client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
     response = client.messages.create(
         model=config.ANTHROPIC_MODEL,
-        max_tokens=2048,
+        max_tokens=config.LLM_MAX_TOKENS,
         system=system_prompt,
         messages=[{"role": "user", "content": user_message}],
     )

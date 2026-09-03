@@ -1,17 +1,17 @@
 @echo off
 REM =============================================================================
-REM install_service.bat — Registra el Agente RCA como Windows Service
+REM install_service.bat — Registra el Workflow RCA como Windows Service
 REM =============================================================================
 REM
 REM ¿Para qué sirve esto?
 REM   Usando "start.bat" el servidor solo funciona mientras la terminal está
-REM   abierta. Si cierras la terminal o reinicias el servidor, el agente se para.
+REM   abierta. Si cierras la terminal o reinicias el servidor, el workflow se para.
 REM
-REM   Este script registra el agente como un "Servicio de Windows", de modo que:
+REM   Este script registra el workflow como un "Servicio de Windows", de modo que:
 REM     - Arranca automáticamente cuando se inicia Windows.
 REM     - Corre en segundo plano sin necesidad de mantener ninguna terminal abierta.
 REM     - Se puede controlar desde el panel de servicios (services.msc).
-REM     - Se puede arrancar y parar con: sc start RCA-Agent-Webhook / sc stop RCA-Agent-Webhook
+REM     - Se puede arrancar y parar con: sc start RCA-Workflow-Webhook / sc stop RCA-Workflow-Webhook
 REM
 REM ¿Qué necesitas antes de ejecutarlo?
 REM   1. Haber ejecutado setup.bat al menos una vez (el .venv debe existir).
@@ -25,7 +25,7 @@ REM   Abre una terminal como ADMINISTRADOR en esta carpeta y escribe:
 REM       install_service.bat
 REM
 REM Para desinstalar el servicio en el futuro:
-REM   nssm remove RCA-Agent-Webhook confirm
+REM   nssm remove RCA-Workflow-Webhook confirm
 REM
 REM =============================================================================
 
@@ -50,7 +50,7 @@ if not exist "%BASE_DIR%\.venv\Scripts\uvicorn.exe" (
 )
 
 REM Definir las rutas absolutas que NSSM necesita
-set SERVICE_NAME=RCA-Agent-Webhook
+set SERVICE_NAME=RCA-Workflow-Webhook
 set BASE_DIR=C:\MCPServer\rca-agent
 set UVICORN_EXE=%BASE_DIR%\.venv\Scripts\uvicorn.exe
 

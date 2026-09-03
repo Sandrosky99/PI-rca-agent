@@ -1,6 +1,6 @@
 @echo off
 REM =============================================================================
-REM start.bat — Arranca el servidor webhook del Agente RCA
+REM start.bat — Arranca el servidor webhook del Workflow RCA
 REM =============================================================================
 REM
 REM ¿Qué hace este script?
@@ -9,7 +9,7 @@ REM   El servidor quedará escuchando peticiones de PI System hasta que
 REM   lo pares con Ctrl+C o cierres la terminal.
 REM
 REM ¿Cuándo ejecutarlo?
-REM   Cada vez que quieras arrancar el agente manualmente.
+REM   Cada vez que quieras arrancar el workflow manualmente.
 REM   Para que arranque automáticamente con Windows, usa install_service.bat.
 REM
 REM URLs disponibles una vez arrancado:
@@ -33,11 +33,11 @@ REM Comprobar que existe el fichero de configuración
 if not exist ".env" (
     echo ADVERTENCIA: No se encuentra el fichero ".env".
     echo Copia ".env.example" a ".env" y rellena tu ANTHROPIC_API_KEY.
-    echo El servidor arrancara igualmente pero el agente no podra llamar a Claude.
+    echo El servidor arrancara igualmente pero el workflow no podra llamar a Claude.
     echo.
 )
 
-echo Arrancando servidor RCA Agent...
+echo Arrancando servidor RCA Workflow...
 echo Pulsa Ctrl+C para detenerlo.
 echo.
 

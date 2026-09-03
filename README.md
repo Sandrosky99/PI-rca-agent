@@ -2,7 +2,7 @@
 
 Workflow que diagnostica la causa raíz de alertas operacionales generadas por **AVEVA PI System**. Cuando PI detecta que un KPI se sale de su umbral, el sistema recibe la notificación, averigua qué variables existen realmente en el Asset Framework, consulta sus datos históricos y produce un diagnóstico con 2–3 causas raíz y su acción correctiva.
 
-> **Nota sobre el nombre.** El repositorio se llama `PI-rca-agent` y el módulo principal es `agent.py`, pero **esto es un workflow, no un agente**. El control de flujo vive entero en código Python; al modelo se le consulta dos veces y no dirige el proceso. Ver [¿Workflow o agente?](#workflow-o-agente) — la distinción importa al leer el código.
+> **Nota sobre el nombre.** El repositorio se llama todavía `PI-rca-agent`, pero **esto es un workflow, no un agente**: el módulo principal es `workflow.py` y el renombrado del repositorio está pendiente. El control de flujo vive entero en código Python; al modelo se le consulta dos veces y no dirige el proceso. Ver [¿Workflow o agente?](#workflow-o-agente) — la distinción importa al leer el código.
 
 ---
 
@@ -75,7 +75,7 @@ El patrón es **encadenamiento de prompts** (*prompt chaining*), con una puerta 
 ┌─────────────────────────────────────────────────────────────────┐
 │                     PI RCA (este proyecto)                      │
 │                                                                 │
-│  webhook.py ──▶ agent.py : run_rca_analysis()                   │
+│  webhook.py ──▶ workflow.py : run_rca_analysis()                │
 │  FastAPI        ┌─────────────────────────────────────────┐     │
 │  :8090          │ Step 2 · graph_client.py ───────────────┼──┐  │
 │  /notification  │ Step 3 · build_analysis_context()       │  │  │
@@ -261,9 +261,10 @@ El código decide qué concede y cuántas veces (`MAX_HISTORY_ADJUSTMENTS`, 1 po
 PI-rca-agent/
 │
 ├── webhook.py           ← Servidor HTTP (Step 1): recibe alertas de PI System
-├── agent.py             ← Orquestación del workflow + Steps 3, 4 y 6
+├── workflow.py             ← Orquestación del workflow + Steps 3, 4 y 6
 ├── graph_client.py      ← Cliente MCP para afkg-graph-mcp (Step 2)
 ├── pi_client.py         ← Cliente MCP para aveva-pi-mcp (Step 5)
+├── incidents.py         ← Registro de incidentes: deduplicación y persistencia
 ├── llm_client.py        ← Abstracción sobre el proveedor de LLM (Gemini/Anthropic)
 ├── config.py            ← Carga y validación de variables de entorno
 │
@@ -281,10 +282,11 @@ PI-rca-agent/
 
 | Fichero | Función |
 |---|---|
-| `webhook.py` | Servidor FastAPI que escucha en `:8090/notification`. Recibe el POST de PI, lo registra en consola y en `webhook.log` (rotativo, 10 MB × 5), y lanza `agent.run_rca_analysis()` en segundo plano. Expone además `/health` y `/notifications/history`. Incluye el middleware que gestiona la cabecera `Expect: 100-continue` que envía PI. |
-| `agent.py` | El corazón del workflow. Contiene `run_rca_analysis()` (los 6 steps en orden), los prompts fijos, `build_analysis_context()` (Step 3), `build_diagnosis_context()` (Step 6) y la validación de tipos del payload. |
+| `webhook.py` | Servidor FastAPI que escucha en `:8090/notification`. Recibe el POST de PI, lo registra en consola y en `webhook.log` (rotativo, 10 MB × 5), y lanza `workflow.run_rca_analysis()` en segundo plano. Expone además `/health` y `/notifications/history`. Incluye el middleware que gestiona la cabecera `Expect: 100-continue` que envía PI. |
+| `workflow.py` | El corazón del workflow. Contiene `run_rca_analysis()` (los 6 steps en orden), los prompts fijos, `build_analysis_context()` (Step 3), `build_diagnosis_context()` (Step 6) y la validación de tipos del payload. |
 | `graph_client.py` | Lanza `afkg-graph-mcp` como subproceso por stdio y recorre recursivamente el árbol del AF. Filtra metadatos y desambigua elementos con nombre repetido usando su `path` único. |
 | `pi_client.py` | Lanza `aveva-pi-mcp` por stdio, crea el bucket temporal y consulta las series. Deduplica paths repetidos y excluye los que no resuelven a WebID. |
+| `incidents.py` | Un fichero JSON por incidente. Evita analizar dos veces la misma alerta (la creación exclusiva del fichero es la reserva atómica) y deja constancia en disco de cada análisis, de modo que un reinicio no lo pierda en silencio. |
 | `llm_client.py` | Expone una única función `generate(system, user) → str`. Absorbe la diferencia entre los SDK de Anthropic y Google, y reintenta con backoff exponencial los errores transitorios (5xx, rate limit, timeout). |
 | `config.py` | Lee `.env` y expone las variables como constantes. `validate_config()` comprueba al arrancar que está la API key del proveedor seleccionado. |
 | `setup.bat` | Crea el entorno virtual `.venv` con `uv` e instala las dependencias. Solo hace falta una vez. |
@@ -339,6 +341,7 @@ Todas las opciones se configuran en `.env`. Copia `.env.example` como punto de p
 | `GEMINI_MODEL` | No | Modelo de Gemini. `gemini-2.5-pro` requiere facturación activa en Google Cloud; sin ella devuelve un 429 de cuota 0. | `gemini-2.5-flash` |
 | `ANTHROPIC_API_KEY` | ✅ si `LLM_PROVIDER=anthropic` | Clave de API de Anthropic — [console.anthropic.com](https://console.anthropic.com/settings/keys) | — |
 | `ANTHROPIC_MODEL` | No | Modelo de Claude | `claude-opus-4-8` |
+| `LLM_MAX_TOKENS` | No | Techo de tokens de la respuesta del modelo, para ambos proveedores. Es un techo duro: si se alcanza, el JSON se trunca y el análisis se pierde. | `16000` |
 
 Solo se exige la clave del proveedor realmente seleccionado, no ambas.
 
@@ -349,6 +352,8 @@ Solo se exige la clave del proveedor realmente seleccionado, no ambas.
 | `WEBHOOK_PORT` | No | Puerto en el que escucha el servidor | `8090` |
 | `WEBHOOK_SECRET` | No | Token para validar que las peticiones vienen de PI. PI debe enviarlo en la cabecera `X-PI-Secret`. Vacío = no se valida el origen. | vacío |
 | `PI_LOCAL_TIMEZONE` | No | Zona horaria para mostrar timestamps en el log (nombre IANA) | `Europe/Madrid` |
+| `INCIDENTS_DIR` | No | Carpeta donde se guarda un JSON por incidente | `<proyecto>\incidents` |
+| `INCIDENT_COOLDOWN_MINUTES` | No | Minutos durante los que una alerta del mismo activo y KPI se considera el mismo incidente, aunque cambie el `StartTime`. `0` deja solo la deduplicación exacta. | `20` |
 
 ### Consultas a PI y a los MCP servers
 
@@ -380,7 +385,7 @@ start.bat
 Verás en la consola:
 
 ```
-Servidor RCA Agent arrancado y escuchando en:
+Servidor RCA Workflow arrancado y escuchando en:
   http://0.0.0.0:8090/notification  <- PI envia aqui sus alertas
   http://localhost:8090/health       <- comprobacion de estado
   http://localhost:8090/docs         <- documentacion de la API
@@ -485,12 +490,12 @@ Para que el servidor arranque automáticamente con Windows sin mantener una term
    install_service.bat
    ```
 
-El servicio aparecerá en `services.msc` como **RCA-Agent-Webhook**.
+El servicio aparecerá en `services.msc` como **RCA-Workflow-Webhook**.
 
 ```cmd
-sc start RCA-Agent-Webhook   :: arrancar
-sc stop  RCA-Agent-Webhook   :: parar
-sc query RCA-Agent-Webhook   :: ver estado
+sc start RCA-Workflow-Webhook   :: arrancar
+sc stop  RCA-Workflow-Webhook   :: parar
+sc query RCA-Workflow-Webhook   :: ver estado
 ```
 
 Logs del servicio:
@@ -518,7 +523,7 @@ C:\MCPServer\rca-agent\logs\service_error.log
 
 1. **Canal de salida del diagnóstico.** Hoy solo va al log. Opciones a valorar: correo al ingeniero de proceso, interfaz web, o anotación del event frame en PI. Es la decisión principal del proyecto y es de producto, no técnica.
 2. **`webhook.log` no está en `.gitignore`** y contiene los prompts completos con datos de planta. Añadir `webhook.log*` antes del próximo push.
-3. **Revisar la configuración de la llamada a Anthropic.** No usa *adaptive thinking* y `max_tokens=2048` va justo para el Step 6. Sin probar todavía.
+3. **Igualar el razonamiento entre proveedores.** `gemini-2.5-flash` razona por defecto; la llamada a Anthropic no pasa `thinking`, así que no razona. Activarlo igualaría ambas rutas, pero sin evaluación no hay forma de medir si mejora el diagnóstico.
 4. **Ampliar la validación** a más KPIs y tipos de activo.
 
 ---

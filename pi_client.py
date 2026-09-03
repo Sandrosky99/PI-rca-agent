@@ -1,5 +1,5 @@
 """
-pi_client.py — Cliente MCP para aveva-pi-mcp (Step 5 del agente RCA)
+pi_client.py — Cliente MCP para aveva-pi-mcp (Step 5 del workflow RCA)
 
 ¿Qué hace este fichero?
   Lanza aveva-pi-mcp como subproceso (protocolo MCP sobre stdio, igual que
@@ -96,11 +96,11 @@ def window_menu(hours_ladder: list[int], target_points: int) -> list[dict]:
     """Construye el catálogo de pares ventana/resolución que se le ofrecen al modelo.
 
     Un catálogo cerrado en vez de un número libre de horas tiene dos ventajas:
-    elimina de raíz las respuestas inservibles (horas como texto, o menores que
-    la ventana actual), y sobre todo **le enseña al modelo el coste de lo que
-    pide**. Antes solicitaba horas y la resolución se engrosaba por debajo sin
-    que lo supiera; ahora ve que ampliar el span cuesta detalle, y puede
-    decidir con esa información delante.
+    elimina de raíz las respuestas inservibles (horas como texto, o que no
+    cambian nada), y sobre todo **le enseña al modelo el coste de lo que
+    pide**. Antes solicitaba horas y la resolución cambiaba por debajo sin que
+    lo supiera; ahora ve el intercambio entre histórico y detalle, y decide con
+    esa información delante.
 
     Cada opción se deriva de derive_interval(), así que el catálogo y el
     cálculo real de la resolución no pueden desalinearse.
@@ -214,10 +214,10 @@ async def fetch_historical_data(
                          con 'Z' (context["detected_at_utc"] de
                          build_analysis_context) -- extremo final de la ventana.
         lookback_hours: horas hacia atrás desde detected_at_utc. Por defecto
-                        config.PI_LOOKBACK_HOURS. agent.py lo sobrescribe
+                        config.PI_LOOKBACK_HOURS. workflow.py lo sobrescribe
                         cuando el modelo pide más histórico en el Step 6.
         interval: (valor, unidad) de la resolución. Por defecto la configurada
-                  en PI_QUERY_INTERVAL_*. En las ampliaciones, agent.py pasa
+                  en PI_QUERY_INTERVAL_*. En las ampliaciones, workflow.py pasa
                   aquí el resultado de derive_interval().
 
     Returns:
@@ -228,7 +228,7 @@ async def fetch_historical_data(
         [{"Timestamp":..., "Value":...}, ...]}}, ...} -- dict parseado del
         JSON embebido en la respuesta de query_by_path (ver
         _parse_batch_json); si el parseo falla, el texto crudo tal cual.
-        Listo para pasarse a agent.build_diagnosis_context() en el Step 6.
+        Listo para pasarse a workflow.build_diagnosis_context() en el Step 6.
 
     Raises:
         PIQueryError: si la llamada al MCP Server falla, o si ningún

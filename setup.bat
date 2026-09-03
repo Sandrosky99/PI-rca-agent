@@ -1,6 +1,6 @@
 @echo off
 REM =============================================================================
-REM setup.bat — Configura el entorno del Agente RCA
+REM setup.bat — Configura el entorno del Workflow RCA
 REM =============================================================================
 REM
 REM ¿Qué hace este script?

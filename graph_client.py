@@ -1,5 +1,5 @@
 """
-graph_client.py — Cliente MCP para afkg-graph-mcp (Step 2 del agente RCA)
+graph_client.py — Cliente MCP para afkg-graph-mcp (Step 2 del workflow RCA)
 
 ¿Qué hace este fichero?
   Lanza afkg-graph-mcp como subproceso (protocolo MCP sobre stdio, igual que
