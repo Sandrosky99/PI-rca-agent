@@ -165,6 +165,29 @@ INCIDENTS_DIR: str = os.environ.get("INCIDENTS_DIR") or str(Path(__file__).paren
 # (NonrepetitionInterval de la Notification Rule y deadband del análisis).
 INCIDENT_COOLDOWN_MINUTES: int = int(os.environ.get("INCIDENT_COOLDOWN_MINUTES", "20"))
 
+# Días tras los cuales se PODA el "trace" de un incidente: los prompts enviados
+# al modelo y sus respuestas. El caso en sí -- payload, estado, diagnóstico y,
+# cuando exista, la revisión humana -- NO se borra nunca.
+#
+# Por qué podar solo el trace: medido sobre un incidente real, el trace es el
+# 98,9 % del fichero (501 KB de 507 KB); el caso son 5,7 KB. Podarlo recorta el
+# 99 % del espacio sin tocar lo que hace falta para la evaluación -- contrastar
+# hipótesis contra causas confirmadas -- que es justo lo que un borrado por
+# antigüedad destruiría cuando empezara a tener valor estadístico.
+#
+# Se conserva un resumen (qué claves había y cuánto ocupaban) en vez de borrar
+# sin rastro: ai-governance §4.5 pide mantener inmutables los METADATOS de
+# trazabilidad aunque el CONTENIDO se elimine.
+#
+# 90 días: tiempo de sobra para que alguien cuestione un diagnóstico y se
+# investigue con el prompt original delante. Pasado eso, su valor es casi nulo.
+# 0 desactiva la poda y lo conserva todo indefinidamente.
+#
+# Nota: esto es una decisión OPERATIVA (crecimiento de disco), no de
+# cumplimiento. El §4.5 exige una política de retención para prompts "que
+# contengan datos personales", y estos no los tienen.
+INCIDENT_TRACE_RETENTION_DAYS: int = int(os.environ.get("INCIDENT_TRACE_RETENTION_DAYS", "90"))
+
 
 # Carpeta del proyecto afkg-graph-mcp (Step 2: consulta de la estructura del AF).
 # Se usa para lanzar el servidor MCP como subproceso vía "uv run --directory ...",

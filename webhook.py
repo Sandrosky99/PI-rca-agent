@@ -177,8 +177,20 @@ async def startup_event() -> None:
     if interrumpidos:
         log.warning(
             "%d incidente(s) quedaron a medias en la ejecucion anterior y se han marcado "
-            "como interrumpidos. No se relanzan automaticamente.", interrumpidos,
+            "como interrumpidos. Se relanzaran si PI vuelve a enviar la alerta.", interrumpidos,
         )
+
+    # Poda del material de trabajo antiguo. Solo elimina prompts y respuestas;
+    # el caso -- payload, diagnostico y revision -- no se toca nunca.
+    if config.INCIDENT_TRACE_RETENTION_DAYS > 0:
+        podados, liberados = incidents.podar_traces()
+        if podados:
+            log.info("Traces podados por antiguedad.", extra={
+                "incidentes": podados, "bytesLiberados": liberados,
+                "retencionDias": config.INCIDENT_TRACE_RETENTION_DAYS})
+        log.info("Retencion de traces: %d dias", config.INCIDENT_TRACE_RETENTION_DAYS)
+    else:
+        log.info("Retencion de traces: desactivada (se conserva todo)")
 
 
 # =============================================================================

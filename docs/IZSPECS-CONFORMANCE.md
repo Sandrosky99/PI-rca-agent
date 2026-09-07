@@ -51,7 +51,7 @@
 | 1.6 | Revisión de patrones inseguros [SHOULD] | ✅ | `bandit` en CI. Sin `eval`, sin `shell=True`, sin deserialización insegura |
 | 1.7 | Inyección de prompt y entrada adversaria [MUST] | ✅ | La entrada no confiable (payload de PI, respuesta del grafo, salida de los MCP) no puede alterar las instrucciones del sistema: el `SYSTEM_PROMPT` es una constante y va por el parámetro `system`, separado del mensaje. Los campos del payload se validan por tipo (`_valid_field`) y la notificación se rechaza en la puerta si no es analizable (`validate_notification`) |
 | 1.8 | Manejo inseguro de la salida [MUST] | ✅ | **El núcleo del diseño.** La salida del modelo nunca se ejecuta ni se pasa a un intérprete. Los `piApiPath` se validan contra la lista blanca del AF antes de consultar; la petición de ventana, contra un catálogo cerrado. El JSON se parsea con `json.loads`, nunca con `eval` |
-| 2.1 | Cobertura de pruebas [MUST] | ✅ | 7 suites en `tests/`, 227 comprobaciones. Umbral del proyecto: toda función con lógica de decisión o validación debe tener pruebas de su camino feliz, sus modos de fallo y sus entradas malformadas |
+| 2.1 | Cobertura de pruebas [MUST] | ✅ | 7 suites en `tests/`, 241 comprobaciones. Umbral del proyecto: toda función con lógica de decisión o validación debe tener pruebas de su camino feliz, sus modos de fallo y sus entradas malformadas |
 | 2.2 | Revisión de las pruebas [MUST] | ✅ | Verifican comportamiento real, no cobertura: cada una detecta un fallo concreto. Prueba de ello: `test_incidents` detectó una colisión real de nombres por resolución de reloj el 2026-09-07, y `test_observability` una captura de excepción demasiado estrecha |
 | 2.3 | Validación funcional documentada [MUST] | ⚠️ Parcial | `AI-TRACEABILITY.md` §8. **Dos** ciclos completos contra PI y LLM reales (2026-08-20 y 2026-09-07), pero ambos del mismo activo y KPI, y **ninguna causa confirmada** por mantenimiento |
 | 2.4 | Gate de calidad en CI/CD [MUST] | ✅ | `.github/workflows/quality-gate.yml`: pruebas + SAST + SCA + búsqueda de secretos. Falla la rama |
@@ -62,7 +62,7 @@
 | 4.2 | Anonimización previa [MUST] | **N/A** | Los datos de prueba son magnitudes de proceso industrial; no hay datos personales que anonimizar |
 | 4.3 | Cumplimiento regulatorio [MUST] | ✅ | Sin datos personales: RGPD no aplica al tratamiento. Riesgo bajo bajo el AI Act (no es sistema de alto riesgo del Anexo III). Reevaluar al reclasificar |
 | 4.4 | Registro de actividades de tratamiento [MUST] | **N/A** | No se tratan datos personales en producción |
-| 4.5 | Retención y borrado de datos de interacción [MUST] | ⚠️ Parcial | Los prompts y respuestas se conservan en `incidents/`. Al no contener datos personales, no hay obligación de supresión. **Pendiente:** definir un periodo de retención explícito — hoy no se purgan nunca |
+| 4.5 | Retención y borrado de datos de interacción [MUST] | ✅ | La **obligación** es N/A: exige política de retención para prompts *que contengan datos personales*, y estos no los tienen. Aun así se implementa por motivos operativos: `INCIDENT_TRACE_RETENTION_DAYS` (90 días) poda prompts y respuestas conservando el caso, con el resumen de lo eliminado — que es justo lo que pide el propio §4.5: metadatos inmutables, contenido borrable. Cada poda se audita |
 | 5.1 | Documentación de propósito y límites [MUST] | ✅ | `AI-GOVERNANCE.md` §2 |
 | 5.2 | Mecanismo de intervención humana [MUST] | ✅ | `AI-GOVERNANCE.md` §3. El diagnóstico nunca dispara acciones; hay interruptor de parada |
 | 5.3 | Comunicación al usuario final [MUST] | ✅ | El diagnóstico persistido lleva el bloque `_ai_generated` con aviso explícito |
@@ -142,7 +142,6 @@ Ninguna es una excepción aprobada: son trabajo pendiente.
 |---|---|---|---|
 | 1 | El gate de CI nunca se ha ejecutado | §2.4, §8 | Habilitar GitHub Actions en el repositorio y configurar el workflow como *required check* |
 | 2 | Los commits anteriores al 2026-09-07 no llevan fecha de generación | base §1.4 | No se corrige: reescribir el historial violaría §1.7. Compensado con `AI-TRACEABILITY.md` §1 |
-| 3 | Sin periodo de retención definido para `incidents/` | §4.5 | Definirlo. Sin datos personales no hay obligación legal, pero la carpeta crece sin límite |
 | 4 | Validación funcional con un único ciclo real | §2.3 | Ejercitar con más KPIs y tipos de activo |
 | 5 | El interruptor de parada no se ha probado en el entorno real | §9.5 | Ejecutar el procedimiento de `AI-GOVERNANCE.md` §5 |
 | 6 | El repositorio se sigue llamando `PI-rca-agent` | — | Renombrar en GitHub a `PI-rca-workflow` |

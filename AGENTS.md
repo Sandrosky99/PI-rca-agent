@@ -221,6 +221,26 @@ arrancar**: eso sí podría entrar en bucle con un payload problemático.
 Se descartó un script de relanzado: no tendría usuario. Quien lo ejecutaría es la misma persona
 que hoy borraría el fichero, y no hay forma de que se entere de que hace falta.
 
+**Retención (2026-09-07).** Un incidente pesa ~507 KB, y el **98,9 % es el `trace`**: los prompts
+enviados al modelo y sus respuestas. El caso —payload, estado, diagnóstico y, cuando exista, la
+revisión humana— son 5,7 KB.
+
+Por eso **no se borran incidentes: se poda el `trace`** pasados `INCIDENT_TRACE_RETENTION_DAYS`
+(90 por defecto, `0` desactiva). Un borrado por antigüedad del incidente entero destruiría la base
+de evaluación —contrastar hipótesis contra causas confirmadas— justo cuando empezara a tener valor
+estadístico. Medido: 300 KB → 781 bytes.
+
+Queda un resumen de lo podado (qué claves había, cuánto ocupaban, cuándo se podó): ai-governance
+§4.5 pide mantener inmutables los **metadatos** de trazabilidad aunque el **contenido** se elimine.
+Cada poda se audita antes de ejecutarse — elimina estado de forma permanente, y eso lo exige
+observability-spec §2.
+
+Se pierde la capacidad de reproducir exactamente lo enviado al modelo pasados esos 90 días. Es la
+contrapartida asumida; el diagnóstico y su evidencia siguen ahí.
+
+⚠️ Esto es una decisión **operativa**, no de cumplimiento: el §4.5 exige política de retención para
+prompts *que contengan datos personales*, y estos no los tienen.
+
 **Visibilidad.** `GET /health` devuelve el recuento de incidentes por estado. No es una interfaz,
 pero convierte en visible algo que solo aparecía en un WARNING del arranque. Solo números: el
 endpoint no está autenticado.
@@ -717,6 +737,7 @@ rca-agent/
 | `NOTIFICATION_HISTORY_ENABLED` | No | Expone `GET /notifications/history` con payloads de planta sin autenticar. Encender solo para depurar | `false` |
 | `INCIDENTS_DIR` | No | Carpeta del registro de incidentes | `<proyecto>\incidents` |
 | `INCIDENT_COOLDOWN_MINUTES` | No | Ventana en que una alerta del mismo activo+KPI se considera el mismo incidente. `0` deja solo la dedup exacta | `20` |
+| `INCIDENT_TRACE_RETENTION_DAYS` | No | Días tras los que se poda el `trace` (prompts y respuestas). El caso no se borra nunca. `0` desactiva | `90` |
 | `AFKG_GRAPH_MCP_DIR` | No | Carpeta del proyecto afkg-graph-mcp (Step 2) | `C:\MCPServer\afkg-graph-mcp` |
 | `AVEVA_PI_MCP_DIR` | No | Carpeta del proyecto aveva-pi-mcp (Step 5) | `C:\MCPServer\MCP Server` |
 | `PI_LOOKBACK_HOURS` | No | Ventana de la **primera** consulta del Step 5, en horas | `24` |

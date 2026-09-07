@@ -347,6 +347,84 @@ def mark(registro: dict, estado: str, diagnostico: dict | None = None,
         log.error("No se pudo actualizar el incidente %s a '%s': %s", registro["id"], estado, exc)
 
 
+def podar_traces() -> tuple[int, int]:
+    """Elimina el 'trace' de los incidentes antiguos y conserva el caso.
+
+    Qué se poda: los prompts enviados al modelo y sus respuestas, que son el
+    98,9 % del peso de un incidente (medido: 501 KB de 507 KB).
+
+    Qué NO se toca, nunca: el payload original, el estado, el diagnóstico y --
+    cuando exista -- la revisión humana y la causa confirmada. Eso son 5,7 KB y
+    son la base de la evaluación: contrastar hipótesis contra causas reales.
+    Un borrado por antigüedad del incidente entero destruiría precisamente eso
+    cuando empezara a tener valor estadístico.
+
+    En lugar de borrar sin rastro, deja un resumen de lo que había (qué claves
+    y cuánto ocupaban). ai-governance §4.5 pide mantener inmutables los
+    METADATOS de trazabilidad aunque el CONTENIDO se elimine.
+
+    La antigüedad se mide sobre 'actualizado_en', no sobre 'recibido_en': lo
+    que importa es cuándo terminó el análisis que produjo esos prompts.
+
+    Se audita cada poda ANTES de ejecutarla: elimina estado de forma
+    permanente, y eso lo exige observability-spec §2.
+
+    Returns:
+        (incidentes podados, bytes liberados)
+    """
+    if config.INCIDENT_TRACE_RETENTION_DAYS <= 0:
+        return 0, 0
+
+    ahora = datetime.now(timezone.utc)
+    limite = ahora - timedelta(days=config.INCIDENT_TRACE_RETENTION_DAYS)
+    podados = liberados = 0
+
+    for ruta in _directorio().glob("*.json"):
+        registro = _leer(ruta)
+        if not registro or not registro.get("trace"):
+            continue
+
+        marca = registro.get("actualizado_en") or registro.get("recibido_en")
+        try:
+            cuando = datetime.fromisoformat(str(marca).replace("Z", "+00:00"))
+        except (AttributeError, ValueError):
+            log.warning("Incidente con fecha ilegible; no se poda.",
+                        extra={"incidentId": registro.get("id"), "marca": repr(marca)})
+            continue
+        if cuando >= limite:
+            continue
+
+        trace = registro["trace"]
+        peso = len(json.dumps(trace, ensure_ascii=False))
+
+        observability.audit(
+            "incident.prune_trace",
+            {"incidentId": registro.get("id"), "bytes": peso,
+             "edadDias": (ahora - cuando).days},
+        )
+
+        registro["trace_podado"] = {
+            "fecha": ahora.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "claves": sorted(trace),
+            "bytes": peso,
+            "motivo": f"retencion de {config.INCIDENT_TRACE_RETENTION_DAYS} dias",
+        }
+        del registro["trace"]
+
+        try:
+            _escribir(ruta, registro)
+            podados += 1
+            liberados += peso
+            log.info("Trace podado por antiguedad.", extra={
+                "incidentId": registro.get("id"), "bytes": peso,
+                "edadDias": (ahora - cuando).days})
+        except OSError as exc:
+            log.error("No se pudo podar el trace.", extra={
+                "incidentId": registro.get("id"), "errorMsg": str(exc)})
+
+    return podados, liberados
+
+
 def sweep_interrupted() -> int:
     """Marca como interrumpidos los incidentes que quedaron a medias.
 

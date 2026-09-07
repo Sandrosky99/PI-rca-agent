@@ -215,7 +215,63 @@ check("cuenta los interrumpidos", rec.get(incidents.INTERRUMPIDO) == 2, rec)
 check("solo numeros, sin datos de planta",
       all(isinstance(v, int) for v in rec.values()) and "Bomba A" not in str(rec), rec)
 
-print("\n=== 18. Escritura atomica: no quedan .tmp ===")
+print("\n=== 19. Poda del trace por antiguedad ===")
+limpiar()
+orig_ret = config.INCIDENT_TRACE_RETENTION_DAYS
+config.INCIDENT_TRACE_RETENTION_DAYS = 90
+
+# Incidente ANTIGUO, con trace
+viejo = incidents.claim(payload(asset="Bomba Vieja"))
+incidents.mark(viejo, incidents.FINALIZADO, diagnostico={"root_causes": [{"cause": "x"}]},
+               trace={"step3_prompt": "P" * 60000, "step6_prompts": ["Q" * 40000]})
+rv = TMP / (viejo["id"] + ".json")
+reg = json.loads(rv.read_text(encoding="utf-8"))
+reg["actualizado_en"] = "2026-01-01T00:00:00Z"      # mas de 90 dias
+rv.write_text(json.dumps(reg), encoding="utf-8")
+tam_antes = rv.stat().st_size
+
+# Incidente RECIENTE, tambien con trace
+nuevo_i = incidents.claim(payload(asset="Bomba Nueva"))
+incidents.mark(nuevo_i, incidents.FINALIZADO, diagnostico={"root_causes": []},
+               trace={"step3_prompt": "R" * 50000})
+rn = TMP / (nuevo_i["id"] + ".json")
+
+podados, liberados = incidents.podar_traces()
+check("poda solo el antiguo", podados == 1, f"podados={podados}")
+check("reporta los bytes liberados", liberados > 90000, f"{liberados}")
+
+v = json.loads(rv.read_text(encoding="utf-8"))
+check("el trace desaparece", "trace" not in v, list(v))
+check("el diagnostico SE CONSERVA", v["diagnostico"]["root_causes"][0]["cause"] == "x")
+check("el payload SE CONSERVA", v["payload"]["Asset"] == "Bomba Vieja")
+check("el estado SE CONSERVA", v["estado"] == incidents.FINALIZADO)
+check("queda constancia de la poda", "trace_podado" in v, list(v))
+check("con las claves que habia",
+      sorted(v["trace_podado"]["claves"]) == ["step3_prompt", "step6_prompts"],
+      v["trace_podado"].get("claves"))
+check("y con el peso que ocupaba", v["trace_podado"]["bytes"] > 90000)
+check("el fichero encoge mucho", rv.stat().st_size < tam_antes / 10,
+      f"{tam_antes} -> {rv.stat().st_size}")
+
+n = json.loads(rn.read_text(encoding="utf-8"))
+check("el reciente NO se toca", "trace" in n and "trace_podado" not in n, list(n))
+
+check("una segunda pasada no hace nada", incidents.podar_traces() == (0, 0))
+
+print("\n=== 20. Retencion a 0 desactiva la poda ===")
+config.INCIDENT_TRACE_RETENTION_DAYS = 0
+limpiar()
+x = incidents.claim(payload())
+incidents.mark(x, incidents.FINALIZADO, trace={"step3_prompt": "Z" * 10000})
+rx = TMP / (x["id"] + ".json")
+reg = json.loads(rx.read_text(encoding="utf-8"))
+reg["actualizado_en"] = "2020-01-01T00:00:00Z"
+rx.write_text(json.dumps(reg), encoding="utf-8")
+check("no poda nada", incidents.podar_traces() == (0, 0))
+check("el trace sigue ahi", "trace" in json.loads(rx.read_text(encoding="utf-8")))
+config.INCIDENT_TRACE_RETENTION_DAYS = orig_ret
+
+print("\n=== 21. Escritura atomica: no quedan .tmp ===")
 limpiar()
 r = incidents.claim(payload())
 incidents.mark(r, incidents.FINALIZADO, diagnostico=diag)
