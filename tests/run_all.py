@@ -28,6 +28,7 @@ SUITES = [
     ("Registro de incidentes", "test_incidents.py"),
     ("Observabilidad: logging y audit trail", "test_observability.py"),
     ("Decisiones de seguridad del webhook", "test_seguridad.py"),
+    ("Validacion de la notificacion entrante", "test_validacion.py"),
 ]
 
 

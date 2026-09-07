@@ -218,6 +218,29 @@ no hacía falta para el escenario real.
 `incidents/` está en `.gitignore`: cada fichero guarda el payload completo y el diagnóstico, con
 datos de planta.
 
+#### Puerta de entrada: solo pasan notificaciones analizables (añadido 2026-09-07)
+
+`workflow.validate_notification()` se ejecuta en `webhook.py` **antes de crear el incidente**.
+Exige dos campos y solo dos: `Asset` y `KPIName`, ambos texto no vacío.
+
+**Por qué solo esos dos.** Sin `Asset` no se puede consultar el AF (Step 2), y sin AF el Step 5
+no tiene ningún `piApiPath` contra el que validar. Sin `KPIName` no hay desviación concreta que
+investigar ni identidad con la que deduplicar. Todo lo demás se tolera: `_valid_field` lo
+descarta dentro del análisis y sigue. Casos reales que **siguen pasando** la puerta: `KPI` como
+`"No Result"` (2026-08-20) y `Limit` como fecha (2026-07-02).
+
+**Qué se evitaba.** Antes, un cuerpo sin campos utilizables —incluido uno que ni siquiera fuese
+JSON, que `webhook.py` guarda como `{"_raw": ..., "_format": "no-json"}`— creaba su incidente y
+llegaba hasta el Step 4, **gastando una llamada real al modelo** (medido: 6.524 caracteres de
+prompt) antes de que la puerta del Step 5 lo cortara por no haber `af_context`. El guardarraíl
+existía, pero actuaba tarde: después de pagar.
+
+**Se responde 202, no 400.** Mismo motivo que con los duplicados: un 4xx solo conseguiría que PI
+reintentase, y un payload malformado no se arregla reintentándolo. El rechazo queda como WARNING
+en el log y como `BLOCKED` en el audit trail, que es donde hay que verlo para corregir la
+configuración de PI. La notificación sigue guardándose en el historial en memoria para
+diagnóstico.
+
 ### Step 2 — Estructura real del AF (`graph_client.py`, implementado 2026-07-13)
 
 **Motivo del cambio (2026-07-03):** con el flujo original, el modelo proponía nombres de atributos

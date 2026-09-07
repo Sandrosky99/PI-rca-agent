@@ -313,6 +313,39 @@ async def receive_notification(
     # se ejecute después de que este endpoint ya haya respondido a PI.
     # De este modo PI recibe su confirmación inmediatamente y no se bloquea.
     # ------------------------------------------------------------------
+    # Paso 3-bis: ¿es esto una notificación analizable?
+    # ------------------------------------------------------------------
+    # Antes de crear nada. Sin esta puerta, un cuerpo sin campos utilizables
+    # -- incluido uno que ni siquiera fuese JSON -- creaba su incidente y
+    # llegaba hasta el Step 4, GASTANDO una llamada al modelo antes de que la
+    # validacion del Step 5 lo cortara por no haber af_context.
+    #
+    # Se responde 202 y no 400 por el mismo motivo que con los duplicados: un
+    # 4xx solo conseguiria que PI reintentase, y un payload malformado no se
+    # arregla reintentandolo. El rechazo queda MUY visible en el log y en el
+    # audit trail, que es donde hay que verlo para corregir la configuracion
+    # de PI. La notificacion sigue en /notifications/history para diagnostico.
+    problemas = workflow.validate_notification(payload)
+    if problemas:
+        observability.audit(
+            "notification.accept",
+            {"origin": origin, "keys": ",".join(sorted(payload)[:8]) if isinstance(payload, dict) else "-"},
+            status="BLOCKED", detail="; ".join(problemas),
+        )
+        log.warning(
+            "Notificacion RECHAZADA: no es analizable. No se registra incidente ni se llama al modelo.",
+            extra={"origin": origin, "motivos": "; ".join(problemas)},
+        )
+        return JSONResponse(
+            content={
+                "status": "rejected",
+                "message": "Notificacion no analizable: " + "; ".join(problemas),
+                "received_at": received_at,
+            },
+            status_code=202,
+        )
+
+    # ------------------------------------------------------------------
     # Paso 4: Deduplicar — ¿es este incidente uno que ya estamos tratando?
     # ------------------------------------------------------------------
     # Va después de validar el token para no crear registros a partir de

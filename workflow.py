@@ -368,6 +368,55 @@ def _valid_field(payload: dict, key: str, expected_type):
     return raw
 
 
+# Campos sin los cuales la notificación no es analizable. El resto del payload
+# se tolera ausente o con el tipo cambiado -- _valid_field los omite del mensaje
+# y sigue adelante --, pero sin estos dos no hay nada que hacer:
+#   Asset   -> sin él no se puede consultar el AF (Step 2), y sin AF el Step 5
+#              no tiene ningún piApiPath contra el que validar.
+#   KPIName -> sin él no hay desviación concreta que investigar, ni identidad
+#              de incidente con la que deduplicar.
+_CAMPOS_MINIMOS = (
+    ("Asset", "el activo afectado"),
+    ("KPIName", "el indicador en alerta"),
+)
+
+
+def validate_notification(payload) -> list[str]:
+    """Comprueba si una notificación de PI es analizable, ANTES de aceptarla.
+
+    Complementa a _valid_field, que valida campo a campo ya dentro del análisis
+    y descarta lo que no cuadra sin abortar. Eso está bien para campos
+    opcionales, pero dejaba pasar el caso extremo: un payload sin nada
+    aprovechable llegaba hasta el Step 4 y **gastaba una llamada al modelo**
+    (medido: 6.524 caracteres de prompt con un cuerpo que ni siquiera era JSON)
+    antes de que la puerta del Step 5 lo cortara por no haber af_context.
+
+    Con esto, ese payload se rechaza en la puerta: sin incidente, sin
+    subprocesos MCP y sin coste.
+
+    Args:
+        payload: lo que se haya podido parsear del cuerpo de la petición.
+
+    Returns:
+        Lista de problemas encontrados, en lenguaje llano para el log. Vacía si
+        la notificación es analizable.
+    """
+    if not isinstance(payload, dict):
+        return [f"el cuerpo no es un objeto JSON (llegó {type(payload).__name__})"]
+
+    # webhook.py guarda así los cuerpos que no son JSON, para poder diagnosticar
+    # qué envía PI. Es útil como registro, pero no es una alerta analizable.
+    if payload.get("_format") == "no-json":
+        return ["el cuerpo recibido no era JSON válido"]
+
+    problemas = []
+    for campo, descripcion in _CAMPOS_MINIMOS:
+        valor = payload.get(campo)
+        if not isinstance(valor, str) or not valor.strip():
+            problemas.append(f"falta '{campo}' ({descripcion}) o no es texto no vacío")
+    return problemas
+
+
 def _describe_threshold(threshold_type: str) -> str:
     """Explica en lenguaje natural por qué salta un umbral 'Low'/'High' de PI.
 
