@@ -70,10 +70,12 @@ import json
 import logging
 import os
 import re
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import config
+import observability
 
 log = logging.getLogger(__name__)
 
@@ -83,6 +85,7 @@ ANALIZANDO = "analizando"    # análisis en curso
 FINALIZADO = "finalizado"    # análisis completo, con diagnóstico
 FALLIDO = "fallido"          # el análisis se cortó de forma controlada
 INTERRUMPIDO = "interrumpido"  # el proceso murió a mitad (detectado al arrancar)
+PAUSADO = "pausado"          # recibido con el workflow deshabilitado (WORKFLOW_ENABLED=false)
 
 _EN_CURSO = (RECIBIDO, ANALIZANDO)
 
@@ -135,8 +138,17 @@ def _marca_temporal(payload: dict) -> str:
         limpio = re.sub(r"[^0-9A-Za-z]", "", crudo)
         if limpio:
             return limpio
-    log.warning("Incidente sin 'StartTime' utilizable (%r); se usa la hora de recepción.", crudo)
-    return "recibido" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+
+    # Sin StartTime no puede haber clave exacta, así que este marcador solo
+    # tiene que ser ÚNICO. Se le añade un sufijo aleatorio en vez de fiarlo
+    # todo al reloj: en Windows dos llamadas seguidas pueden devolver el mismo
+    # microsegundo, y entonces la segunda notificación se rechazaría como
+    # duplicado exacto sin serlo. Lo detectó test_incidents al fallar de forma
+    # intermitente (2026-09-07).
+    log.warning("Incidente sin 'StartTime' utilizable; se usa la hora de recepción.",
+                extra={"startTimeRecibido": repr(crudo)})
+    marca = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    return f"recibido{marca}{uuid.uuid4().hex[:6]}"
 
 
 def _escribir(ruta: Path, registro: dict) -> None:
@@ -199,6 +211,11 @@ def claim(payload: dict) -> dict | None:
 
     previo = _duplicado_por_enfriamiento(identidad, ahora)
     if previo is not None:
+        observability.audit(
+            "incident.claim", {"identity": identidad, "asset": payload.get("Asset")},
+            status="BLOCKED",
+            detail=f"enfriamiento {config.INCIDENT_COOLDOWN_MINUTES} min; previo {previo.get('id')}",
+        )
         log.warning(
             "Notificación descartada por enfriamiento (%d min): '%s' de '%s' ya se registró "
             "el %s y quedó en estado '%s'. No se lanza un análisis nuevo.",
@@ -221,6 +238,11 @@ def claim(payload: dict) -> dict | None:
         "diagnostico": None,
     }
 
+    # Auditoría ANTES de crear el registro (spec §2.2): esto persiste estado.
+    observability.audit(
+        "incident.claim",
+        {"incidentId": ruta.stem, "asset": registro["asset"], "kpiName": registro["kpi_name"]},
+    )
     try:
         # Creación exclusiva: si el fichero ya existe, es exactamente la misma
         # notificación (mismo sujeto y mismo StartTime). Esta es la reserva
@@ -228,25 +250,38 @@ def claim(payload: dict) -> dict | None:
         with open(ruta, "x", encoding="utf-8") as f:
             json.dump(registro, f, ensure_ascii=False, indent=2)
     except FileExistsError:
+        observability.audit(
+            "incident.claim", {"incidentId": ruta.stem},
+            status="BLOCKED", detail="duplicado exacto (mismo sujeto y StartTime)",
+        )
         log.warning(
             "Notificación duplicada exacta (mismo activo, KPI y StartTime): %s. "
             "No se lanza un análisis nuevo.", ruta.stem,
         )
         return None
 
-    log.info("Incidente registrado: %s ('%s' de '%s')",
-             ruta.stem, registro["kpi_name"], registro["asset"])
+    log.info("Incidente registrado.", extra={
+        "incidentId": ruta.stem, "asset": registro["asset"], "kpiName": registro["kpi_name"]})
     return registro
 
 
-def mark(registro: dict, estado: str, diagnostico: dict | None = None) -> None:
+def mark(registro: dict, estado: str, diagnostico: dict | None = None,
+         trace: dict | None = None) -> None:
     """Actualiza el estado del incidente en disco. Nunca propaga excepciones:
     un fallo escribiendo el registro no debe tumbar el análisis en curso."""
     ruta = _directorio() / f"{registro['id']}.json"
+    observability.audit(
+        "incident.mark", {"incidentId": registro["id"], "estado": estado},
+    )
     registro["estado"] = estado
     registro["actualizado_en"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     if diagnostico is not None:
         registro["diagnostico"] = diagnostico
+    if trace:
+        # Prompts y respuestas del modelo. Aquí y no en el log: con el logging
+        # estructurado se truncarían a 200 caracteres, y este fichero es el
+        # registro del caso -- base/software-spec §1.5 (procedencia del prompt).
+        registro["trace"] = trace
     try:
         _escribir(ruta, registro)
     except OSError as exc:

@@ -26,6 +26,7 @@ from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
 import config
+import observability
 
 log = logging.getLogger(__name__)
 
@@ -255,6 +256,14 @@ async def fetch_historical_data(
             async with ClientSession(read, write) as session:
                 await session.initialize()
 
+                # Único punto del workflow que muta estado FUERA del proceso:
+                # crea un bucket en aveva-pi-mcp. Se audita antes de ejecutarlo
+                # (observability-spec §2.2). El resto de llamadas a PI son de
+                # solo lectura y no requieren auditoría.
+                observability.audit("create_timeseries_bucket", {
+                    "bucketId": bucket_id, "startDate": start_date, "endDate": end_date,
+                    "interval": f"{interval_value} {interval_unit}", "paths": len(pi_paths),
+                })
                 await session.call_tool(
                     "create_timeseries_bucket",
                     {

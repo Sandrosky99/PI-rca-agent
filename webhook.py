@@ -23,8 +23,6 @@ Endpoints disponibles:
 
 import logging
 from datetime import datetime
-from logging.handlers import RotatingFileHandler
-from pathlib import Path
 
 import asyncio
 
@@ -34,6 +32,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 import config
 import incidents
+import observability
 import workflow
 
 
@@ -47,16 +46,28 @@ async def _analizar_incidente(payload: dict, registro: dict) -> None:
     primer paso hacia un canal de salida de verdad (hoy solo iba al log).
     """
     incidents.mark(registro, incidents.ANALIZANDO)
+    trace: dict = {}
     try:
-        diagnostico = await workflow.run_rca_analysis(payload)
+        diagnostico = await workflow.run_rca_analysis(payload, trace)
     except Exception:
-        log.exception("Análisis abortado por un error no controlado.")
-        incidents.mark(registro, incidents.FALLIDO)
+        log.exception("Analisis abortado por un error no controlado.",
+                      extra={"incidentId": registro["id"]})
+        incidents.mark(registro, incidents.FALLIDO, trace=trace)
         return
     if diagnostico is None:
-        incidents.mark(registro, incidents.FALLIDO)
+        incidents.mark(registro, incidents.FALLIDO, trace=trace)
     else:
-        incidents.mark(registro, incidents.FINALIZADO, diagnostico=diagnostico)
+        # Etiquetado de contenido generado por IA (ai-governance 5.4): quien lea
+        # el fichero del incidente debe saber que el diagnostico lo produjo un
+        # modelo y que es una hipotesis pendiente de verificacion humana.
+        diagnostico["_ai_generated"] = {
+            "provider": config.LLM_PROVIDER,
+            "model": config.GEMINI_MODEL if config.LLM_PROVIDER == "gemini" else config.ANTHROPIC_MODEL,
+            "notice": ("Hipotesis generada por un modelo de lenguaje a partir de datos de PI. "
+                       "NO es una causa raiz confirmada: requiere verificacion por un ingeniero "
+                       "de procesos antes de actuar."),
+        }
+        incidents.mark(registro, incidents.FINALIZADO, diagnostico=diagnostico, trace=trace)
 
 
 class Expect100ContinueMiddleware(BaseHTTPMiddleware):
@@ -90,27 +101,13 @@ _MAX_HISTORY = 50
 # =============================================================================
 # Configuración del sistema de logs
 # =============================================================================
-# El sistema de logs escribe mensajes en la consola con la hora, el nivel
-# (INFO, WARNING, ERROR) y el mensaje. Esto nos permite ver en tiempo real
-# qué notificaciones llegan y qué hace el servidor con ellas.
+# El logging es JSON estructurado, una línea por evento, con los campos que
+# exige extensions/observability-spec.md §1 (ts, level, component, msg). Va a
+# consola y a un fichero rotativo (10 MB x 5): una Notification Rule de PI con
+# NonrepetitionInterval=0 puede reenviar sin parar, y el disco no es infinito.
 #
-# Además de la consola, se escribe lo mismo a un fichero rotativo
-# (webhook.log, junto a este script) para poder revisar notificaciones
-# pasadas aunque la consola ya no esté visible o se haya reiniciado el
-# servidor. Se rota a los 10 MB (5 ficheros de respaldo) porque una alerta
-# de PI mal configurada puede reenviar notificaciones cada pocos segundos
-# de forma indefinida (visto en real: NonrepetitionInterval=0 en la
-# Notification Rule de PI genera una notificación nueva por cada
-# evaluación periódica de la alarma, no solo al cruzar el umbral).
-_LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
-_LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
-_LOG_FILE = Path(__file__).parent / "webhook.log"
-
-logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT, datefmt=_LOG_DATEFMT)
-
-_file_handler = RotatingFileHandler(_LOG_FILE, maxBytes=10_000_000, backupCount=5, encoding="utf-8")
-_file_handler.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATEFMT))
-logging.getLogger().addHandler(_file_handler)
+# El audit trail va aparte, a config.AUDIT_FILE (§2.3). Ver observability.py.
+observability.configure_logging()
 
 log = logging.getLogger(__name__)
 
@@ -325,8 +322,39 @@ async def receive_notification(
             status_code=202,
         )
 
+    # ------------------------------------------------------------------
+    # Paso 5: Interruptor de parada en caliente (ai-governance 9.5)
+    # ------------------------------------------------------------------
+    # Con WORKFLOW_ENABLED=false la notificacion se sigue recibiendo y
+    # registrando -- no se pierde nada -- pero no se lanza ningun analisis: ni
+    # LLM ni MCP servers. Permite cortar el comportamiento automatico sin
+    # desplegar ni revertir. El incidente queda en 'pausado' para poder
+    # relanzarlo a mano despues.
+    if not config.WORKFLOW_ENABLED:
+        observability.audit(
+            "run_rca_analysis", {"incidentId": registro["id"], "asset": registro["asset"]},
+            status="BLOCKED", detail="WORKFLOW_ENABLED=false (parada en caliente)",
+        )
+        incidents.mark(registro, incidents.PAUSADO)
+        log.warning(
+            "Analisis NO lanzado: el workflow esta deshabilitado por configuracion.",
+            extra={"incidentId": registro["id"]},
+        )
+        return JSONResponse(
+            content={
+                "status": "paused",
+                "message": "Notificacion registrada. El analisis automatico esta deshabilitado.",
+                "received_at": received_at,
+            },
+            status_code=202,
+        )
+
+    observability.audit(
+        "run_rca_analysis",
+        {"incidentId": registro["id"], "asset": registro["asset"], "kpiName": registro["kpi_name"]},
+    )
     background_tasks.add_task(_analizar_incidente, payload, registro)
-    log.info("Analisis RCA iniciado en segundo plano (incidente %s).", registro["id"])
+    log.info("Analisis RCA iniciado en segundo plano.", extra={"incidentId": registro["id"]})
 
     # ------------------------------------------------------------------
     # Paso 5: Responder a PI System con confirmación inmediata

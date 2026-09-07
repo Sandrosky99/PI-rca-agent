@@ -997,11 +997,21 @@ def _enforce_trend_coverage(
     return cubren[0]
 
 
-async def run_rca_analysis(notification_payload: dict) -> dict | None:
+async def run_rca_analysis(notification_payload: dict, trace: dict | None = None) -> dict | None:
     """Punto de entrada principal del workflow RCA.
 
     Se llama desde webhook.py cada vez que llega una notificación de PI System.
     Se ejecuta en segundo plano (no bloquea la respuesta al servidor de PI).
+
+    Args:
+        notification_payload: los datos de la alerta tal como los envió PI.
+        trace: diccionario opcional que esta función rellena con los prompts
+               enviados al modelo y sus respuestas. webhook.py lo persiste en el
+               fichero del incidente. Los prompts ya no van al log: con el
+               logging estructurado se truncan a 200 caracteres, y el fichero
+               del incidente es su sitio natural -- es el registro del caso, y
+               base/software-spec §1.5 pide preservar el prompt que llevó a un
+               artefacto generado por IA.
 
     Returns:
         El diagnóstico ya parseado ({"root_causes": [...]}) si el análisis llegó
@@ -1049,8 +1059,11 @@ async def run_rca_analysis(notification_payload: dict) -> dict | None:
     # Step 3: Preparar el contexto estructurado para el modelo
     # -------------------------------------------------------------------------
     context = build_analysis_context(notification_payload, af_context)
-    log.info("Contexto construido para el modelo:")
-    log.info(context["claude_prompt"])
+    if trace is not None:
+        trace["step3_prompt"] = context["claude_prompt"]
+        trace["system_prompt"] = SYSTEM_PROMPT
+    log.info("Contexto construido para el modelo (Step 3).",
+             extra={"promptChars": len(context["claude_prompt"])})
 
     # -------------------------------------------------------------------------
     # Step 4: el modelo responde con las variables que necesita analizar
@@ -1066,8 +1079,10 @@ async def run_rca_analysis(notification_payload: dict) -> dict | None:
         log.error("Step 4 fallido: %s", exc)
         log.info("WORKFLOW RCA: análisis interrumpido en el Step 4. Steps 5 y 6 no ejecutados.")
         return
-    log.info("Respuesta del modelo (Step 4) -- variables a consultar:")
-    log.info(variables_response)
+    if trace is not None:
+        trace["step4_response"] = variables_response
+    log.info("Respuesta del modelo recibida (Step 4).",
+             extra={"responseChars": len(variables_response)})
 
     # -------------------------------------------------------------------------
     # Step 5: Obtener datos históricos de esas variables vía MCP Server
@@ -1140,12 +1155,14 @@ async def run_rca_analysis(notification_payload: dict) -> dict | None:
                 "Step 5: %d piApiPath no resolvieron a WebID y se excluyeron: %s",
                 len(historical_data["excluded_piApiPaths"]), historical_data["excluded_piApiPaths"],
             )
-        log.info(historical_data["data"])
+
 
         # --- Step 6 ---
         diagnosis_prompt = build_diagnosis_context(context, variables, historical_data, missing_variables)
-        log.info("Contexto construido para el modelo (Step 6):")
-        log.info(diagnosis_prompt)
+        if trace is not None:
+            trace.setdefault("step6_prompts", []).append(diagnosis_prompt)
+        log.info("Contexto construido para el modelo (Step 6).",
+                 extra={"promptChars": len(diagnosis_prompt), "lookbackHours": lookback_hours})
 
         try:
             diagnosis_response = llm_client.generate(SYSTEM_PROMPT, diagnosis_prompt)
@@ -1153,8 +1170,10 @@ async def run_rca_analysis(notification_payload: dict) -> dict | None:
             log.error("Step 6 fallido: %s", exc)
             log.info("WORKFLOW RCA: análisis interrumpido en el Step 6.")
             return
-        log.info("Respuesta del modelo (Step 6) -- diagnóstico:")
-        log.info(diagnosis_response)
+        if trace is not None:
+            trace.setdefault("step6_responses", []).append(diagnosis_response)
+        log.info("Respuesta del modelo recibida (Step 6).",
+                 extra={"responseChars": len(diagnosis_response)})
 
         try:
             diagnosis = json.loads(_extract_json_payload(diagnosis_response))

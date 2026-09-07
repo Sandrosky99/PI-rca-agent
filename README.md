@@ -2,6 +2,22 @@
 
 Workflow que diagnostica la causa raíz de alertas operacionales generadas por **AVEVA PI System**. Cuando PI detecta que un KPI se sale de su umbral, el sistema recibe la notificación, averigua qué variables existen realmente en el Asset Framework, consulta sus datos históricos y produce un diagnóstico con 2–3 causas raíz y su acción correctiva.
 
+## Propietario
+
+**Sandrosky99** &lt;sandracerveron@gmail.com&gt; — responsable del mantenimiento de este recurso y
+de la decisión final sobre sus cambios, con independencia de que su desarrollo se haya asistido
+con IA.
+
+> ⚠️ **No es un producto oficial de Schneider Electric.** Es un recurso educativo y de
+> referencia, entregado «TAL CUAL». Lee [`DISCLAIMER.md`](./DISCLAIMER.md) antes de usarlo, y
+> [`docs/AI-GOVERNANCE.md`](./docs/AI-GOVERNANCE.md) para conocer sus límites: **el diagnóstico
+> que produce es una hipótesis generada por un modelo de lenguaje, no una causa raíz
+> confirmada.**
+
+Conforme a izSpecs `2026.12-09011521` — ver [`docs/IZSPECS-CONFORMANCE.md`](./docs/IZSPECS-CONFORMANCE.md).
+
+---
+
 > **Nota sobre el nombre.** El repositorio se llama todavía `PI-rca-agent`, pero **esto es un workflow, no un agente**: el módulo principal es `workflow.py` y el renombrado del repositorio está pendiente. El control de flujo vive entero en código Python; al modelo se le consulta dos veces y no dirige el proceso. Ver [¿Workflow o agente?](#workflow-o-agente) — la distinción importa al leer el código.
 
 ---
@@ -325,6 +341,16 @@ Edita `.env` y rellena la clave del proveedor que vayas a usar. Con la configura
 ```
 GEMINI_API_KEY=tu-clave-de-gemini
 ```
+
+> ⚠️ **Riesgo del fichero `.env`.** Las credenciales quedan **en texto plano en disco**. El
+> fichero está en `.gitignore` y **NUNCA debe subirse al control de versiones**, pero cualquiera
+> con acceso de lectura a esa máquina puede leer las claves. Si eso no es aceptable en tu
+> entorno, sustitúyelo por un gestor de secretos y define las variables en el entorno del
+> proceso. `config.py` lee de variables de entorno, así que funciona igual sin fichero `.env`.
+
+Lo mismo vale para los ficheros que el workflow genera: `webhook.log`, `audit.jsonl` e
+`incidents/` contienen payloads y datos de planta. Están en `.gitignore` y no deben salir del
+servidor sin valorarlo.
 
 ---
 

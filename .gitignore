@@ -13,6 +13,11 @@ webhook.log*
 # Logs del servicio de Windows (NSSM, ver install_service.bat)
 logs/
 
+# Audit trail — NUNCA subir a git.
+# Registra cada operación con efectos, incluyendo nombres de activo y rutas de
+# PI. Debe conservarse (observability-spec §2.4), pero fuera del repositorio.
+audit.jsonl*
+
 # Registro de incidentes — NUNCA subir a git.
 # Cada fichero guarda el payload completo de una alerta real y el diagnóstico
 # producido: nombres de activos, valores de proceso y datos de planta. Mismo

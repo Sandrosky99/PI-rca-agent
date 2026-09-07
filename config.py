@@ -102,6 +102,26 @@ WEBHOOK_SECRET: str = os.environ.get("WEBHOOK_SECRET", "")
 PI_LOCAL_TIMEZONE: str = os.environ.get("PI_LOCAL_TIMEZONE", "Europe/Madrid")
 
 # =============================================================================
+# Observabilidad -- ver observability.py y extensions/observability-spec.md
+# =============================================================================
+
+# Log de aplicación: una línea JSON por evento, rotativo a 10 MB x 5.
+LOG_FILE: str = os.environ.get("LOG_FILE") or str(Path(__file__).parent / "webhook.log")
+
+# Audit trail. DEBE ser un destino distinto del log de aplicación (spec §2.3) y
+# sobrevivir a los reinicios (§2.4). Formato JSON Lines, append-only.
+AUDIT_FILE: str = os.environ.get("AUDIT_FILE") or str(Path(__file__).parent / "audit.jsonl")
+
+# Interruptor de parada en caliente (ai-governance §9.5).
+# Con WORKFLOW_ENABLED=false el webhook sigue aceptando y registrando las
+# notificaciones de PI, pero NO lanza ningún análisis: no se llama al LLM ni a
+# los MCP servers. Permite cortar el comportamiento automático sin desplegar ni
+# revertir nada. Se lee en cada notificación, así que basta con reiniciar el
+# proceso tras cambiarlo (o exportar la variable en el entorno del servicio).
+WORKFLOW_ENABLED: bool = (os.environ.get("WORKFLOW_ENABLED") or "true").strip().lower() \
+    not in ("0", "false", "no")
+
+# =============================================================================
 # Registro de incidentes (deduplicación y persistencia) -- ver incidents.py
 # =============================================================================
 
