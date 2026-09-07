@@ -68,10 +68,22 @@ check("devuelve la notificacion", "PS20102" in r.text)
 config.NOTIFICATION_HISTORY_ENABLED = False
 
 print("\n=== 3. El endpoint de salud no filtra datos de planta ===")
+# /health esta abierto (ver DECISIONES DE SEGURIDAD), asi que lo que importa no
+# es cuantos campos devuelve sino QUE devuelve: estado y numeros, nunca nombres
+# de activo, rutas de PI ni valores de proceso.
+webhook._notification_history.clear()
 with TestClient(webhook.app) as c:
+    c.post("/notification", json=dict(PAYLOAD))   # deja datos reales en memoria
     r = c.get("/health")
+cuerpo = r.json()
 check("responde 200", r.status_code == 200)
-check("solo estado y servicio", set(r.json()) == {"status", "timestamp", "service"}, f"{set(r.json())}")
+check("no expone el nombre del activo", "PS20102" not in r.text, r.text[:140])
+check("no expone la jerarquia de planta",
+      not any(x in r.text for x in ("Pumping Station", "External Pumping", "WWTP")), r.text[:140])
+check("no expone valores de proceso", "41.3" not in r.text and "48.0" not in r.text)
+check("el recuento de incidentes son solo numeros",
+      all(isinstance(v, int) for v in cuerpo.get("incidentes", {}).values()),
+      cuerpo.get("incidentes"))
 
 print("\n=== 4. WEBHOOK_SECRET: si se configura, se exige ===")
 # No se usa en este despliegue (PI no puede enviar cabeceras propias), pero el

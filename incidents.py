@@ -173,17 +173,21 @@ def _leer(ruta: Path) -> dict | None:
 def _duplicado_por_enfriamiento(identidad: str, ahora: datetime) -> dict | None:
     """Busca un incidente del mismo sujeto dentro de la ventana de enfriamiento.
 
-    Bloquea con independencia de cómo terminase el anterior: si la desviación
-    sigue ahí media hora después, re-analizarla da la misma respuesta, y si el
-    anterior falló, reintentar en bucle cada pocos minutos tampoco ayuda. Los
-    fallos quedan visibles en el log.
+    Bloquea aunque el anterior fallara: si la desviación sigue ahí veinte
+    minutos después, re-analizarla da la misma respuesta, y si el análisis falló
+    por algo suyo, reintentarlo cada pocos minutos daría el mismo error y
+    quemaría llamadas al modelo.
+
+    La excepción es INTERRUMPIDO. Ver la nota en claim(): ahí la causa fue
+    externa (murió el proceso) y ya no está, así que un reintento tiene todas
+    las papeletas de funcionar. No debe quedar bloqueado.
     """
     if config.INCIDENT_COOLDOWN_MINUTES <= 0:
         return None
     limite = ahora - timedelta(minutes=config.INCIDENT_COOLDOWN_MINUTES)
     for ruta in _directorio().glob(f"{identidad}__*.json"):
         registro = _leer(ruta)
-        if not registro:
+        if not registro or registro.get("estado") == INTERRUMPIDO:
             continue
         try:
             recibido = datetime.fromisoformat(registro["recibido_en"].replace("Z", "+00:00"))
@@ -192,6 +196,28 @@ def _duplicado_por_enfriamiento(identidad: str, ahora: datetime) -> dict | None:
         if recibido >= limite:
             return registro
     return None
+
+
+def contar_por_estado() -> dict[str, int]:
+    """Recuento de incidentes por estado, para exponerlo en /health.
+
+    No es una interfaz de usuario, pero convierte en visible algo que hasta
+    ahora solo aparecía en un WARNING del arranque: que hay incidentes
+    atascados. Cualquier monitorización que haga polling del endpoint lo ve.
+
+    Solo devuelve números -- ni nombres de activo ni datos de planta -- porque
+    /health no está autenticado.
+    """
+    recuento: dict[str, int] = {}
+    try:
+        for ruta in _directorio().glob("*.json"):
+            registro = _leer(ruta)
+            if registro:
+                estado = registro.get("estado", "desconocido")
+                recuento[estado] = recuento.get(estado, 0) + 1
+    except OSError as exc:
+        log.warning("No se pudo recorrer el registro de incidentes", extra={"errorMsg": str(exc)})
+    return recuento
 
 
 def claim(payload: dict) -> dict | None:
@@ -250,13 +276,46 @@ def claim(payload: dict) -> dict | None:
         with open(ruta, "x", encoding="utf-8") as f:
             json.dump(registro, f, ensure_ascii=False, indent=2)
     except FileExistsError:
+        # Un incidente INTERRUMPIDO sí se puede volver a reservar (2026-09-07).
+        #
+        # Motivo: la deduplicación y la persistencia, construidas por separado,
+        # se estorbaban. El fichero que garantiza no perder el incidente era el
+        # mismo que impedía reintentarlo: open(ruta,"x") fallaba siempre, así
+        # que un análisis cortado a mitad no se podía relanzar NUNCA, ni
+        # reenviando la notificación ni esperando a que pasara el enfriamiento.
+        # La única salida era borrar el fichero a mano, y eso no se le puede
+        # pedir a nadie -- menos aún sin una interfaz desde la que verlo.
+        #
+        # Se distingue por el estado en que quedó:
+        #   INTERRUMPIDO -> la causa fue externa (murió el proceso) y ya no
+        #       está. Se re-reserva. Como la alarma sigue activa en PI, en
+        #       cuanto vuelva a evaluar la regla y reenvíe, se recoge solo:
+        #       la vía de recuperación es la vía normal, sin herramientas.
+        #   FALLIDO      -> el análisis se ejecutó y falló por algo suyo.
+        #       Reintentar daría el mismo error, así que se sigue bloqueando.
+        previo = _leer(ruta)
+        if previo is not None and previo.get("estado") == INTERRUMPIDO:
+            registro["intentos"] = previo.get("intentos", 1) + 1
+            _escribir(ruta, registro)
+            observability.audit(
+                "incident.claim", {"incidentId": ruta.stem, "intento": registro["intentos"]},
+                detail="re-reserva de un incidente interrumpido",
+            )
+            log.warning(
+                "Se re-lanza un incidente que había quedado interrumpido.",
+                extra={"incidentId": ruta.stem, "asset": registro["asset"],
+                       "intento": registro["intentos"]},
+            )
+            return registro
+
         observability.audit(
             "incident.claim", {"incidentId": ruta.stem},
-            status="BLOCKED", detail="duplicado exacto (mismo sujeto y StartTime)",
+            status="BLOCKED",
+            detail=f"duplicado exacto; el previo quedó en '{(previo or {}).get('estado')}'",
         )
         log.warning(
-            "Notificación duplicada exacta (mismo activo, KPI y StartTime): %s. "
-            "No se lanza un análisis nuevo.", ruta.stem,
+            "Notificación duplicada exacta (mismo activo, KPI y StartTime).",
+            extra={"incidentId": ruta.stem, "estadoPrevio": (previo or {}).get("estado")},
         )
         return None
 

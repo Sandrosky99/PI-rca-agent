@@ -200,6 +200,31 @@ Lo que se pierde: no hay consultas ni agregación. Para las métricas de evaluac
 todos los ficheros y agregarlos en Python — trivial con unas pocas alertas al día. Migrar a SQLite
 después es mecánico: cada fichero es una fila.
 
+**Recuperación de un incidente interrumpido (2026-09-07).** La deduplicación y la persistencia,
+construidas por separado, se estorbaban: el fichero que garantiza no perder el incidente era el
+mismo que impedía reintentarlo. `open(ruta,"x")` fallaba siempre, así que un análisis cortado a
+mitad **no se podía relanzar nunca** — ni reenviando la notificación ni esperando al enfriamiento.
+La única salida era borrar el fichero a mano, y eso no se le puede pedir a nadie, menos aún sin una
+interfaz desde la que verlo.
+
+Ahora se distingue por el estado en que quedó:
+
+| Estado previo | Qué significa | Al reenviar la notificación |
+|---|---|---|
+| `interrumpido` | Murió el proceso. Causa externa, ya no está | **Se re-reserva** y se vuelve a analizar. Cuenta el intento en `intentos` |
+| `fallido` | El análisis se ejecutó y falló por algo suyo | Sigue bloqueado: reintentar daría el mismo error |
+
+La vía de recuperación pasa a ser la vía normal. Como la alarma sigue activa en PI, en cuanto
+vuelva a evaluar la regla y reenvíe, el sistema lo recoge solo. **No se relanza automáticamente al
+arrancar**: eso sí podría entrar en bucle con un payload problemático.
+
+Se descartó un script de relanzado: no tendría usuario. Quien lo ejecutaría es la misma persona
+que hoy borraría el fichero, y no hay forma de que se entere de que hace falta.
+
+**Visibilidad.** `GET /health` devuelve el recuento de incidentes por estado. No es una interfaz,
+pero convierte en visible algo que solo aparecía en un WARNING del arranque. Solo números: el
+endpoint no está autenticado.
+
 **Persistencia.** Estados: `recibido` → `analizando` → `finalizado` / `fallido`. Las escrituras son
 atómicas (temporal + `os.replace`, que también lo es en Windows). Al arrancar,
 `sweep_interrupted()` marca como `interrumpido` lo que quedó en curso: si hay un incidente en

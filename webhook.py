@@ -195,11 +195,21 @@ async def health_check() -> dict:
     Puedes llamar a este endpoint desde el navegador o con curl para verificar
     que el servidor está vivo antes de configurar PI System:
         curl http://localhost:8090/health
+
+    Incluye el recuento de incidentes por estado. No es una interfaz de
+    usuario, pero convierte en visible algo que hasta ahora solo aparecía en un
+    WARNING del arranque: que hay incidentes atascados en 'interrumpido'.
+    Cualquier monitorización que haga polling del endpoint lo ve.
+
+    Solo van números -- ni nombres de activo ni datos de planta -- porque este
+    endpoint no está autenticado (ver DECISIONES DE SEGURIDAD).
     """
     return {
         "status": "ok",
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "service": "rca-workflow-webhook",
+        "workflow_enabled": config.WORKFLOW_ENABLED,
+        "incidentes": incidents.contar_por_estado(),
     }
 
 

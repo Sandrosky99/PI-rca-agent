@@ -172,7 +172,50 @@ check("espacios al borde de Plant -> sigue siendo el mismo",
       incidents.claim(payload(Plant="  WWTP  ")) is None)
 check("un solo incidente", len(list(TMP.glob("*.json"))) == 1, f"{len(list(TMP.glob('*.json')))}")
 
-print("\n=== 14. Escritura atomica: no quedan .tmp ===")
+print("\n=== 14. Un incidente INTERRUMPIDO se puede re-lanzar ===")
+limpiar()
+r = incidents.claim(payload())
+incidents.mark(r, incidents.ANALIZANDO)
+incidents.sweep_interrupted()          # muere el proceso y se rearranca
+ruta = TMP / (r["id"] + ".json")
+check("queda interrumpido", json.loads(ruta.read_text(encoding="utf-8"))["estado"] == incidents.INTERRUMPIDO)
+
+r2 = incidents.claim(payload())        # reenviar la MISMA notificacion
+check("reenviar la misma notificacion ahora SI funciona", r2 is not None, f"{r2}")
+check("no crea un fichero nuevo", len(list(TMP.glob("*.json"))) == 1)
+check("vuelve al estado inicial", r2 and r2["estado"] == incidents.RECIBIDO)
+check("cuenta el intento", r2 and r2.get("intentos") == 2, r2 and r2.get("intentos"))
+
+print("\n=== 15. Un incidente FALLIDO sigue bloqueado ===")
+limpiar()
+r = incidents.claim(payload())
+incidents.mark(r, incidents.FALLIDO)
+check("reenviar no lo relanza", incidents.claim(payload()) is None)
+
+print("\n=== 16. El enfriamiento no bloquea a un interrumpido ===")
+limpiar()
+r = incidents.claim(payload())
+incidents.mark(r, incidents.ANALIZANDO)
+incidents.sweep_interrupted()
+# Otro StartTime dentro de la ventana: antes lo paraba el enfriamiento
+r2 = incidents.claim(payload(start="2026-08-19T22:12:00Z"))
+check("con otro StartTime tambien se acepta", r2 is not None, f"{r2}")
+
+print("\n=== 17. Recuento por estado (para /health) ===")
+limpiar()
+a = incidents.claim(payload(asset="Bomba A"))
+b = incidents.claim(payload(asset="Bomba B"))
+c = incidents.claim(payload(asset="Bomba C"))
+incidents.mark(a, incidents.FINALIZADO, diagnostico={"root_causes": []})
+incidents.mark(b, incidents.ANALIZANDO)
+incidents.sweep_interrupted()
+rec = incidents.contar_por_estado()
+check("cuenta el finalizado", rec.get(incidents.FINALIZADO) == 1, rec)
+check("cuenta los interrumpidos", rec.get(incidents.INTERRUMPIDO) == 2, rec)
+check("solo numeros, sin datos de planta",
+      all(isinstance(v, int) for v in rec.values()) and "Bomba A" not in str(rec), rec)
+
+print("\n=== 18. Escritura atomica: no quedan .tmp ===")
 limpiar()
 r = incidents.claim(payload())
 incidents.mark(r, incidents.FINALIZADO, diagnostico=diag)
