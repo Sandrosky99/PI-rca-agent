@@ -1,39 +1,33 @@
 @echo off
 REM =============================================================================
-REM start.bat — Arranca el servidor webhook del Workflow RCA
+REM start.bat - Arranca el servidor webhook del Workflow RCA (modo manual)
 REM =============================================================================
 REM
-REM ¿Qué hace este script?
-REM   Activa el entorno virtual de Python y arranca el servidor webhook.
-REM   El servidor quedará escuchando peticiones de PI System hasta que
-REM   lo pares con Ctrl+C o cierres la terminal.
+REM  Arranca el servidor en primer plano. Vive mientras esta ventana este
+REM  abierta; se para con Ctrl+C.
 REM
-REM ¿Cuándo ejecutarlo?
-REM   Cada vez que quieras arrancar el workflow manualmente.
-REM   Para que arranque automáticamente con Windows, usa install_service.bat.
+REM  Para que arranque solo con Windows y sobreviva al cierre de sesion, usa
+REM  install_service.bat en su lugar. Esto es para desarrollo y pruebas.
 REM
-REM URLs disponibles una vez arrancado:
-REM   Recepción de alertas de PI:  http://localhost:8090/notification
-REM   Comprobación de estado:      http://localhost:8090/health
-REM   Documentación de la API:     http://localhost:8090/docs
-REM
-REM Nota: el puerto 8080 puede cambiarse en el fichero .env (variable WEBHOOK_PORT)
+REM  El puerto y los parametros NO se fijan aqui: los lee serve.py de .env
+REM  (WEBHOOK_PORT), que es la unica fuente de verdad. Antes estaban cableados
+REM  en este fichero y habian divergido de la configuracion.
 REM
 REM =============================================================================
 
-REM Comprobar que el entorno virtual existe (es decir, que se ejecutó setup.bat)
-if not exist ".venv\Scripts\activate.bat" (
+cd /d "%~dp0"
+
+if not exist ".venv\Scripts\python.exe" (
     echo ERROR: No se encuentra el entorno virtual.
-    echo Ejecuta primero "setup.bat" para configurar el entorno.
+    echo Ejecuta primero "setup.bat".
     pause
     exit /b 1
 )
 
-REM Comprobar que existe el fichero de configuración
 if not exist ".env" (
-    echo ADVERTENCIA: No se encuentra el fichero ".env".
-    echo Copia ".env.example" a ".env" y rellena tu ANTHROPIC_API_KEY.
-    echo El servidor arrancara igualmente pero el workflow no podra llamar a Claude.
+    echo ADVERTENCIA: No existe el fichero ".env".
+    echo El servidor arrancara y registrara las notificaciones, pero el analisis
+    echo fallara al no haber clave de API. Copia ".env.example" a ".env".
     echo.
 )
 
@@ -41,5 +35,4 @@ echo Arrancando servidor RCA Workflow...
 echo Pulsa Ctrl+C para detenerlo.
 echo.
 
-REM Usar directamente el uvicorn del entorno virtual (no requiere activar el venv)
-.venv\Scripts\uvicorn.exe webhook:app --host 0.0.0.0 --port 8090 --log-level info --timeout-keep-alive 5
+.venv\Scripts\python.exe serve.py

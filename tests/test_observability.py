@@ -71,6 +71,15 @@ e = formatear(extra={"incidentId": "abc123", "promptChars": 5500})
 check("incidentId presente", e.get("incidentId") == "abc123", e.get("incidentId"))
 check("valores no textuales intactos", e.get("promptChars") == 5500, e.get("promptChars"))
 
+print("\n=== 6-bis. Se descarta el ruido que anade uvicorn ===")
+# uvicorn adjunta 'color_message': el mismo texto con codigos ANSI para la
+# consola. En un log JSON solo es ruido ilegible.
+_ESC = chr(27)
+e = formatear(extra={"color_message": f"Started {_ESC}[36m%d{_ESC}[0m", "incidentId": "abc"})
+check("color_message no aparece", "color_message" not in e, f"{sorted(e)}")
+check("sin codigos de escape ANSI", _ESC not in json.dumps(e))
+check("los extras utiles si pasan", e.get("incidentId") == "abc")
+
 print("\n=== 7. base §5: sin trazas de pila ni rutas internas ===")
 try:
     raise ValueError("algo ha fallado en C:\\ruta\\interna\\modulo.py")

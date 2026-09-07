@@ -508,13 +508,16 @@ El puerto es el 8090 porque el 8080 está ocupado por IIS en este servidor.
 
 Para que el servidor arranque automáticamente con Windows sin mantener una terminal abierta, se usa **NSSM** (Non-Sucking Service Manager):
 
-1. Descarga NSSM desde [nssm.cc/download](https://nssm.cc/download) (gratuito, sin instalador)
-2. Copia `nssm.exe` (carpeta `win64`) a `C:\MCPServer\rca-agent\`
-3. Abre una terminal como **Administrador** en esa carpeta
-4. Ejecuta:
+1. Descarga NSSM desde [nssm.cc/download](https://nssm.cc/download) (gratuito, sin instalador) y copia `nssm.exe` (carpeta `win64`) junto a este README. Hace falta porque uvicorn no implementa el protocolo de servicios de Windows; NSSM actúa de envoltorio.
+2. **Cierra cualquier servidor arrancado a mano.** Si el puerto está ocupado, el servicio no podrá abrirlo y se quedará reiniciándose en bucle.
+3. Abre el **Símbolo del sistema como Administrador**, ve a esta carpeta y ejecuta:
    ```cmd
    install_service.bat
    ```
+
+El script comprueba antes de tocar nada: permisos de administrador, entorno virtual, presencia de NSSM, fichero `.env` y puerto libre. Si algo falla lo dice y no deja el servicio a medias.
+
+> El puerto **no se configura aquí**. Lo lee `serve.py` de `WEBHOOK_PORT` en `.env`, que es la única fuente de verdad. Antes estaba cableado en `start.bat` y en `install_service.bat`, y había divergido de la configuración.
 
 El servicio aparecerá en `services.msc` como **RCA-Workflow-Webhook**.
 

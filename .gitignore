@@ -13,6 +13,13 @@ webhook.log*
 # Logs del servicio de Windows (NSSM, ver install_service.bat)
 logs/
 
+# NSSM (Non-Sucking Service Manager) - binario de terceros, no se versiona.
+# Lo necesita install_service.bat para registrar el servicio de Windows.
+# Descargar de https://nssm.cc/download y copiar win64/nssm.exe aqui.
+# Version verificada: 2.24, SHA256 del exe
+# F689EE9AF94B00E9E3F0BB072B34CAAF207F32DCB4F5782FC9CA351DF9A06C97
+nssm.exe
+
 # Audit trail — NUNCA subir a git.
 # Registra cada operación con efectos, incluyendo nombres de activo y rutas de
 # PI. Debe conservarse (observability-spec §2.4), pero fuera del repositorio.

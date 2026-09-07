@@ -51,11 +51,13 @@ _MAX_MSG = 200
 _MAX_ARG = 120
 
 # Campos que logging pone en el LogRecord y que no son extras nuestros.
+# "color_message" lo añade uvicorn: es el mismo mensaje con códigos de escape
+# ANSI para colorear la consola. En un log JSON solo es ruido ilegible.
 _RESERVADOS = {
-    "args", "asctime", "created", "exc_info", "exc_text", "filename", "funcName",
-    "levelname", "levelno", "lineno", "module", "msecs", "message", "msg", "name",
-    "pathname", "process", "processName", "relativeCreated", "stack_info",
-    "taskName", "thread", "threadName",
+    "args", "asctime", "color_message", "created", "exc_info", "exc_text",
+    "filename", "funcName", "levelname", "levelno", "lineno", "module", "msecs",
+    "message", "msg", "name", "pathname", "process", "processName",
+    "relativeCreated", "stack_info", "taskName", "thread", "threadName",
 }
 
 # El spec admite ERROR/WARN/INFO/DEBUG; logging emite WARNING.

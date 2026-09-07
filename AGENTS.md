@@ -90,10 +90,11 @@ Ese fichero es además la base natural de la revisión humana: añadirle campos 
 
 Otros cabos sueltos, por orden de urgencia:
 
-1. **El servicio no está registrado en Windows.** El proceso corre a mano desde el 2026-08-07
-   (uvicorn, PID 29548). `RCA-Workflow-Webhook` no aparece en `services.msc`: si la máquina
-   reinicia, el webhook no vuelve solo y PI enviará a un puerto muerto. Ejecutar
-   `install_service.bat` como administrador.
+1. **Registrar el servicio en Windows.** `install_service.bat` está arreglado y listo desde el
+   2026-09-07 (antes abortaba siempre por un `%BASE_DIR%` usado antes de definirse, motivo por
+   el que el servicio nunca llegó a registrarse). Falta **ejecutarlo como administrador**, que
+   es el único paso que requiere permisos elevados. Hasta entonces el servidor sigue
+   dependiendo de que alguien lo arranque a mano.
 2. **La llamada a Anthropic no usa adaptive thinking**, mientras que Gemini sí razona por defecto
    (ver «Asimetría de razonamiento» más abajo). Activar `thinking: {type: "adaptive"}` en
    `_generate_anthropic()` igualaría las dos rutas, y `LLM_MAX_TOKENS=16000` ya deja sitio para

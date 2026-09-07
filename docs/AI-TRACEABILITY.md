@@ -96,7 +96,17 @@ Revisadas el 2026-09-07. Todas fijadas a versión exacta en `requirements.txt` (
 | `tenacity` | 9.1.4 | Apache-2.0 | Ya venía como dependencia transitiva de `google-genai`; se declara explícita al usarse directamente |
 
 Todas con licencia permisiva y compatible con Apache-2.0 (la de este recurso). Ninguna
-copyleft. El escaneo de vulnerabilidades lo ejecuta `pip-audit` en el gate de CI.
+copyleft.
+
+**Binario de terceros (no es dependencia Python):**
+
+| Herramienta | Version | Licencia | Verificacion |
+|---|---|---|---|
+| NSSM | 2.24 | Dominio publico | Descargado de nssm.cc (fuente oficial) el 2026-09-07. SHA256 del ZIP: `727D1E42...AA6743`. SHA256 del `nssm.exe` extraido: `F689EE9A...9A06C97`. No se versiona: esta en `.gitignore` |
+
+NSSM hace falta porque uvicorn no implementa el protocolo de servicios de Windows; NSSM actua
+de envoltorio. Solo se usa en la instalacion del servicio, no en tiempo de ejecucion del
+workflow. El escaneo de vulnerabilidades lo ejecuta `pip-audit` en el gate de CI.
 
 ## 7. Verificación de licencias del código generado (§3.1)
 
