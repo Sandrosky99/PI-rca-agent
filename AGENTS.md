@@ -665,6 +665,7 @@ rca-agent/
 | `LOG_FILE` | No | Log de aplicación en JSON, rotativo | `<proyecto>\webhook.log` |
 | `AUDIT_FILE` | No | Audit trail (JSON Lines). Debe ser distinto de `LOG_FILE` | `<proyecto>udit.jsonl` |
 | `WORKFLOW_ENABLED` | No | Interruptor de parada. `false` registra las alertas pero no las analiza | `true` |
+| `NOTIFICATION_HISTORY_ENABLED` | No | Expone `GET /notifications/history` con payloads de planta sin autenticar. Encender solo para depurar | `false` |
 | `INCIDENTS_DIR` | No | Carpeta del registro de incidentes | `<proyecto>\incidents` |
 | `INCIDENT_COOLDOWN_MINUTES` | No | Ventana en que una alerta del mismo activo+KPI se considera el mismo incidente. `0` deja solo la dedup exacta | `20` |
 | `AFKG_GRAPH_MCP_DIR` | No | Carpeta del proyecto afkg-graph-mcp (Step 2) | `C:\MCPServer\afkg-graph-mcp` |
@@ -721,6 +722,11 @@ Cosas que un asistente de IA (o cualquier contribuidor) debe evitar en este repo
   (ai-governance §1.4).
 - **No relanzar análisis automáticamente** al arrancar: un payload problemático produciría un
   bucle. Ver `incidents.sweep_interrupted()`.
+- **No reactivar `/notifications/history` de forma permanente.** Devuelve los payloads completos
+  sin autenticar. Encenderlo solo para depurar una integración, y apagarlo al terminar.
+- **Antes de tocar la seguridad del webhook**, leer el bloque «DECISIONES DE SEGURIDAD» al final
+  de `webhook.py`: los cuatro puntos están evaluados, con lo que depende de PI, lo que se probó y
+  falló, y la premisa (plataforma de pruebas en red interna) que sostiene el conjunto.
 
 ## Convenciones de desarrollo
 

@@ -94,8 +94,28 @@ WEBHOOK_PORT: int = int(os.environ.get("WEBHOOK_PORT", "8090"))
 
 # Token secreto para verificar el origen de las notificaciones.
 # Si está configurado, PI debe enviar este valor en la cabecera "X-PI-Secret".
-# Si está vacío, no se valida el origen (útil en redes seguras internas).
+# Si está vacío, no se valida el origen.
+#
+# En este despliegue está vacío y así se queda: el canal de entrega HTTP de PI
+# Notifications no permite añadir cabeceras propias, así que exigirla dejaría el
+# webhook rechazando todas las notificaciones legítimas. Ver la nota
+# "DECISIONES DE SEGURIDAD" en webhook.py.
 WEBHOOK_SECRET: str = os.environ.get("WEBHOOK_SECRET", "")
+
+# Expone GET /notifications/history, que devuelve las últimas 50 notificaciones
+# COMPLETAS: nombres de activo, jerarquía de planta, valores de KPI y umbrales.
+#
+# Apagado por defecto (decisión 2026-09-07). Se creó para averiguar qué formato
+# enviaba PI durante la integración de julio, y el registro de incidentes cubre
+# hoy esa necesidad mucho mejor. Mantenerlo encendido significa servir el
+# histórico operacional reciente por HTTP y sin autenticar a cualquiera que
+# alcance el puerto -- incoherente con tener webhook.log, incidents/ y
+# audit.jsonl fuera del control de versiones justo por contener esos datos.
+#
+# Encenderlo solo de forma temporal, para depurar una integración nueva.
+NOTIFICATION_HISTORY_ENABLED: bool = (
+    os.environ.get("NOTIFICATION_HISTORY_ENABLED") or "false"
+).strip().lower() in ("1", "true", "yes")
 
 # Zona horaria local para mostrar timestamps en el log.
 # Usa nombres de zona IANA, por ejemplo: Europe/Madrid, America/New_York

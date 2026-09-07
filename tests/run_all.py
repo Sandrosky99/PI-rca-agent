@@ -27,6 +27,7 @@ SUITES = [
     ("Bucle de reajuste Steps 5-6", "test_bucle.py"),
     ("Registro de incidentes", "test_incidents.py"),
     ("Observabilidad: logging y audit trail", "test_observability.py"),
+    ("Decisiones de seguridad del webhook", "test_seguridad.py"),
 ]
 
 

@@ -170,6 +170,19 @@ no hay despliegue productivo.
 
 ---
 
+## 8-bis. Decisiones de seguridad del webhook
+
+Los cuatro controles de «proteger el webhook» se evaluaron el 2026-09-07 y se cerraron:
+autenticación por cabecera y TLS están **bloqueados por el emisor** (PI no puede enviar
+cabeceras propias; con HTTPS el handshake falla en silencio), el firewall es una **decisión de
+infraestructura** sobre una VM de pruebas, y `/notifications/history` **sí se implementó**
+(apagado por defecto). El razonamiento completo está en el bloque «DECISIONES DE SEGURIDAD»
+al final de `webhook.py`.
+
+⚠️ Todo eso se apoya en la premisa de plataforma de pruebas en red interna. Es exactamente el
+supuesto 2 del §1: al desplegar sobre una planta real, los cuatro puntos vuelven a estar
+abiertos y el firewall deja de ser opcional.
+
 ## 9. Excepciones (§11.3)
 
 Ninguna abierta a 2026-09-07.

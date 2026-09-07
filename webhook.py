@@ -158,7 +158,14 @@ async def startup_event() -> None:
     if config.WEBHOOK_SECRET:
         log.info("Validacion de origen: ACTIVA (cabecera X-PI-Secret requerida)")
     else:
-        log.info("Validacion de origen: DESACTIVADA (acepta notificaciones de cualquier origen)")
+        log.info("Validacion de origen: DESACTIVADA (ver DECISIONES DE SEGURIDAD en webhook.py)")
+
+    if config.NOTIFICATION_HISTORY_ENABLED:
+        log.warning(
+            "GET /notifications/history ACTIVO: expone payloads de planta sin autenticar. "
+            "Apagarlo al terminar de depurar.")
+    else:
+        log.info("GET /notifications/history: deshabilitado (responde 404)")
 
     log.info("Registro de incidentes: %s", config.INCIDENTS_DIR)
     log.info("Enfriamiento de duplicados: %d min", config.INCIDENT_COOLDOWN_MINUTES)
@@ -374,24 +381,84 @@ async def receive_notification(
 # =============================================================================
 @app.get(
     "/notifications/history",
-    summary="Historial de notificaciones recibidas",
+    summary="Historial de notificaciones recibidas (deshabilitado por defecto)",
     description=(
-        "Devuelve la lista de las últimas notificaciones recibidas de PI System "
-        "(máximo 50, se pierde al reiniciar el servidor). "
-        "Útil para verificar que PI System está enviando correctamente las alertas."
+        "Devuelve las últimas notificaciones recibidas de PI System (máximo 50, se "
+        "pierde al reiniciar). **Deshabilitado por defecto**: expone datos de planta "
+        "sin autenticar. Se activa con NOTIFICATION_HISTORY_ENABLED=true, y solo de "
+        "forma temporal para depurar una integración."
     ),
 )
 async def get_notification_history() -> dict:
     """Devuelve las últimas notificaciones recibidas para verificar la integración con PI.
 
-    Cómo usarlo desde PowerShell para comprobar si llegó una notificación:
-        Invoke-RestMethod http://localhost:8090/notifications/history
+    Apagado por defecto desde el 2026-09-07: devuelve los payloads COMPLETOS
+    (activo, jerarquía de planta, KPI, umbral) a cualquiera que alcance el
+    puerto, sin autenticación. Ver "DECISIONES DE SEGURIDAD" más abajo.
 
-    O con curl:
-        curl http://localhost:8090/notifications/history
+    Para depurar una integración nueva, poner NOTIFICATION_HISTORY_ENABLED=true
+    y volver a apagarlo al terminar.
     """
+    if not config.NOTIFICATION_HISTORY_ENABLED:
+        # 404 y no 403: a quien no debería estar aquí no se le confirma que el
+        # endpoint existe.
+        raise HTTPException(status_code=404, detail="Not Found")
     return {
         "total_received": len(_notification_history),
         "max_stored": _MAX_HISTORY,
         "notifications": list(reversed(_notification_history)),  # más reciente primero
     }
+
+
+# =============================================================================
+# DECISIONES DE SEGURIDAD (evaluadas y cerradas el 2026-09-07)
+# =============================================================================
+# Este webhook acepta notificaciones sin autenticar, por HTTP plano, en una VM
+# con el firewall desactivado. Eso NO es un descuido: se evaluó punto por punto
+# y estas son las conclusiones, con sus motivos, para que nadie tenga que
+# volver a deducirlas -- ni las dé por buenas fuera de contexto.
+#
+# TODO ESTO SE SOSTIENE SOBRE UNA PREMISA:
+#   plataforma de PRUEBAS, en red industrial interna (172.21.28.x), sin datos
+#   personales y sin capacidad de actuar sobre la planta. Riesgo clasificado
+#   como BAJO en docs/AI-GOVERNANCE.md §1.
+#   El día que esto apunte a una planta real, los cuatro puntos vuelven a estar
+#   abiertos y el firewall deja de ser opcional.
+#
+# 1. AUTENTICACIÓN POR CABECERA (X-PI-Secret) -- NO SE IMPLEMENTA
+#    El código lo soporta (WEBHOOK_SECRET), pero el canal de entrega HTTP de PI
+#    Notifications no permite añadir cabeceras propias. Exigirla dejaría el
+#    webhook rechazando todas las notificaciones legítimas. Un control que no
+#    puede cumplir el único emisor autorizado no da seguridad: da la apariencia
+#    de tenerla, que es peor.
+#
+# 2. TLS / HTTPS -- NO SE IMPLEMENTA
+#    Probado en julio de 2026 y falla en silencio: con https:// el handshake TLS
+#    no completa, la conexión TCP queda ESTABLISHED y a FastAPI no llega ni una
+#    petición. Nada en el log, ningún error en PI. Es el peor modo de fallo
+#    posible, así que se sirve por HTTP plano a propósito. Si algún día se
+#    retoma, empezar por el certificado: lo más probable es que PI rechace uno
+#    autofirmado.
+#
+# 3. FIREWALL / RESTRICCIÓN POR IP -- NO SE IMPLEMENTA (decisión, no bloqueo)
+#    Este SÍ es técnicamente viable: no depende de PI en absoluto, bastaría con
+#    permitir el 8090 solo desde 172.21.28.55. Está desactivado en ambas VMs
+#    desde el montaje, para eliminar variables durante la integración.
+#    Reactivarlo tiene hoy más riesgo de romper el escenario de demostración que
+#    de protegerlo. Es una decisión de infraestructura, y es la PRIMERA que hay
+#    que revertir si esto sale del entorno de pruebas.
+#
+# 4. /notifications/history -- SÍ SE IMPLEMENTA (apagado por defecto)
+#    El único de los cuatro que no dependía de nada externo. Devolvía los
+#    payloads completos sin autenticar, lo que era incoherente con mantener
+#    webhook.log, incidents/ y audit.jsonl fuera del control de versiones
+#    precisamente por contener esos mismos datos. Se apaga por defecto.
+#    /docs se deja accesible: expone la forma de la API, no datos, y ayuda a
+#    quien tenga que integrar.
+#
+# Lo que sí protege este despliegue, con independencia de lo anterior:
+#   - Ninguna credencial en el código ni en el log (config.py, .gitignore).
+#   - Los errores no exponen trazas ni rutas internas (observability.py).
+#   - La salida del modelo se valida antes de usarse; nunca se ejecuta.
+#   - El gasto está acotado: deduplicación, enfriamiento y un tope de reajustes.
+#   - WORKFLOW_ENABLED corta el comportamiento automático sin desplegar.
