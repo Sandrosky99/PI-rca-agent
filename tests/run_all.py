@@ -13,6 +13,7 @@ no la necesita. Si el proyecto crece, migrar a pytest es directo.
 """
 
 import io
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -32,6 +33,36 @@ SUITES = [
 ]
 
 
+def _comprobar_portabilidad(aqui: Path) -> list[str]:
+    """Ninguna suite debe llevar rutas absolutas de una maquina concreta.
+
+    Esto existe por un fallo real (2026-09-08). Cuatro suites conservaban un
+    sys.path.insert con la ruta del proyecto en Windows. Aqui pasaban -- la
+    ruta existe -- y en el CI de Linux morian las cuatro con
+    ModuleNotFoundError. Peor: la comprobacion que se hizo entonces para
+    descartarlo tenia el mismo error de escape que el arreglo, asi que dio un
+    falso "sin rutas absolutas".
+
+    Una comprobacion en Python, sin pasar por el shell, no se puede equivocar
+    de esa manera.
+    """
+    # Solo se miran las lineas que manipulan sys.path. Una ruta de Windows
+    # dentro de una cadena cualquiera puede ser un dato de prueba legitimo --
+    # test_seguridad comprueba justamente que los errores NO expongan rutas
+    # como "C:\\" -- y marcarla seria un falso positivo.
+    unidad = r"[A-Za-z]:" + re.escape(chr(92))     # C:\
+    raiz_unix = r"""["']/"""                        # "/algo
+    sospechosas = []
+    for _, fichero in SUITES:
+        texto = (aqui / fichero).read_text(encoding="utf-8")
+        for n, linea in enumerate(texto.splitlines(), 1):
+            if "sys.path" not in linea:
+                continue
+            if re.search(unidad, linea) or re.search(raiz_unix, linea):
+                sospechosas.append(f"{fichero}:{n}: {linea.strip()[:70]}")
+    return sospechosas
+
+
 def main() -> int:
     aqui = Path(__file__).resolve().parent
     fallidas = []
@@ -39,6 +70,17 @@ def main() -> int:
     print("=" * 66)
     print("PRUEBAS DEL WORKFLOW RCA")
     print("=" * 66)
+
+    rutas = _comprobar_portabilidad(aqui)
+    if rutas:
+        print("  [FALLA] Portabilidad: hay rutas absolutas en las suites")
+        for r in rutas:
+            print(f"         {r}")
+        print("  Las suites deben resolver el proyecto con")
+        print("  Path(__file__).resolve().parent.parent, no con una ruta fija.")
+        print("=" * 66)
+        return 1
+    print("  [PASA] Portabilidad: ninguna suite lleva rutas absolutas")
 
     for titulo, fichero in SUITES:
         proc = subprocess.run(
@@ -49,12 +91,20 @@ def main() -> int:
         print(f"  [{'PASA' if ok else 'FALLA'}] {titulo}")
         if not ok:
             fallidas.append(fichero)
-            # Solo se vuelca la salida de lo que falla: en verde no aporta.
+            # Se vuelca TODO lo de la suite que falla. Antes se filtraba a las
+            # lineas con "FALLA" y se recortaba stderr a 500 caracteres, y eso
+            # dejaba ciego el diagnostico cuando el fallo era un error de
+            # importacion: sin comprobaciones ejecutadas no hay lineas "FALLA"
+            # que filtrar, y la traza se cortaba antes de lo interesante.
+            # En CI el log es lo unico que hay, asi que mas vale que sobre.
+            print(f"         --- salida (codigo {proc.returncode}) ---")
             for linea in (proc.stdout or "").splitlines():
-                if "FALLA" in linea or "FALLOS" in linea:
-                    print(f"         {linea.strip()}")
+                print(f"         {linea}")
             if proc.stderr:
-                print(f"         stderr: {proc.stderr.strip()[:500]}")
+                print(f"         --- stderr ---")
+                for linea in proc.stderr.splitlines():
+                    print(f"         {linea}")
+            print(f"         --- fin de {fichero} ---")
 
     print("=" * 66)
     if fallidas:

@@ -51,7 +51,13 @@ def main() -> None:
 
     uvicorn.run(
         "webhook:app",
-        host="0.0.0.0",   # noqa: S104 -- PI conecta desde otra máquina de la red interna
+        # Escuchar en todas las interfaces es intencionado y necesario: PI
+        # conecta desde 172.21.28.55, otra máquina de la red industrial, así
+        # que 127.0.0.1 no serviría. Quién puede alcanzar el puerto es una
+        # cuestión de firewall, no de a qué interfaz se enlaza -- ver
+        # "DECISIONES DE SEGURIDAD" en webhook.py.
+        # nosec B104 -- justificado arriba
+        host="0.0.0.0",  # nosec B104
         port=config.WEBHOOK_PORT,
         timeout_keep_alive=_KEEP_ALIVE,
         # log_config=None: si no, uvicorn reinstala sus propios handlers y
