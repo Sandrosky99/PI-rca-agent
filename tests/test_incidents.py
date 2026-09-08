@@ -7,7 +7,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, r"C:\MCPServer\rca-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 import config
 

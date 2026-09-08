@@ -7,7 +7,7 @@ import logging
 import sys
 from pathlib import Path
 
-sys.path.insert(0, r"C:\MCPServer\rca-agent")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import workflow
 import config

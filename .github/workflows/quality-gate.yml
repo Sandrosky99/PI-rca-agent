@@ -28,6 +28,16 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+      # Contexto para diagnosticar un fallo que no se reproduzca en local.
+      # El entorno de CI es Linux y limpio; el de desarrollo, Windows y con
+      # .env. Cuando algo pasa aqui y falla alli, esto es lo primero que hay
+      # que mirar.
+      - name: Entorno
+        run: |
+          python --version
+          python -c "import sys, platform; print(platform.platform()); print(sys.executable)"
+          pip list
+
       - name: Ejecutar suites
         # Las suites usan dobles para el LLM y los MCP servers: no hacen falta
         # ni claves de API ni acceso a PI System.

@@ -30,7 +30,7 @@
 | 1.5 | Procedencia del prompt [SHOULD] | ✅ | Los prompts de producción se persisten en `incidents/<id>.json` → `trace`. Los de desarrollo, en `AI-TRACEABILITY.md` §4 |
 | 1.6 | Trazabilidad de datos de entrada [MUST] | ✅ | `AI-TRACEABILITY.md` §5 |
 | 1.7 | Inmutabilidad de la trazabilidad [MUST] | ✅ | Registros append-only bajo control de git. Documentado en la cabecera de `AI-TRACEABILITY.md` |
-| 2 | Portabilidad [SHOULD] | ✅ | Sin rutas absolutas en el código ni en las pruebas; todo lo específico de la máquina va por `.env` con valores por defecto. Las pruebas corren sin PI, sin MCP servers y sin claves |
+| 2 | Portabilidad [SHOULD] | ✅ | Las suites resuelven el proyecto con `Path(__file__).resolve().parent.parent`; lo específico de la máquina va por `.env` con valores por defecto. Corren sin PI, sin MCP servers y sin claves. **Corregido el 2026-09-08:** cuatro suites conservaban un `sys.path.insert` con la ruta de Windows y morían en el CI de Linux. `run_all.py` incluye ahora una comprobación de portabilidad que lo impide |
 | 3 | Configuración por entorno [SHOULD] | ✅ | `config.py` lee todo de `.env`. Ninguna clave de configuración cableada |
 | 4 | Declaración de conformidad [MUST] | ✅ | `AGENTS.md` §iz Spec Conformance |
 | 5 | Línea base de seguridad [SHOULD] | ✅ | Secretos solo en `.env`, en `.gitignore`, con el riesgo declarado en el `README.md`. Dependencias fijadas a versión exacta y escaneadas con `pip-audit` en CI. Los errores no vuelcan trazas ni rutas internas. `/notifications/history` apagado por defecto. **Autenticación, TLS y firewall evaluados y no aplicados**, con la justificación en el bloque «DECISIONES DE SEGURIDAD» de `webhook.py`: los dos primeros dependen de PI y están bloqueados; el tercero es una decisión de infraestructura sobre una plataforma de pruebas. Todo ello queda sin validez si el recurso sale del entorno de demo |
@@ -54,7 +54,7 @@
 | 2.1 | Cobertura de pruebas [MUST] | ✅ | 7 suites en `tests/`, 241 comprobaciones. Umbral del proyecto: toda función con lógica de decisión o validación debe tener pruebas de su camino feliz, sus modos de fallo y sus entradas malformadas |
 | 2.2 | Revisión de las pruebas [MUST] | ✅ | Verifican comportamiento real, no cobertura: cada una detecta un fallo concreto. Prueba de ello: `test_incidents` detectó una colisión real de nombres por resolución de reloj el 2026-09-07, y `test_observability` una captura de excepción demasiado estrecha |
 | 2.3 | Validación funcional documentada [MUST] | ⚠️ Parcial | `AI-TRACEABILITY.md` §8. **Dos** ciclos completos contra PI y LLM reales (2026-08-20 y 2026-09-07), pero ambos del mismo activo y KPI, y **ninguna causa confirmada** por mantenimiento |
-| 2.4 | Gate de calidad en CI/CD [MUST] | ✅ | `.github/workflows/quality-gate.yml`: pruebas + SAST + SCA + búsqueda de secretos. Falla la rama |
+| 2.4 | Gate de calidad en CI/CD [MUST] | ⚠️ Parcial | `.github/workflows/quality-gate.yml` existe y **ya se ejecuta**: pruebas + `bandit` + `pip-audit` + búsqueda de secretos. Encontró dos fallos reales en sus dos primeras ejecuciones. **Pero no bloquea**: faltan las reglas de protección de rama que marquen los checks como *required*, y eso implica pasar a rama + PR |
 | 3.1 | Verificación de licencias del código generado [MUST] | ✅ | `AI-TRACEABILITY.md` §7 |
 | 3.2 | Declaración de originalidad [SHOULD] | ✅ | Valorado; riesgo bajo, sin herramienta de similitud. Justificado en `AI-TRACEABILITY.md` §7 |
 | 3.3 | Registro de la herramienta de IA [MUST] | ✅ | `AI-TRACEABILITY.md` §1 |
@@ -140,7 +140,7 @@ Ninguna es una excepción aprobada: son trabajo pendiente.
 
 | # | Brecha | Sección | Acción |
 |---|---|---|---|
-| 1 | El gate de CI nunca se ha ejecutado | §2.4, §8 | Habilitar GitHub Actions en el repositorio y configurar el workflow como *required check* |
+| 1 | El gate de CI se ejecuta pero **no bloquea** | §2.4, §8 | Configurar la protección de rama con los checks como *required*. Implica pasar a rama + PR |
 | 2 | Los commits anteriores al 2026-09-07 no llevan fecha de generación | base §1.4 | No se corrige: reescribir el historial violaría §1.7. Compensado con `AI-TRACEABILITY.md` §1 |
 | 4 | Validación funcional con un único ciclo real | §2.3 | Ejercitar con más KPIs y tipos de activo |
 | 5 | El interruptor de parada no se ha probado en el entorno real | §9.5 | Ejecutar el procedimiento de `AI-GOVERNANCE.md` §5 |
