@@ -123,8 +123,9 @@ herramienta de detección de similitud (§3.2, SHOULD).
 | 2026-07-13 | Step 2 contra el AF real | Neo4j y `afkg-graph-mcp` reales | 15 grupos en `main_asset_context`, 5 en `nearby_elements_context` para `PS20102 A03 PS02 Pump 02` |
 | 2026-08-20 | Ciclo completo Steps 1–6 | PI System y LLM reales | `webhook.log`: alerta de `Hydraulic Efficiency`, diagnóstico de desgaste interno |
 | 2026-09-01 | Puerta del Step 4 contra datos reales | Reproducción del caso del 2026-08-20 | 30 de 30 rutas del modelo válidas, 0 rechazos |
+| 2026-09-08 | Carga de configuración desde `.env.example` | Subproceso con el ejemplo copiado tal cual | Seguir la instrucción del README dejaba la app sin arrancar (`ValueError` en `int('')`). Corregido con `_entero()` y cubierto por `tests/test_config.py` |
 | 2026-09-08 | Portabilidad de las suites | GitHub Actions, ubuntu-latest | El gate detectó que 4 suites llevaban la ruta de Windows cableada: `ModuleNotFoundError` en Linux. Corregido y protegido con una comprobación en `run_all.py` |
-| 2026-09-07 | Suites completas | Local, con dobles | `python tests/run_all.py` — 7 suites, 241 comprobaciones |
+| 2026-09-07 | Suites completas | Local, con dobles | `python tests/run_all.py` — 8 suites, 260 comprobaciones |
 | 2026-09-07 | **Ciclo completo Steps 1-6 con el código actual** | PI System, Neo4j y Gemini reales | Alerta de `Hydraulic Efficiency` (StartTime 2026-09-06T10:49:00Z). 2 min 23 s. 22 de 22 variables autorizadas. **Primera vez que el modelo ejerce la ampliación de ventana**: pidió `7d` alegando un hueco de datos. Log: 56 líneas, 0 no-JSON. Audit: 6 entradas |
 
 ⚠️ **Limitación conocida:** los **dos** ciclos completos reales son del mismo activo y el

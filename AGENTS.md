@@ -28,9 +28,14 @@ personales y un ingeniero lee siempre el diagnóstico antes de actuar. Ver
 
 **La arquitectura es la de un workflow**, y desde el 2026-09-03 los nombres lo dicen también: el
 módulo es `workflow.py`, el log imprime `WORKFLOW RCA` y el servicio es `RCA-Workflow-Webhook`.
-**Queda una excepción: el repositorio sigue llamándose `PI-rca-agent`** — renombrarlo en GitHub es
-una acción pendiente. La distinción importa al leer y modificar el código, porque induce a buscar
-un bucle de decisión que no existe:
+**El repositorio conserva el nombre original `PI-rca-agent`, y es una decisión, no un descuido**
+(2026-09-08). Se valoró renombrarlo y se descartó: izSpecs no dice nada sobre nombres de
+repositorio, y quien lo abre queda corregido de inmediato — este fichero empieza aclarándolo, el
+`README.md` lo dice en su primer párrafo y el módulo principal es `workflow.py`. El nombre desafina
+pero ya no engaña. No hace falta replantearlo cada seis meses.
+
+La distinción importa al leer y modificar el código, porque induce a buscar un bucle de decisión
+que no existe:
 
 | | Este sistema | Lo que haría un agente |
 |---|---|---|
@@ -90,26 +95,21 @@ Ese fichero es además la base natural de la revisión humana: añadirle campos 
 
 Otros cabos sueltos, por orden de urgencia:
 
-1. **Registrar el servicio en Windows.** `install_service.bat` está arreglado y listo desde el
-   2026-09-07 (antes abortaba siempre por un `%BASE_DIR%` usado antes de definirse, motivo por
-   el que el servicio nunca llegó a registrarse). Falta **ejecutarlo como administrador**, que
-   es el único paso que requiere permisos elevados. Hasta entonces el servidor sigue
-   dependiendo de que alguien lo arranque a mano.
-2. **La llamada a Anthropic no usa adaptive thinking**, mientras que Gemini sí razona por defecto
+1. **Límite de análisis simultáneos.** Nada impide que cinco activos disparando a la vez levanten
+   diez subprocesos MCP. La deduplicación evita repetir el *mismo* incidente, no la concurrencia
+   entre incidentes distintos.
+2. **Probar el interruptor de parada en el entorno real** (`WORKFLOW_ENABLED=false`), siguiendo el
+   procedimiento de `docs/AI-GOVERNANCE.md` §5. Es lo único de la lista que no requiere código.
+3. **La llamada a Anthropic no usa adaptive thinking**, mientras que Gemini sí razona por defecto
    (ver «Asimetría de razonamiento» más abajo). Activar `thinking: {type: "adaptive"}` en
    `_generate_anthropic()` igualaría las dos rutas, y `LLM_MAX_TOKENS=16000` ya deja sitio para
-   ello. Pendiente de decidir: sin la evaluación del punto 8 no habría forma de medir si mejora el
-   diagnóstico. Si se activa, hacerlo detrás de un flag y en ambos proveedores.
-3. **Renombrar el repositorio** en GitHub: `PI-rca-agent` → `PI-rca-workflow`. Es lo único que
-   sigue diciendo «agente» tras el renombrado del 2026-09-03. GitHub deja una redirección, así que
-   el remoto local sigue funcionando, pero conviene actualizarlo con `git remote set-url`.
-4. **El gate de CI nunca se ha ejecutado.** `.github/workflows/quality-gate.yml` existe desde el
-   2026-09-07, pero el repositorio no tiene Actions habilitadas. Habilitarlas y configurar el
-   workflow como *required check* en la protección de rama (ai-governance §2.4, MUST).
-5. **Ampliar la validación** a más KPIs y tipos de activo antes de dar por buena la calidad del
-   diagnóstico de forma general.
-6. **Probar el interruptor de parada en el entorno real** (`WORKFLOW_ENABLED=false`), siguiendo el
-   procedimiento de `docs/AI-GOVERNANCE.md` §5.
+   ello. Pendiente de decidir: sin evaluación no habría forma de medir si mejora el diagnóstico.
+   Si se activa, hacerlo detrás de un flag y en ambos proveedores.
+4. **Ampliar la validación** a más KPIs y tipos de activo. Las tres ejecuciones reales que hay son
+   del mismo activo y el mismo indicador, y ninguna causa se ha confirmado.
+
+Resueltos el 2026-09-08: el servicio quedó registrado y en marcha, el gate de CI se ejecuta y
+**bloquea** con protección de rama, y el flujo pasó a rama + PR con revisión humana (PR #1).
 7. **Definir un periodo de retención para `incidents/`**: hoy no se purgan nunca.
 
 ---

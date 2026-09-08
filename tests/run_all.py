@@ -23,6 +23,7 @@ from pathlib import Path
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 SUITES = [
+    ("Carga de configuracion", "test_config.py"),
     ("Puerta de autorizacion del Step 4", "test_authorization.py"),
     ("Ventana variable y catalogo", "test_ventana.py"),
     ("Bucle de reajuste Steps 5-6", "test_bucle.py"),

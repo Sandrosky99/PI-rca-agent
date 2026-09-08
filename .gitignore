@@ -1,6 +1,11 @@
 # Fichero .env con credenciales reales — NUNCA subir a git
 .env
 
+# Respaldos del .env. Llevan las MISMAS credenciales que el original, así que
+# necesitan el mismo trato. El patrón es .env.bak* y no .env.* a propósito:
+# .env.example sí debe versionarse.
+.env.bak*
+
 # Entorno virtual de Python — se regenera con setup.bat
 .venv/
 
