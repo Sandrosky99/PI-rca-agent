@@ -95,17 +95,38 @@ Ese fichero es además la base natural de la revisión humana: añadirle campos 
 
 Otros cabos sueltos, por orden de urgencia:
 
-1. **Límite de análisis simultáneos.** Nada impide que cinco activos disparando a la vez levanten
+1. **EN ESPERA (2026-09-10) — Un incidente en `pausado` no se puede relanzar.**
+   Es el mismo callejón sin salida que se arregló para `interrumpido`, y que se quedó a medias:
+   `claim()` solo permite re-reservar los incidentes en `INTERRUMPIDO`, no los que quedaron en
+   `PAUSADO` por el interruptor de parada.
+
+   **Demostrado, no teórico.** La prueba del interruptor del 2026-09-08 dejó el incidente
+   `913daf118753__20260908T140000Z` atrapado: reenviar la notificación lo rechaza por clave
+   exacta, y esperar al enfriamiento tampoco sirve. La única salida es borrar su fichero a mano.
+
+   El argumento para permitirlo es **más fuerte** que en el caso de `interrumpido`: la causa es
+   puramente externa (alguien bajó un interruptor) y el análisis **nunca llegó a ejecutarse**, así
+   que no hay riesgo de bucle con un payload problemático.
+
+   El arreglo son dos líneas en la rama `FileExistsError` de `claim()`: añadir `PAUSADO` junto a
+   `INTERRUMPIDO`, y excluirlo también del enfriamiento. Con su prueba en `test_incidents.py`,
+   simétrica a las secciones 14-16.
+
+   En espera por decisión del propietario, para abordar antes la interacción con el humano.
+
+2. **Límite de análisis simultáneos.** Nada impide que cinco activos disparando a la vez levanten
    diez subprocesos MCP. La deduplicación evita repetir el *mismo* incidente, no la concurrencia
    entre incidentes distintos.
-2. **Probar el interruptor de parada en el entorno real** (`WORKFLOW_ENABLED=false`), siguiendo el
-   procedimiento de `docs/AI-GOVERNANCE.md` §5. Es lo único de la lista que no requiere código.
-3. **La llamada a Anthropic no usa adaptive thinking**, mientras que Gemini sí razona por defecto
+3. **Completar la prueba del interruptor.** Probado el 2026-09-08 y **funciona**: la notificación
+   se acepta, se registra como `pausado`, queda `BLOCKED` en el audit trail y no se ejecuta
+   ningún Step 2-6 — coste cero. Falta el último tramo del procedimiento (reactivar y reenviar
+   para procesar la alerta pausada), **bloqueado por el punto 1**.
+4. **La llamada a Anthropic no usa adaptive thinking**, mientras que Gemini sí razona por defecto
    (ver «Asimetría de razonamiento» más abajo). Activar `thinking: {type: "adaptive"}` en
    `_generate_anthropic()` igualaría las dos rutas, y `LLM_MAX_TOKENS=16000` ya deja sitio para
    ello. Pendiente de decidir: sin evaluación no habría forma de medir si mejora el diagnóstico.
    Si se activa, hacerlo detrás de un flag y en ambos proveedores.
-4. **Ampliar la validación** a más KPIs y tipos de activo. Las tres ejecuciones reales que hay son
+5. **Ampliar la validación** a más KPIs y tipos de activo. Las tres ejecuciones reales que hay son
    del mismo activo y el mismo indicador, y ninguna causa se ha confirmado.
 
 Resueltos el 2026-09-08: el servicio quedó registrado y en marcha, el gate de CI se ejecuta y
