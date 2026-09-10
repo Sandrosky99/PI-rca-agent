@@ -64,6 +64,29 @@ def _comprobar_portabilidad(aqui: Path) -> list[str]:
     return sospechosas
 
 
+def _comprobar_aislamiento(aqui: Path) -> list[str]:
+    """Una suite que ejercita el webhook debe fijar el interruptor de parada.
+
+    Esto tambien existe por un fallo real (2026-09-10). test_validacion heredaba
+    WORKFLOW_ENABLED del .env de la maquina. Con el interruptor echado -- lo
+    normal despues de probarlo -- el webhook responde "paused" antes de llegar
+    al workflow y la suite fallaba en el servidor. En CI no fallaba nunca,
+    porque alli no hay .env y sale el valor por defecto.
+
+    Ese es el patron peligroso: verde en CI, rojo solo en la maquina real y
+    solo a ratos. El resultado de las pruebas no puede depender de en que
+    estado operativo se dejo el despliegue.
+    """
+    sin_fijar = []
+    for _, fichero in SUITES:
+        texto = (aqui / fichero).read_text(encoding="utf-8")
+        if not re.search(r"^import webhook", texto, re.M):
+            continue
+        if not re.search(r"^config\.WORKFLOW_ENABLED\s*=", texto, re.M):
+            sin_fijar.append(fichero)
+    return sin_fijar
+
+
 def main() -> int:
     aqui = Path(__file__).resolve().parent
     fallidas = []
@@ -82,6 +105,17 @@ def main() -> int:
         print("=" * 66)
         return 1
     print("  [PASA] Portabilidad: ninguna suite lleva rutas absolutas")
+
+    heredan = _comprobar_aislamiento(aqui)
+    if heredan:
+        print("  [FALLA] Aislamiento: hay suites que heredan el interruptor del .env")
+        for f in heredan:
+            print(f"         {f}: importa webhook y no fija config.WORKFLOW_ENABLED")
+        print("  Una suite que ejercita el webhook debe fijar el interruptor a mano,")
+        print("  o su resultado dependera del estado operativo de la maquina.")
+        print("=" * 66)
+        return 1
+    print("  [PASA] Aislamiento: las suites del webhook no dependen del .env")
 
     for titulo, fichero in SUITES:
         proc = subprocess.run(

@@ -18,6 +18,13 @@ TMP = Path(tempfile.mkdtemp(prefix="rca_val_"))
 config.INCIDENTS_DIR = str(TMP / "inc")
 config.AUDIT_FILE = str(TMP / "audit.jsonl")
 config.LOG_FILE = str(TMP / "app.log")
+# El interruptor de parada se fija a mano a proposito. Si se hereda del .env de
+# la maquina, esta suite pasa en CI (que no tiene .env, asi que sale el valor por
+# defecto) y falla en el servidor justo cuando alguien acaba de dar a la parada
+# en caliente -- que es precisamente cuando uno mira las pruebas. Lo que se
+# prueba aqui es la puerta de entrada, no el interruptor: ese tiene su propia
+# comprobacion en test_seguridad.py.
+config.WORKFLOW_ENABLED = True
 
 import observability
 observability.configure_logging()

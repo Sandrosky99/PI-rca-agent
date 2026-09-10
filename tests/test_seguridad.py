@@ -16,6 +16,10 @@ TMP = Path(tempfile.mkdtemp(prefix="rca_sec_"))
 config.INCIDENTS_DIR = str(TMP / "inc")
 config.AUDIT_FILE = str(TMP / "audit.jsonl")
 config.LOG_FILE = str(TMP / "app.log")
+# Punto de partida conocido para el interruptor de parada, en vez de heredar el
+# del .env de la maquina. Las comprobaciones que lo ejercitan lo cambian ellas
+# mismas y lo devuelven a este valor. Ver la nota en test_validacion.py.
+config.WORKFLOW_ENABLED = True
 
 import observability
 observability.configure_logging()
