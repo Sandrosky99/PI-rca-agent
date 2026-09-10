@@ -99,7 +99,12 @@ Con el interruptor bajado:
   auditada con `status: BLOCKED`.
 - **No se llama al LLM ni a los MCP servers.** El gasto se detiene.
 
-No se pierde ninguna alerta: quedan registradas para relanzarlas a mano cuando proceda.
+No se pierde ninguna alerta: quedan registradas con su payload íntegro.
+
+⚠️ **Pero hoy no se pueden relanzar** (verificado el 2026-09-08). `claim()` solo readmite los
+incidentes en `interrumpido`, no los que quedaron en `pausado`, así que reenviar la notificación
+la rechaza por clave exacta. La única salida actual es borrar el fichero del incidente a mano.
+Arreglo pendiente, ver `AGENTS.md` §Próximo paso.
 
 **Prueba periódica del interruptor:** poner `WORKFLOW_ENABLED=false`, reiniciar, enviar una
 notificación de prueba y comprobar que la respuesta es `{"status": "paused"}` y que el

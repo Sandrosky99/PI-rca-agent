@@ -34,7 +34,7 @@
 | 3 | Configuración por entorno [SHOULD] | ✅ | `config.py` lee todo de `.env`. Ninguna clave de configuración cableada |
 | 4 | Declaración de conformidad [MUST] | ✅ | `AGENTS.md` §iz Spec Conformance |
 | 5 | Línea base de seguridad [SHOULD] | ✅ | Secretos solo en `.env`, en `.gitignore`, con el riesgo declarado en el `README.md`. Dependencias fijadas a versión exacta y escaneadas con `pip-audit` en CI. Los errores no vuelcan trazas ni rutas internas. `/notifications/history` apagado por defecto. **Autenticación, TLS y firewall evaluados y no aplicados**, con la justificación en el bloque «DECISIONES DE SEGURIDAD» de `webhook.py`: los dos primeros dependen de PI y están bloqueados; el tercero es una decisión de infraestructura sobre una plataforma de pruebas. Todo ello queda sin validez si el recurso sale del entorno de demo |
-| 6.1 | Sin auto-merge sin revisión [MUST] | ✅ | Gate de CI en `.github/workflows/quality-gate.yml`; el propietario revisa y aprueba. Configurar como *required check* en la protección de rama |
+| 6.1 | Sin auto-merge sin revisión [MUST] | ✅ | Desde el 2026-09-08, `master` está protegido: no admite push directo y exige PR con los tres checks en verde. El propietario revisa y aprueba. Primera evidencia: PR #1, revisado y fusionado con *merge commit* (no *squash*, que reescribiría el mensaje y perdería los trailers de autoría del §1.4) |
 | 6.2 | Propietario humano identificado [MUST] | ✅ | Sandrosky99 |
 | 6.3 | Revisión proporcional al riesgo [MUST] | ✅ | Riesgo bajo: revisión por el propietario. La revisión por dos personas aplicaría al reclasificar (`AI-GOVERNANCE.md` §1) |
 | 6.4 | Sin delegar el juicio crítico [MUST] | ✅ | Las decisiones de arquitectura están documentadas con su razonamiento y validadas por el propietario. Ver el historial de `AGENTS.md` |
@@ -51,10 +51,10 @@
 | 1.6 | Revisión de patrones inseguros [SHOULD] | ✅ | `bandit` en CI. Sin `eval`, sin `shell=True`, sin deserialización insegura |
 | 1.7 | Inyección de prompt y entrada adversaria [MUST] | ✅ | La entrada no confiable (payload de PI, respuesta del grafo, salida de los MCP) no puede alterar las instrucciones del sistema: el `SYSTEM_PROMPT` es una constante y va por el parámetro `system`, separado del mensaje. Los campos del payload se validan por tipo (`_valid_field`) y la notificación se rechaza en la puerta si no es analizable (`validate_notification`) |
 | 1.8 | Manejo inseguro de la salida [MUST] | ✅ | **El núcleo del diseño.** La salida del modelo nunca se ejecuta ni se pasa a un intérprete. Los `piApiPath` se validan contra la lista blanca del AF antes de consultar; la petición de ventana, contra un catálogo cerrado. El JSON se parsea con `json.loads`, nunca con `eval` |
-| 2.1 | Cobertura de pruebas [MUST] | ✅ | 7 suites en `tests/`, 241 comprobaciones. Umbral del proyecto: toda función con lógica de decisión o validación debe tener pruebas de su camino feliz, sus modos de fallo y sus entradas malformadas |
+| 2.1 | Cobertura de pruebas [MUST] | ✅ | 8 suites en `tests/`, 260 comprobaciones. Umbral del proyecto: toda función con lógica de decisión o validación debe tener pruebas de su camino feliz, sus modos de fallo y sus entradas malformadas |
 | 2.2 | Revisión de las pruebas [MUST] | ✅ | Verifican comportamiento real, no cobertura: cada una detecta un fallo concreto. Prueba de ello: `test_incidents` detectó una colisión real de nombres por resolución de reloj el 2026-09-07, y `test_observability` una captura de excepción demasiado estrecha |
 | 2.3 | Validación funcional documentada [MUST] | ⚠️ Parcial | `AI-TRACEABILITY.md` §8. **Dos** ciclos completos contra PI y LLM reales (2026-08-20 y 2026-09-07), pero ambos del mismo activo y KPI, y **ninguna causa confirmada** por mantenimiento |
-| 2.4 | Gate de calidad en CI/CD [MUST] | ⚠️ Parcial | `.github/workflows/quality-gate.yml` existe y **ya se ejecuta**: pruebas + `bandit` + `pip-audit` + búsqueda de secretos. Encontró dos fallos reales en sus dos primeras ejecuciones. **Pero no bloquea**: faltan las reglas de protección de rama que marquen los checks como *required*, y eso implica pasar a rama + PR |
+| 2.4 | Gate de calidad en CI/CD [MUST] | ✅ | `.github/workflows/quality-gate.yml`: pruebas + `bandit` + `pip-audit` + búsqueda de secretos. **Bloquea de verdad** desde el 2026-09-08: los tres jobs son *required checks* en la protección de rama de `master`, que además exige PR. Demostró su utilidad en sus dos primeras ejecuciones encontrando fallos que no se veían desde Windows: una supresión de bandit con la sintaxis equivocada y cuatro suites con la ruta del proyecto cableada |
 | 3.1 | Verificación de licencias del código generado [MUST] | ✅ | `AI-TRACEABILITY.md` §7 |
 | 3.2 | Declaración de originalidad [SHOULD] | ✅ | Valorado; riesgo bajo, sin herramienta de similitud. Justificado en `AI-TRACEABILITY.md` §7 |
 | 3.3 | Registro de la herramienta de IA [MUST] | ✅ | `AI-TRACEABILITY.md` §1 |
@@ -113,26 +113,32 @@
 
 ## Gate de aprobación de despliegue (ai-governance §8)
 
-Estado a 2026-09-07. **Este recurso no está desplegado en producción**; la lista refleja qué
-faltaría.
+Estado a 2026-09-08. El recurso está **desplegado en el entorno de demostración** (servicio de
+Windows en marcha, arranque automático), no en producción sobre una planta real.
 
 - [x] Trazabilidad de autoría y herramienta registrada — `AI-TRACEABILITY.md`
-- [ ] **Revisión humana completada y aprobada por el propietario** — pendiente: este trabajo
-      lo ha generado una IA y necesita revisión antes de fusionarse
-- [ ] **Escaneo de seguridad sin hallazgos críticos** — el gate de CI existe pero **no se ha
-      ejecutado nunca**: el repositorio no tiene Actions habilitadas
-- [x] Pruebas ejecutadas y umbral alcanzado — 5 suites, `python tests/run_all.py`
+- [x] Revisión humana completada y aprobada por el propietario — `master` protegido y PR #1 revisado y fusionado (2026-09-08)
+- [x] Escaneo de seguridad sin hallazgos críticos — `bandit` y `pip-audit` en verde sobre `master` desde el 2026-09-08
+- [x] Pruebas ejecutadas y umbral alcanzado — 8 suites, 260 comprobaciones, en verde también en CI
 - [x] Licencias de dependencias verificadas — `AI-TRACEABILITY.md` §6
 - [x] Clasificación de riesgo asignada — Baja
 - [x] Datos sensibles tratados según la política — sin datos personales
 - [x] Contenido generado por IA etiquetado — bloque `_ai_generated`
 - [x] Evaluación de sesgo — N/A (riesgo bajo, sin efecto sobre personas)
 - [x] Pruebas adversarias — N/A (riesgo bajo)
-- [x] Interruptor de parada en su sitio — `WORKFLOW_ENABLED`; **falta probarlo en el entorno real**
+- [ ] Interruptor de parada en su sitio **y probado** — el mecanismo existe (`WORKFLOW_ENABLED`) pero **no se ha probado en el entorno real**, y el §9.5 exige ambas cosas
 - [x] Documentación técnica y de uso al día — `README.md`, `AGENTS.md`, `docs/`
 - [x] Plan de rollback definido — `AI-GOVERNANCE.md` §8
 
 ---
+
+## Decisiones tomadas, no pendientes
+
+**El repositorio conserva el nombre `PI-rca-agent`** (2026-09-08). Se valoró renombrarlo a
+`PI-rca-workflow` por coherencia con la terminología y se descartó: izSpecs no dice nada sobre
+nombres de repositorio, y quien lo abre queda corregido de inmediato — `AGENTS.md` y el primer
+párrafo del `README.md` aclaran que esto es un workflow, y el módulo principal es `workflow.py`.
+No es una brecha ni una excepción: es una decisión.
 
 ## Brechas conocidas
 
@@ -140,8 +146,6 @@ Ninguna es una excepción aprobada: son trabajo pendiente.
 
 | # | Brecha | Sección | Acción |
 |---|---|---|---|
-| 1 | El gate de CI se ejecuta pero **no bloquea** | §2.4, §8 | Configurar la protección de rama con los checks como *required*. Implica pasar a rama + PR |
-| 2 | Los commits anteriores al 2026-09-07 no llevan fecha de generación | base §1.4 | No se corrige: reescribir el historial violaría §1.7. Compensado con `AI-TRACEABILITY.md` §1 |
-| 4 | Validación funcional con un único ciclo real | §2.3 | Ejercitar con más KPIs y tipos de activo |
-| 5 | El interruptor de parada no se ha probado en el entorno real | §9.5 | Ejecutar el procedimiento de `AI-GOVERNANCE.md` §5 |
-| 6 | El repositorio se sigue llamando `PI-rca-agent` | — | Renombrar en GitHub a `PI-rca-workflow` |
+| 1 | Los commits anteriores al 2026-09-07 no llevan fecha de generación | base §1.4 | No se corrige: reescribir el historial violaría §1.7. Compensado con `AI-TRACEABILITY.md` §1 |
+| 2 | Validación funcional con un único ciclo real | §2.3 | Ejercitar con más KPIs y tipos de activo |
+| 3 | El interruptor de parada no se ha probado en el entorno real | §9.5 | Ejecutar el procedimiento de `AI-GOVERNANCE.md` §5 |

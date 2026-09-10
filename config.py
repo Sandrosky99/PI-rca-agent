@@ -23,6 +23,34 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent / ".env")
 
 
+def _entero(nombre: str, por_defecto: int) -> int:
+    """Lee una variable de entorno numérica, tolerando que venga vacía.
+
+    Por qué existe: os.environ.get("X", "24") solo aplica el valor por defecto
+    si la clave NO EXISTE. Pero .env.example define las variables opcionales
+    vacías ("PI_LOOKBACK_HOURS="), y load_dotenv las crea con cadena vacía --
+    así que la clave existe, get() devuelve "" e int("") revienta.
+
+    El resultado era que seguir la instrucción del README ("copia .env.example
+    a .env") dejaba la aplicación sin arrancar, con un ValueError que no dice
+    de qué variable viene. Detectado el 2026-09-08.
+
+    Un valor no numérico también cae al defecto en vez de tumbar el arranque:
+    más vale arrancar con el valor documentado y un aviso en consola que no
+    arrancar y que PI envíe a un puerto muerto.
+    """
+    crudo = os.environ.get(nombre)
+    if crudo is None or not crudo.strip():
+        return por_defecto
+    try:
+        return int(crudo.strip())
+    except ValueError:
+        # Aún no hay logging configurado (observability se importa después),
+        # así que se avisa por consola.
+        print(f"[config] {nombre}={crudo!r} no es un entero; se usa {por_defecto}.")
+        return por_defecto
+
+
 # =============================================================================
 # Proveedor de LLM (Gemini por defecto, o Anthropic)
 # =============================================================================
@@ -81,7 +109,7 @@ ANTHROPIC_MODEL: str = os.environ.get("ANTHROPIC_MODEL") or "claude-opus-4-8"
 # en ambas rutas, que es justo para lo que existe llm_client. Si alguna vez
 # truncara, se vería en el log como un JSONDecodeError del Step 4 o 6, no en
 # silencio.
-LLM_MAX_TOKENS: int = int(os.environ.get("LLM_MAX_TOKENS", "16000"))
+LLM_MAX_TOKENS: int = _entero("LLM_MAX_TOKENS", 16000)
 
 
 # =============================================================================
@@ -90,7 +118,7 @@ LLM_MAX_TOKENS: int = int(os.environ.get("LLM_MAX_TOKENS", "16000"))
 
 # Puerto en el que el servidor webhook escuchará peticiones de PI System.
 # PI debe apuntar sus notificaciones a: http://ESTE_SERVIDOR:<WEBHOOK_PORT>/notification
-WEBHOOK_PORT: int = int(os.environ.get("WEBHOOK_PORT", "8090"))
+WEBHOOK_PORT: int = _entero("WEBHOOK_PORT", 8090)
 
 # Token secreto para verificar el origen de las notificaciones.
 # Si está configurado, PI debe enviar este valor en la cabecera "X-PI-Secret".
@@ -163,7 +191,7 @@ INCIDENTS_DIR: str = os.environ.get("INCIDENTS_DIR") or str(Path(__file__).paren
 #
 # Recordatorio: esto es una red de seguridad. La deduplicación se arregla en PI
 # (NonrepetitionInterval de la Notification Rule y deadband del análisis).
-INCIDENT_COOLDOWN_MINUTES: int = int(os.environ.get("INCIDENT_COOLDOWN_MINUTES", "20"))
+INCIDENT_COOLDOWN_MINUTES: int = _entero("INCIDENT_COOLDOWN_MINUTES", 20)
 
 # Días tras los cuales se PODA el "trace" de un incidente: los prompts enviados
 # al modelo y sus respuestas. El caso en sí -- payload, estado, diagnóstico y,
@@ -186,7 +214,7 @@ INCIDENT_COOLDOWN_MINUTES: int = int(os.environ.get("INCIDENT_COOLDOWN_MINUTES",
 # Nota: esto es una decisión OPERATIVA (crecimiento de disco), no de
 # cumplimiento. El §4.5 exige una política de retención para prompts "que
 # contengan datos personales", y estos no los tienen.
-INCIDENT_TRACE_RETENTION_DAYS: int = int(os.environ.get("INCIDENT_TRACE_RETENTION_DAYS", "90"))
+INCIDENT_TRACE_RETENTION_DAYS: int = _entero("INCIDENT_TRACE_RETENTION_DAYS", 90)
 
 
 # Carpeta del proyecto afkg-graph-mcp (Step 2: consulta de la estructura del AF).
@@ -214,20 +242,20 @@ AVEVA_PI_MCP_DIR: str = os.environ.get("AVEVA_PI_MCP_DIR") or r"C:\MCPServer\MCP
 # periodicidad. Eso era ocultar evidencia para dirigir el diagnóstico, y era
 # incompatible con dejar que la ventana se amplíe. Se ha sustituido por
 # DEMO_MODE, que se lo dice al modelo de forma explícita en vez de escondérselo.
-PI_LOOKBACK_HOURS: int = int(os.environ.get("PI_LOOKBACK_HOURS", "24"))
+PI_LOOKBACK_HOURS: int = _entero("PI_LOOKBACK_HOURS", 24)
 
 # Techo absoluto de la ventana. El modelo puede pedir más histórico, pero el
 # código decide cuánto concede: la petición se recorta a este valor. Misma
 # filosofía que la puerta de autorización del Step 4 -- el modelo propone, el
 # código autoriza. 336 h = 14 días.
-PI_MAX_LOOKBACK_HOURS: int = int(os.environ.get("PI_MAX_LOOKBACK_HOURS", "336"))
+PI_MAX_LOOKBACK_HOURS: int = _entero("PI_MAX_LOOKBACK_HOURS", 336)
 
 # Cuántas veces se permite repetir los Steps 5-6 con otra ventana, a petición
 # del modelo. Cuenta los reajustes en las dos direcciones: ampliaciones y
 # estrechamientos. Cada uno cuesta una consulta a PI (barata) y una llamada al
 # LLM (no tanto), así que por defecto se concede uno solo.
 # 0 desactiva el mecanismo y deja el comportamiento fijo de antes.
-MAX_HISTORY_ADJUSTMENTS: int = int(os.environ.get("MAX_HISTORY_ADJUSTMENTS", "1"))
+MAX_HISTORY_ADJUSTMENTS: int = _entero("MAX_HISTORY_ADJUSTMENTS", 1)
 
 # Puntos por variable a los que se ajusta la resolución de cada ventana del
 # catálogo. Ventana y resolución se mueven juntas: ampliar manteniendo los
@@ -235,7 +263,7 @@ MAX_HISTORY_ADJUSTMENTS: int = int(os.environ.get("MAX_HISTORY_ADJUSTMENTS", "1"
 # variable, y son decenas de variables). Con este objetivo, 7 días salen a 2 h
 # y ~84 puntos -- menos que la ventana corta de 24 h a 15 min -- y 2 h salen a
 # 1 minuto. Ver derive_interval en pi_client.py.
-PI_TARGET_POINTS_PER_VARIABLE: int = int(os.environ.get("PI_TARGET_POINTS_PER_VARIABLE", "120"))
+PI_TARGET_POINTS_PER_VARIABLE: int = _entero("PI_TARGET_POINTS_PER_VARIABLE", 120)
 
 # Escalera de ventanas (en horas) que se le ofrecen al modelo como catálogo
 # cerrado en el Step 6. PI_LOOKBACK_HOURS debe estar en la lista: es la que se
@@ -276,7 +304,7 @@ DEMO_MODE: bool = os.environ.get("DEMO_MODE", "").strip().lower() in ("1", "true
 # Resolución temporal (intervalo entre puntos) para las consultas del Step 5.
 # Uniforme para todas las variables del bucket, para poder correlacionarlas
 # directamente por timestamp.
-PI_QUERY_INTERVAL_VALUE: int = int(os.environ.get("PI_QUERY_INTERVAL_VALUE", "15"))
+PI_QUERY_INTERVAL_VALUE: int = _entero("PI_QUERY_INTERVAL_VALUE", 15)
 PI_QUERY_INTERVAL_UNIT: str = os.environ.get("PI_QUERY_INTERVAL_UNIT") or "minutes"
 
 # Número máximo de variables que se aceptan de la selección del Step 4.
@@ -293,7 +321,7 @@ PI_QUERY_INTERVAL_UNIT: str = os.environ.get("PI_QUERY_INTERVAL_UNIT") or "minut
 # (PS20101 Pump 01) que el propio prompt pide como prioridad 4. Se deja en 40
 # para dar margen sobre ese caso sin dejar de frenar una respuesta desbocada.
 # Es un guardarraíl de coste y ruido, no un límite del dominio.
-MAX_SELECTED_VARIABLES: int = int(os.environ.get("MAX_SELECTED_VARIABLES", "40"))
+MAX_SELECTED_VARIABLES: int = _entero("MAX_SELECTED_VARIABLES", 40)
 
 
 # =============================================================================
