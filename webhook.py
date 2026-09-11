@@ -36,6 +36,30 @@ import observability
 import workflow
 
 
+# Valor del semáforo cuando el límite está desactivado (MAX_CONCURRENT_ANALYSES
+# <= 0). Se usa un cupo enorme en vez de un camino de código sin semáforo para
+# que haya una sola ruta que mantener: la de "pide turno y sigue".
+_SIN_LIMITE = 10_000
+
+# Límite de análisis simultáneos (config.MAX_CONCURRENT_ANALYSES).
+#
+# Va AQUÍ y no dentro de run_rca_analysis() por una razón concreta: así el
+# incidente espera turno en 'recibido' y solo pasa a 'analizando' cuando de
+# verdad arranca. Si el semáforo estuviera dentro del workflow, un incidente
+# encolado figuraría como 'analizando' sin estarlo -- y ese estado es justo lo
+# que va a leer la pantalla de la sala de control. Un estado que miente es peor
+# que no tenerlo.
+#
+# Efecto secundario útil: los que esperan cuentan como 'recibido' en /health, o
+# sea que la cola ya es visible sin añadir nada.
+#
+# En Python 3.10+ un Semaphore creado fuera del bucle se asocia al bucle en el
+# primer uso, así que crearlo a nivel de módulo es correcto.
+_ANALISIS_EN_CURSO = asyncio.Semaphore(
+    config.MAX_CONCURRENT_ANALYSES if config.MAX_CONCURRENT_ANALYSES > 0 else _SIN_LIMITE
+)
+
+
 async def _analizar_incidente(payload: dict, registro: dict) -> None:
     """Envuelve el análisis para dejar constancia de cómo terminó.
 
@@ -44,7 +68,21 @@ async def _analizar_incidente(payload: dict, registro: dict) -> None:
     un incidente nunca se quede colgado en 'analizando' mientras el proceso
     sigue vivo. El diagnóstico se guarda en el fichero del incidente, que es el
     primer paso hacia un canal de salida de verdad (hoy solo iba al log).
+
+    Espera turno si ya hay MAX_CONCURRENT_ANALYSES análisis en marcha. Esperar y
+    no rechazar es deliberado: la alerta ya está registrada y perderla sería lo
+    único inaceptable. Tardar más, no.
     """
+    if _ANALISIS_EN_CURSO.locked():
+        log.info("Análisis en cola: se ha alcanzado el límite de simultáneos.",
+                 extra={"incidentId": registro["id"], "asset": registro["asset"],
+                        "limite": config.MAX_CONCURRENT_ANALYSES})
+    async with _ANALISIS_EN_CURSO:
+        await _ejecutar_analisis(payload, registro)
+
+
+async def _ejecutar_analisis(payload: dict, registro: dict) -> None:
+    """El análisis propiamente dicho, ya con turno concedido."""
     incidents.mark(registro, incidents.ANALIZANDO)
     trace: dict = {}
     try:
