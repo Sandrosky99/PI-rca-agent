@@ -33,6 +33,7 @@ Flujo completo del workflow:
   Step 6 → El modelo analiza los datos y produce el diagnóstico final
 """
 
+import asyncio
 import json
 import logging
 from datetime import datetime
@@ -1046,6 +1047,35 @@ def _enforce_trend_coverage(
     return cubren[0]
 
 
+async def _generar(user_message: str) -> str:
+    """Llama al modelo sin congelar el bucle de eventos.
+
+    `llm_client.generate()` es síncrona: por dentro hace una petición HTTP
+    bloqueante (`anthropic.Anthropic`, `google-genai`). Hasta el 2026-09-11 se
+    llamaba tal cual desde estas corrutinas, y el efecto era que el proceso
+    entero se paraba durante cada llamada al modelo -- dos por análisis, de
+    decenas de segundos cada una.
+
+    Lo que se rompía mientras tanto:
+
+      - Uvicorn no podía ni leer un POST nuevo de PI. Si llegaba una alerta de
+        otro activo durante un análisis, su petición se quedaba esperando sin
+        respuesta, expuesta a que PI la diera por fallida.
+      - /health no contestaba, así que cualquier monitor concluía que el
+        servicio estaba caído justo cuando estaba trabajando.
+      - Dos análisis simultáneos no se solapaban: se serializaban a trompicones.
+
+    `asyncio.to_thread` mueve la llamada a un hilo y deja el bucle libre. Es
+    seguro porque `generate()` no toca estado compartido: construye su propio
+    cliente en cada invocación.
+
+    No se pasa a los SDK asíncronos (`AsyncAnthropic`) a propósito: obligaría a
+    duplicar la lógica de reintentos de `llm_client` en dos variantes, y esto
+    resuelve el problema entero sin tocar ese módulo.
+    """
+    return await asyncio.to_thread(llm_client.generate, SYSTEM_PROMPT, user_message)
+
+
 async def run_rca_analysis(notification_payload: dict, trace: dict | None = None) -> dict | None:
     """Punto de entrada principal del workflow RCA.
 
@@ -1122,8 +1152,15 @@ async def run_rca_analysis(notification_payload: dict, trace: dict | None = None
     # transitorios (5xx, rate limit...) internamente; si aun así falla (o el
     # error no es transitorio), cortamos aquí de forma controlada en vez de
     # dejar que el traceback se propague sin control en la background task.
+    #
+    # Va en un hilo aparte porque llm_client.generate() es SÍNCRONA: por dentro
+    # hace una petición HTTP bloqueante. Llamarla directamente desde esta
+    # corrutina congelaba el bucle de eventos entero durante toda la llamada al
+    # modelo -- decenas de segundos en los que el proceso no aceptaba POST de
+    # PI, /health no respondía y cualquier otro análisis en curso se detenía.
+    # Ver la nota completa en _generar().
     try:
-        variables_response = llm_client.generate(SYSTEM_PROMPT, context["claude_prompt"])
+        variables_response = await _generar(context["claude_prompt"])
     except llm_client.LLMGenerationError as exc:
         log.error("Step 4 fallido: %s", exc)
         log.info("WORKFLOW RCA: análisis interrumpido en el Step 4. Steps 5 y 6 no ejecutados.")
@@ -1214,7 +1251,7 @@ async def run_rca_analysis(notification_payload: dict, trace: dict | None = None
                  extra={"promptChars": len(diagnosis_prompt), "lookbackHours": lookback_hours})
 
         try:
-            diagnosis_response = llm_client.generate(SYSTEM_PROMPT, diagnosis_prompt)
+            diagnosis_response = await _generar(diagnosis_prompt)
         except llm_client.LLMGenerationError as exc:
             log.error("Step 6 fallido: %s", exc)
             log.info("WORKFLOW RCA: análisis interrumpido en el Step 6.")
