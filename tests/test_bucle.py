@@ -148,6 +148,44 @@ print("\n=== 8. Step 6 sin history_request (esquema viejo): no rompe ===")
 n6 = correr([json.dumps({"root_causes": [{"cause": "x", "explanation": "y", "recommended_action": "z"}]})])
 check("una sola pasada, sin error", len(llamadas_pi) == 1, f"{len(llamadas_pi)}")
 
+print("\n=== 9. La llamada al modelo NO congela el bucle de eventos ===")
+# Hasta el 2026-09-11, workflow llamaba a llm_client.generate() -- que es
+# sincrona y hace una peticion HTTP bloqueante -- directamente desde una
+# corrutina. El proceso entero se paraba durante cada llamada al modelo: no se
+# aceptaban POST nuevos de PI, /health no respondia y cualquier otro analisis en
+# curso se detenia.
+#
+# Se comprueba la propiedad de verdad, no la forma de escribirla: mientras
+# _generar() esta en marcha, otra corrutina tiene que seguir despertandose.
+import time
+
+DURACION = 0.6      # lo que "tarda el modelo"
+LATIDO = 0.02       # cada cuanto deberia despertarse el resto del proceso
+
+def _generate_bloqueante(system_prompt, user_message):
+    time.sleep(DURACION)            # exactamente lo que hace una peticion HTTP sincrona
+    return "respuesta"
+
+llm_client.generate = _generate_bloqueante
+
+async def _medir():
+    latidos = 0
+    async def _corazon():
+        nonlocal latidos
+        while True:
+            await asyncio.sleep(LATIDO)
+            latidos += 1
+    tarea = asyncio.create_task(_corazon())
+    await workflow._generar("lo que sea")
+    tarea.cancel()
+    return latidos
+
+latidos = asyncio.run(_medir())
+esperados = int(DURACION / LATIDO * 0.5)     # margen amplio: basta con que siga vivo
+check("el bucle sigue atendiendo durante la llamada al modelo",
+      latidos >= esperados, f"{latidos} latidos, se esperaban >= {esperados}")
+check("y devuelve la respuesta igual", asyncio.run(workflow._generar("x")) == "respuesta")
+
 print("\n" + "=" * 60)
 if fallos:
     print(f"FALLOS: {len(fallos)} -> {fallos}")

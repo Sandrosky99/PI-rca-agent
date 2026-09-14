@@ -89,6 +89,12 @@ PAUSADO = "pausado"          # recibido con el workflow deshabilitado (WORKFLOW_
 
 _EN_CURSO = (RECIBIDO, ANALIZANDO)
 
+# Estados desde los que un incidente SÍ se puede volver a reservar: en los dos
+# la causa fue externa al análisis y ya no está, así que reenviar la
+# notificación tiene todas las papeletas de funcionar. El resto siguen
+# bloqueados. La justificación de cada uno, en claim().
+_RECLAMABLES = (INTERRUMPIDO, PAUSADO)
+
 
 def _directorio() -> Path:
     d = Path(config.INCIDENTS_DIR)
@@ -178,16 +184,16 @@ def _duplicado_por_enfriamiento(identidad: str, ahora: datetime) -> dict | None:
     por algo suyo, reintentarlo cada pocos minutos daría el mismo error y
     quemaría llamadas al modelo.
 
-    La excepción es INTERRUMPIDO. Ver la nota en claim(): ahí la causa fue
-    externa (murió el proceso) y ya no está, así que un reintento tiene todas
-    las papeletas de funcionar. No debe quedar bloqueado.
+    Las excepciones son INTERRUMPIDO y PAUSADO. Ver la nota en claim(): en los
+    dos la causa fue externa y ya no está, así que un reintento tiene todas las
+    papeletas de funcionar. No deben quedar bloqueados.
     """
     if config.INCIDENT_COOLDOWN_MINUTES <= 0:
         return None
     limite = ahora - timedelta(minutes=config.INCIDENT_COOLDOWN_MINUTES)
     for ruta in _directorio().glob(f"{identidad}__*.json"):
         registro = _leer(ruta)
-        if not registro or registro.get("estado") == INTERRUMPIDO:
+        if not registro or registro.get("estado") in _RECLAMABLES:
             continue
         try:
             recibido = datetime.fromisoformat(registro["recibido_en"].replace("Z", "+00:00"))
@@ -276,7 +282,7 @@ def claim(payload: dict) -> dict | None:
         with open(ruta, "x", encoding="utf-8") as f:
             json.dump(registro, f, ensure_ascii=False, indent=2)
     except FileExistsError:
-        # Un incidente INTERRUMPIDO sí se puede volver a reservar (2026-09-07).
+        # Hay incidentes que SÍ se pueden volver a reservar (2026-09-07 y -09-11).
         #
         # Motivo: la deduplicación y la persistencia, construidas por separado,
         # se estorbaban. El fichero que garantiza no perder el incidente era el
@@ -291,18 +297,27 @@ def claim(payload: dict) -> dict | None:
         #       está. Se re-reserva. Como la alarma sigue activa en PI, en
         #       cuanto vuelva a evaluar la regla y reenvíe, se recoge solo:
         #       la vía de recuperación es la vía normal, sin herramientas.
+        #   PAUSADO      -> llegó con el interruptor de parada echado, así que
+        #       el análisis NUNCA se ejecutó. El argumento es aún más fuerte que
+        #       en INTERRUMPIDO: allí queda la duda de si fue el propio payload
+        #       el que tumbó el proceso, y aquí no hay ninguna -- nadie llegó a
+        #       mirarlo. Bloquearlo dejaba atrapada toda alerta recibida durante
+        #       una parada en caliente, que es justo lo contrario de para lo que
+        #       se registran. Lo destapó la prueba del interruptor del
+        #       2026-09-08, que dejó un incidente sin salida.
         #   FALLIDO      -> el análisis se ejecutó y falló por algo suyo.
         #       Reintentar daría el mismo error, así que se sigue bloqueando.
         previo = _leer(ruta)
-        if previo is not None and previo.get("estado") == INTERRUMPIDO:
+        estado_previo = (previo or {}).get("estado")
+        if previo is not None and estado_previo in _RECLAMABLES:
             registro["intentos"] = previo.get("intentos", 1) + 1
             _escribir(ruta, registro)
             observability.audit(
                 "incident.claim", {"incidentId": ruta.stem, "intento": registro["intentos"]},
-                detail="re-reserva de un incidente interrumpido",
+                detail=f"re-reserva de un incidente en '{estado_previo}'",
             )
             log.warning(
-                "Se re-lanza un incidente que había quedado interrumpido.",
+                "Se re-lanza un incidente que había quedado en '%s'.", estado_previo,
                 extra={"incidentId": ruta.stem, "asset": registro["asset"],
                        "intento": registro["intentos"]},
             )

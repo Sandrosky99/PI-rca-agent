@@ -95,32 +95,25 @@ Ese fichero es además la base natural de la revisión humana: añadirle campos 
 
 Otros cabos sueltos, por orden de urgencia:
 
-1. **EN ESPERA (2026-09-10) — Un incidente en `pausado` no se puede relanzar.**
-   Es el mismo callejón sin salida que se arregló para `interrumpido`, y que se quedó a medias:
-   `claim()` solo permite re-reservar los incidentes en `INTERRUMPIDO`, no los que quedaron en
-   `PAUSADO` por el interruptor de parada.
+1. **El workflow está parado desde el 2026-09-08.** `WORKFLOW_ENABLED=false` en el `.env` tras la
+   prueba del interruptor. Una alerta real se registraría como `pausado` y **no se analizaría**.
+   Aceptado a sabiendas: estamos en desarrollo y nadie depende todavía del sistema. **Hay que
+   volver a ponerlo en `true` antes de darlo por operativo.** Desde el 2026-09-11 las alertas que
+   lleguen entretanto ya no quedan atrapadas: un `pausado` se recoge al reenviar la notificación.
 
-   **Demostrado, no teórico.** La prueba del interruptor del 2026-09-08 dejó el incidente
-   `913daf118753__20260908T140000Z` atrapado: reenviar la notificación lo rechaza por clave
-   exacta, y esperar al enfriamiento tampoco sirve. La única salida es borrar su fichero a mano.
+   Ojo: **el servicio en marcha carga el código anterior al 2026-09-11.** Los arreglos del bucle
+   de eventos, `pausado` y el límite de simultáneos no están vivos hasta reiniciarlo.
 
-   El argumento para permitirlo es **más fuerte** que en el caso de `interrumpido`: la causa es
-   puramente externa (alguien bajó un interruptor) y el análisis **nunca llegó a ejecutarse**, así
-   que no hay riesgo de bucle con un payload problemático.
+2. **La pantalla de la sala de control.** Diseño cerrado en
+   [`docs/DISENO-INTERACCION-HUMANA.md`](./docs/DISENO-INTERACCION-HUMANA.md), sin implementar.
+   Fase 1 (solo lectura) desbloqueada: los dos impedimentos técnicos —el bucle congelado y la
+   concurrencia sin techo— están resueltos. Hay cuatro incidentes de desarrollo en
+   `dev-fixtures/incidents/` para verla con varios casos abiertos a la vez.
 
-   El arreglo son dos líneas en la rama `FileExistsError` de `claim()`: añadir `PAUSADO` junto a
-   `INTERRUMPIDO`, y excluirlo también del enfriamiento. Con su prueba en `test_incidents.py`,
-   simétrica a las secciones 14-16.
-
-   En espera por decisión del propietario, para abordar antes la interacción con el humano.
-
-2. **Límite de análisis simultáneos.** Nada impide que cinco activos disparando a la vez levanten
-   diez subprocesos MCP. La deduplicación evita repetir el *mismo* incidente, no la concurrencia
-   entre incidentes distintos.
 3. **Completar la prueba del interruptor.** Probado el 2026-09-08 y **funciona**: la notificación
    se acepta, se registra como `pausado`, queda `BLOCKED` en el audit trail y no se ejecuta
    ningún Step 2-6 — coste cero. Falta el último tramo del procedimiento (reactivar y reenviar
-   para procesar la alerta pausada), **bloqueado por el punto 1**.
+   para procesar la alerta pausada), que ya es posible desde que se arregló el re-lanzado.
 4. **La llamada a Anthropic no usa adaptive thinking**, mientras que Gemini sí razona por defecto
    (ver «Asimetría de razonamiento» más abajo). Activar `thinking: {type: "adaptive"}` en
    `_generate_anthropic()` igualaría las dos rutas, y `LLM_MAX_TOKENS=16000` ya deja sitio para
@@ -131,6 +124,20 @@ Otros cabos sueltos, por orden de urgencia:
 
 Resueltos el 2026-09-08: el servicio quedó registrado y en marcha, el gate de CI se ejecuta y
 **bloquea** con protección de rama, y el flujo pasó a rama + PR con revisión humana (PR #1).
+
+Resueltos el 2026-09-11, los tres que bloqueaban la pantalla:
+
+- **La llamada al modelo congelaba el bucle de eventos.** `llm_client.generate()` es síncrona y se
+  invocaba directamente desde una corrutina. Medido: **cero** despertares del bucle durante la
+  llamada. Mientras duraba, no se aceptaban POST de PI, `/health` no respondía y cualquier otro
+  análisis se detenía. Ahora pasa por `workflow._generar()`, que la descarga a un hilo.
+- **Un `pausado` no se podía relanzar.** `_RECLAMABLES = (INTERRUMPIDO, PAUSADO)` unifica los dos
+  sitios que lo decidían — la rama `FileExistsError` de `claim()` y el filtro del enfriamiento—,
+  que antes eran dos comprobaciones sueltas del mismo concepto en puntos distintos.
+- **No había techo de análisis simultáneos.** `MAX_CONCURRENT_ANALYSES` (3 por defecto), con el
+  semáforo en `webhook._analizar_incidente` y **no** dentro del workflow, a propósito: así el que
+  espera turno figura como `recibido` y solo pasa a `analizando` cuando arranca de verdad. Un
+  estado que miente sería peor que no tenerlo, y ese estado es justo lo que leerá la pantalla.
 7. **Definir un periodo de retención para `incidents/`**: hoy no se purgan nunca.
 
 ---

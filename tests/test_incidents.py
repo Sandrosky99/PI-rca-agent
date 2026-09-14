@@ -201,6 +201,43 @@ incidents.sweep_interrupted()
 r2 = incidents.claim(payload(start="2026-08-19T22:12:00Z"))
 check("con otro StartTime tambien se acepta", r2 is not None, f"{r2}")
 
+print("\n=== 16b. Un incidente PAUSADO se puede re-lanzar ===")
+# Simetrico a 14-16. Lo destapo la prueba del interruptor del 2026-09-08, que
+# dejo un incidente real atrapado: llego con WORKFLOW_ENABLED=false, se registro
+# como 'pausado' para no perderlo, y luego resulto que no habia forma de
+# relanzarlo -- ni reenviando la notificacion ni esperando al enfriamiento.
+limpiar()
+r = incidents.claim(payload())
+incidents.mark(r, incidents.PAUSADO)   # llego con el interruptor echado
+ruta = TMP / (r["id"] + ".json")
+check("queda pausado", json.loads(ruta.read_text(encoding="utf-8"))["estado"] == incidents.PAUSADO)
+
+r2 = incidents.claim(payload())        # se reactiva y PI reenvia la misma
+check("reenviar la misma notificacion lo recoge", r2 is not None, f"{r2}")
+check("no crea un fichero nuevo", len(list(TMP.glob("*.json"))) == 1)
+check("vuelve al estado inicial", r2 and r2["estado"] == incidents.RECIBIDO)
+check("cuenta el intento", r2 and r2.get("intentos") == 2, r2 and r2.get("intentos"))
+
+print("\n=== 16c. El enfriamiento no bloquea a un pausado ===")
+limpiar()
+r = incidents.claim(payload())
+incidents.mark(r, incidents.PAUSADO)
+# Durante una parada en caliente la alarma sigue activa y PI reenvia con otro
+# StartTime. Si el enfriamiento lo parase, toda alerta recibida mientras el
+# interruptor estaba echado quedaria perdida -- lo contrario de para lo que se
+# registran.
+r2 = incidents.claim(payload(start="2026-08-19T22:12:00Z"))
+check("con otro StartTime tambien se acepta", r2 is not None, f"{r2}")
+
+print("\n=== 16d. Los demas estados siguen bloqueados ===")
+# La red de seguridad de los dos anteriores: que abrir la mano no haya abierto
+# de mas. FALLIDO ya se cubre en 15; aqui van los otros tres.
+for estado in (incidents.RECIBIDO, incidents.ANALIZANDO, incidents.FINALIZADO):
+    limpiar()
+    r = incidents.claim(payload())
+    incidents.mark(r, estado)
+    check(f"'{estado}' no se re-reserva", incidents.claim(payload()) is None)
+
 print("\n=== 17. Recuento por estado (para /health) ===")
 limpiar()
 a = incidents.claim(payload(asset="Bomba A"))

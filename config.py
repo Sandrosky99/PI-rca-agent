@@ -193,6 +193,26 @@ INCIDENTS_DIR: str = os.environ.get("INCIDENTS_DIR") or str(Path(__file__).paren
 # (NonrepetitionInterval de la Notification Rule y deadband del análisis).
 INCIDENT_COOLDOWN_MINUTES: int = _entero("INCIDENT_COOLDOWN_MINUTES", 20)
 
+# Cuántos análisis pueden estar ejecutándose A LA VEZ. Los que sobran esperan
+# turno en estado 'recibido'; no se rechaza ninguna alerta.
+#
+# Hace falta porque la deduplicación protege de repetir el MISMO incidente, no
+# de que cinco activos distintos disparen a la vez. Cada análisis consume tres
+# recursos que no son nuestros: llamadas al modelo (coste y límites de ritmo),
+# un subproceso MCP, y consultas a PI Web API. Ese último es el que manda: PI es
+# el historiador de la planta y lo usan más cosas que este workflow -- entre
+# ellas PI Vision. Degradarlo a base de consultas en paralelo sería un daño muy
+# superior a tardar unos minutos más en diagnosticar.
+#
+# 3 por defecto: suficiente para que varias alertas de una misma maniobra no se
+# encolen de una en una, y lo bastante bajo para no notarse en PI. 0 o menos
+# desactiva el límite.
+#
+# Sin esto no había ninguno: hasta el 2026-09-11 quedaba enmascarado porque la
+# llamada al modelo bloqueaba el bucle de eventos y los análisis se serializaban
+# solos. Al arreglar aquello, la concurrencia pasó a ser real.
+MAX_CONCURRENT_ANALYSES: int = _entero("MAX_CONCURRENT_ANALYSES", 3)
+
 # Días tras los cuales se PODA el "trace" de un incidente: los prompts enviados
 # al modelo y sus respuestas. El caso en sí -- payload, estado, diagnóstico y,
 # cuando exista, la revisión humana -- NO se borra nunca.
