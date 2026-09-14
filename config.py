@@ -213,6 +213,71 @@ INCIDENT_COOLDOWN_MINUTES: int = _entero("INCIDENT_COOLDOWN_MINUTES", 20)
 # solos. Al arreglar aquello, la concurrencia pasó a ser real.
 MAX_CONCURRENT_ANALYSES: int = _entero("MAX_CONCURRENT_ANALYSES", 3)
 
+# Segundos que se espera a UNA llamada al modelo antes de darla por perdida.
+#
+# Sin esto se heredaba el defecto del SDK de Anthropic: 600 s de lectura y dos
+# reintentos propios, que se multiplicaban por los tres de tenacity. Nueve
+# intentos de diez minutos: hora y media para una sola llamada. Nadie decidió
+# eso; salió de encajar dos políticas de reintento sin mirar.
+#
+# 120 s es holgado: una respuesta real del Step 6 ronda los 2.800 tokens y
+# tarda menos de un minuto.
+LLM_TIMEOUT_SECONDS: int = _entero("LLM_TIMEOUT_SECONDS", 120)
+
+# Tope DURO de un análisis completo, de principio a fin.
+#
+# Es la única garantía de verdad, porque cubre también lo que no tiene timeout
+# propio: las llamadas MCP de los Steps 2 y 5 pueden colgarse indefinidamente
+# si el subproceso deja de responder.
+#
+# Importa para la persona, no para la máquina: a quien recibe la alerta se le
+# avisa UNA vez, y si llega a la sala de control y ve su análisis en cola,
+# necesita saber cuánto puede tardar. Con este tope y MAX_CONCURRENT_ANALYSES,
+# la espera peor es calculable: ceil(alertas / simultáneos) x este valor.
+#
+# 10 min: un análisis normal son 2-3. Quien lo agote está roto, no lento.
+ANALYSIS_TIMEOUT_SECONDS: int = _entero("ANALYSIS_TIMEOUT_SECONDS", 600)
+
+# Cuánto se sigue reintentando UNA llamada al modelo cuando el error es de los
+# que se arreglan solos (5xx, límite de ritmo, conexión).
+#
+# Antes eran 3 intentos con esperas de 2 y 4 segundos: seis segundos en total.
+# Ante un corte de tres minutos del proveedor, el análisis se rendía cuando
+# faltaban 174 segundos para que volviera. El problema no era no saber cuándo
+# reintentar -- era dejar de intentarlo enseguida.
+#
+# Se cuenta por TIEMPO y no por número de intentos porque lo que importa es
+# cuánto corte se aguanta, no cuántas veces se pregunta.
+#
+# 90 s NO es un número redondo: sale de la cuenta del presupuesto.
+#
+# Un análisis hace hasta 3 llamadas al modelo (Step 4 una vez, Step 6 hasta dos
+# con MAX_HISTORY_ADJUSTMENTS=1). Y la ventana se puede REBASAR: tenacity decide
+# si sigue ANTES de dormir, así que un intento programado dentro de la ventana
+# puede ejecutarse hasta 30 s después (la espera más larga). O sea:
+#
+#     ventana efectiva = 90 + 30 = 120 s por llamada
+#     peor caso = trabajo normal (~150 s) + 3 x 120 = 510 s
+#
+# y 510 cabe en ANALYSIS_TIMEOUT_SECONDS=600 con holgura. Con 120 s de ventana
+# el peor caso da justo 600 y lo cortaría el tope: el análisis moriría igual,
+# pero con el mensaje genérico de tiempo agotado en vez del específico.
+#
+# Si se sube esta ventana, hay que subir también ANALYSIS_TIMEOUT_SECONDS.
+LLM_RETRY_WINDOW_SECONDS: int = _entero("LLM_RETRY_WINDOW_SECONDS", 90)
+
+# Qué ventana muestra la pantalla de la sala de control al abrirse, en horas, y
+# cuántos incidentes como mucho.
+#
+# Hacen falta porque no se borra ningún incidente nunca: con veinte alertas al
+# día son 7.300 al año, y una lista de 7.300 elementos en un monitor no la lee
+# nadie. El operario puede ampliar el rango o pedir más desde la propia
+# pantalla; esto es solo con qué se encuentra al llegar.
+#
+# 24 h y 50: un turno entero de contexto sin que la lista deje de ser abarcable.
+SCREEN_DEFAULT_HOURS: int = _entero("SCREEN_DEFAULT_HOURS", 24)
+SCREEN_DEFAULT_LIMIT: int = _entero("SCREEN_DEFAULT_LIMIT", 50)
+
 # Días tras los cuales se PODA el "trace" de un incidente: los prompts enviados
 # al modelo y sus respuestas. El caso en sí -- payload, estado, diagnóstico y,
 # cuando exista, la revisión humana -- NO se borra nunca.
