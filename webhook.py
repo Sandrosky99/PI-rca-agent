@@ -22,18 +22,29 @@ Endpoints disponibles:
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import asyncio
 
+from pathlib import Path
+
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 import config
 import incidents
 import observability
 import workflow
+
+# La página de la pantalla, relativa a este fichero y no al directorio de
+# trabajo: el servicio de Windows arranca desde donde lo lance NSSM.
+_PAGINA = Path(__file__).resolve().parent / "static" / "pantalla.html"
+
+# Techo del parámetro 'limite' de GET /incidentes. Lo teclea una persona en la
+# pantalla, así que conviene que un cero de más no se traduzca en leer miles de
+# ficheros del disco. 500 ya es mucho más de lo que se puede mirar en un monitor.
+_LIMITE_MAXIMO = 500
 
 
 # Valor del semáforo cuando el límite está desactivado (MAX_CONCURRENT_ANALYSES
@@ -86,14 +97,44 @@ async def _ejecutar_analisis(payload: dict, registro: dict) -> None:
     incidents.mark(registro, incidents.ANALIZANDO)
     trace: dict = {}
     try:
-        diagnostico = await workflow.run_rca_analysis(payload, trace)
+        # Tope duro. Es la única garantía que cubre TODO el análisis, incluidas
+        # las llamadas MCP de los Steps 2 y 5, que no tienen timeout propio y
+        # pueden quedarse colgadas para siempre si el subproceso deja de
+        # responder. Sin esto, un análisis atascado ocupaba su plaza del
+        # semáforo indefinidamente y los siguientes no arrancaban nunca.
+        #
+        # Cancelar no mata el hilo donde corre la llamada al modelo (to_thread
+        # no es interrumpible): ese hilo termina por su cuenta y se descarta.
+        # Como la llamada ya tiene su propio LLM_TIMEOUT_SECONDS, ese rezagado
+        # dura como mucho un par de minutos. La plaza del semáforo sí se libera
+        # al instante, que es lo que importa para los que esperan turno.
+        diagnostico = await asyncio.wait_for(
+            workflow.run_rca_analysis(payload, trace),
+            timeout=config.ANALYSIS_TIMEOUT_SECONDS,
+        )
+    except (asyncio.TimeoutError, TimeoutError):
+        log.error("Analisis abortado por exceder el tiempo maximo.",
+                  extra={"incidentId": registro["id"],
+                         "limiteSegundos": config.ANALYSIS_TIMEOUT_SECONDS})
+        incidents.mark(registro, incidents.FALLIDO, trace=trace,
+                       motivo="El análisis superó el tiempo máximo.")
+        return
     except Exception:
         log.exception("Analisis abortado por un error no controlado.",
                       extra={"incidentId": registro["id"]})
-        incidents.mark(registro, incidents.FALLIDO, trace=trace)
+        incidents.mark(registro, incidents.FALLIDO, trace=trace,
+                       motivo="El análisis se detuvo por un error inesperado. "
+                              "El detalle técnico está en el log del servicio.")
         return
     if diagnostico is None:
-        incidents.mark(registro, incidents.FALLIDO, trace=trace)
+        # El workflow corta de forma controlada devolviendo None, y deja dicho
+        # en el trace por qué. Si no lo dejó -- no debería pasar --, se guarda
+        # algo antes que nada: un incidente que solo dice "fallido" no le sirve
+        # a quien está mirando la pantalla.
+        incidents.mark(registro, incidents.FALLIDO, trace=trace,
+                       motivo=trace.get("motivo_fallo")
+                       or "El análisis no llegó a completarse. El detalle está "
+                          "en el log del servicio.")
     else:
         # Etiquetado de contenido generado por IA (ai-governance 5.4): quien lea
         # el fichero del incidente debe saber que el diagnostico lo produjo un
@@ -504,6 +545,113 @@ async def get_notification_history() -> dict:
 
 
 # =============================================================================
+# La pantalla de la sala de control (Fase 1: solo lectura)
+# =============================================================================
+# Diseño completo en docs/DISENO-INTERACCION-HUMANA.md. Esta primera fase solo
+# MUESTRA: ni veredicto, ni feedback, ni botones. Es la única parte del diseño
+# que no tiene decisiones pendientes, y resuelve hoy un problema real -- hasta
+# ahora no había forma de ver qué había hecho el sistema salvo abrir JSON a mano.
+#
+# Sobre la exposición de datos, ver la nota al final de DECISIONES DE SEGURIDAD.
+
+@app.get(
+    "/incidentes",
+    summary="Lista de incidentes para la vista de conjunto",
+    description=(
+        "Resumen de incidentes, del más reciente al más antiguo, acotado por "
+        "fecha y cantidad. No incluye el payload, el trace ni el texto de las "
+        "causas: para eso está GET /incidentes/{id}.\n\n"
+        "Sin parámetros devuelve la ventana por defecto de la pantalla "
+        "(SCREEN_DEFAULT_HOURS / SCREEN_DEFAULT_LIMIT). Los incidentes fallidos "
+        "de hace más de unas horas quedan fuera salvo que se pidan por estado."
+    ),
+)
+async def listar_incidentes(
+    desde: str | None = None,
+    hasta: str | None = None,
+    limite: int | None = None,
+    estado: str | None = None,
+    horas: int | None = None,
+) -> dict:
+    """Alimenta la lista de la pantalla.
+
+    Acotar no es un lujo: no se borra ningún incidente nunca, así que la lista
+    crece sin techo y un monitor con miles de elementos no lo lee nadie.
+
+    'horas' es un atajo para el caso normal (las últimas N horas) y 'desde' /
+    'hasta' permiten el rango explícito que pida el operario. Si llegan los dos,
+    manda el rango explícito: es el más concreto.
+    """
+    if desde is None and horas is None and hasta is None:
+        horas = config.SCREEN_DEFAULT_HOURS
+    # horas=0 significa "sin límite por abajo", que es como lo ofrece la
+    # pantalla ("Todo"). Restar cero daría 'desde = ahora' y dejaría fuera todo
+    # -- el fallo se coló en una prueba que pasó de casualidad, porque las
+    # marcas tienen resolución de segundo y caían en el mismo.
+    if horas is not None and desde is None and horas > 0:
+        desde = (datetime.now(timezone.utc)
+                 - timedelta(hours=horas)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # El límite lo teclea el operario, así que se acota aquí: un 999999 de más
+    # en la casilla no debe hacer que el servidor lea y serialice miles de
+    # ficheros para un navegador que no los va a poder pintar.
+    if limite is None:
+        limite = config.SCREEN_DEFAULT_LIMIT
+    limite = max(1, min(int(limite), _LIMITE_MAXIMO))
+
+    resultado = incidents.listar(desde=desde, hasta=hasta, limite=limite, estado=estado)
+    resultado["filtro"] = {"desde": desde, "hasta": hasta, "limite": limite, "estado": estado}
+    # 'total' se conserva por compatibilidad con lo que ya consumía este
+    # endpoint; es el número de los que se devuelven.
+    resultado["total"] = resultado["mostrados"]
+    return resultado
+
+
+@app.get(
+    "/incidentes/{incidente_id}",
+    summary="Detalle de un incidente",
+    description=(
+        "El incidente completo salvo el trace (los prompts enviados al modelo y "
+        "sus respuestas en crudo, que son el 98,9 % del fichero y no pintan nada "
+        "en una pantalla de sala de control)."
+    ),
+)
+async def detalle_incidente(incidente_id: str) -> dict:
+    """Detalle de un incidente. 404 si no existe o si el id no tiene formato válido.
+
+    La validación del formato vive en incidents.leer_por_id() y no es cosmética:
+    el id llega desde la URL, así que sin ella un id con ".." serviría para leer
+    cualquier fichero de la máquina.
+    """
+    registro = incidents.leer_por_id(incidente_id)
+    if registro is None:
+        raise HTTPException(status_code=404, detail="Incidente no encontrado")
+    return registro
+
+
+@app.get(
+    "/pantalla",
+    summary="Pantalla de la sala de control",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def pantalla() -> HTMLResponse:
+    """Sirve la página del monitor.
+
+    Se lee del disco en cada petición, no al arrancar: durante el desarrollo eso
+    permite retocar el HTML y recargar el navegador sin reiniciar un servicio
+    que hay que parar con permisos de administrador.
+
+    El coste es leer un fichero pequeño por visita, y la pantalla la abren unas
+    pocas personas en una sala de control -- no es un endpoint de tráfico.
+    """
+    try:
+        return HTMLResponse(_PAGINA.read_text(encoding="utf-8"))
+    except OSError as exc:
+        log.error("No se pudo leer la página de la pantalla: %s", exc)
+        raise HTTPException(status_code=500, detail="No se pudo cargar la pantalla")
+
+
+# =============================================================================
 # DECISIONES DE SEGURIDAD (evaluadas y cerradas el 2026-09-07)
 # =============================================================================
 # Este webhook acepta notificaciones sin autenticar, por HTTP plano, en una VM
@@ -548,6 +696,31 @@ async def get_notification_history() -> dict:
 #    precisamente por contener esos mismos datos. Se apaga por defecto.
 #    /docs se deja accesible: expone la forma de la API, no datos, y ayuda a
 #    quien tenga que integrar.
+#
+# 5. LA PANTALLA Y SUS ENDPOINTS -- SÍ SE IMPLEMENTAN, ENCENDIDOS (2026-09-14)
+#    /incidentes, /incidentes/{id} y /pantalla exponen sin autenticar nombres de
+#    activo, valores de proceso y los diagnósticos del modelo. Es MÁS de lo que
+#    exponía /notifications/history, que se apagó por esto mismo -- así que la
+#    diferencia hay que justificarla y no darla por supuesta.
+#
+#    La diferencia es el propósito. El historial era una herramienta de
+#    depuración: su valor no compensaba la exposición, y apagarlo no le quitaba
+#    nada a nadie. La pantalla ES la funcionalidad; apagada por defecto no habría
+#    pantalla, y el diseño entero (docs/DISENO-INTERACCION-HUMANA.md) se apoya en
+#    que haya un monitor consultable en la sala de control.
+#
+#    Se sostiene sobre la MISMA premisa que todo lo anterior: red interna de
+#    pruebas, sin datos personales, sin exposición a internet. Si esa premisa
+#    cambia, esto pasa a ser lo SEGUNDO que hay que arreglar, justo detrás del
+#    firewall: hace falta autenticación antes de que la pantalla salga de aquí.
+#
+#    Lo que sí se acotó desde el principio, porque no costaba nada:
+#      - El trace no sale nunca. Son los prompts en crudo y el 98,9 % del
+#        fichero; la pantalla no lo necesita.
+#      - El id de la URL se valida contra una expresión regular antes de tocar
+#        el disco. Sin eso, un id con ".." leería cualquier fichero de la
+#        máquina: verificado que el riesgo era real, no teórico.
+#      - La lista devuelve un resumen, no los registros enteros.
 #
 # Lo que sí protege este despliegue, con independencia de lo anterior:
 #   - Ninguna credencial en el código ni en el log (config.py, .gitignore).

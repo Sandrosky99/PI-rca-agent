@@ -228,9 +228,19 @@ _DIAGNOSIS_FINAL_INSTRUCTION = (
     "dos claves.\n\n"
     "1. \"root_causes\": un array de 2 o 3 objetos (nunca menos de 2 ni más "
     "de 3), cada uno con exactamente tres claves:\n"
-    "- \"cause\": descripción breve de la causa raíz.\n"
-    "- \"explanation\": por qué los datos respaldan esta causa (referencia "
-    "las variables y la tendencia concreta que la sustentan).\n"
+    "- \"cause\": la causa raíz en UNA frase, de 15 palabras como máximo. Es "
+    "lo primero y a veces lo único que va a leer un operario de planta que "
+    "acaba de recibir la alarma, así que tiene que entenderse sola, sin haber "
+    "leído nada más. Nombra el mecanismo físico concreto, no la categoría "
+    "genérica. Sin justificarla aquí: para eso está \"evidence\".\n"
+    "- \"evidence\": un array de 2 a 4 cadenas. Cada una, UN hecho observado "
+    "en los datos, de una o dos líneas, que se sostenga por sí solo. Empieza "
+    "por la variable y su cambio, con cifras y unidades; añade después, si "
+    "hace falta, qué significa. Ejemplo del estilo esperado: \"El caudal cae "
+    "de 296,5 a 265,9 m3/h mientras la altura sube de 49,9 a 51,0 m: la bomba "
+    "trabaja contra más resistencia\". Un hecho por elemento -- no metas tres "
+    "variables en una misma cadena -- y ordénalos del más concluyente al "
+    "menos. No repitas aquí la causa ni la acción.\n"
     "- \"recommended_action\": acción de resolución concreta para esta causa.\n"
     "El array debe estar ordenado de mayor a menor probabilidad (el primer "
     "elemento es la causa más probable).\n\n"
@@ -1047,6 +1057,47 @@ def _enforce_trend_coverage(
     return cubren[0]
 
 
+def _fallo(trace: dict | None, motivo: str) -> None:
+    """Deja constancia de POR QUÉ se corta el análisis, para el fichero del caso.
+
+    Hasta el 2026-09-14 un incidente en FALLIDO no decía en ninguna parte qué
+    había fallado. El log lo tenía, pero el fichero del caso no, así que la
+    pantalla solo podía enseñar "fallo del análisis" y encogerse de hombros --
+    y quien mira un monitor en una sala de control no va a abrir webhook.log.
+
+    El texto va dirigido a esa persona, no a quien depura: dice qué se torció y
+    si tiene arreglo por su parte. Sin números de Step ni nombres de módulo --
+    "Step 5" no significa nada para quien está de pie delante del monitor. El
+    detalle técnico sigue en el log, que es donde lo busca quien lo necesita.
+    """
+    if trace is not None:
+        trace["motivo_fallo"] = motivo
+    log.info("WORKFLOW RCA: análisis interrumpido. %s", motivo)
+
+
+def _evidencias(cause: dict) -> list[str]:
+    """Las evidencias de una causa, venga en el esquema nuevo o en el viejo.
+
+    Hasta el 2026-09-14 el modelo devolvía "explanation": un único párrafo que
+    mezclaba los hechos observados con su interpretación. Se cambió a "evidence"
+    -- una lista de hechos sueltos -- porque en la pantalla de la sala de
+    control aquello era un muro de texto: había que leérselo entero para llegar
+    a lo que importaba.
+
+    Los incidentes ya guardados siguen teniendo el campo viejo, y no se migran:
+    un diagnóstico es el registro de lo que el modelo dijo aquel día, y
+    reescribirlo para que encaje en el esquema de hoy sería falsearlo. Se leen
+    los dos.
+    """
+    evidencias = cause.get("evidence")
+    if isinstance(evidencias, list):
+        return [str(e) for e in evidencias if str(e).strip()]
+    if isinstance(evidencias, str) and evidencias.strip():
+        return [evidencias]
+    viejo = cause.get("explanation")
+    return [str(viejo)] if isinstance(viejo, str) and viejo.strip() else []
+
+
 async def _generar(user_message: str) -> str:
     """Llama al modelo sin congelar el bucle de eventos.
 
@@ -1163,7 +1214,7 @@ async def run_rca_analysis(notification_payload: dict, trace: dict | None = None
         variables_response = await _generar(context["claude_prompt"])
     except llm_client.LLMGenerationError as exc:
         log.error("Step 4 fallido: %s", exc)
-        log.info("WORKFLOW RCA: análisis interrumpido en el Step 4. Steps 5 y 6 no ejecutados.")
+        _fallo(trace, "El modelo no respondió al decidir qué variables analizar.")
         return
     if trace is not None:
         trace["step4_response"] = variables_response
@@ -1177,7 +1228,8 @@ async def run_rca_analysis(notification_payload: dict, trace: dict | None = None
         parsed_response = json.loads(_extract_json_payload(variables_response))
     except json.JSONDecodeError as exc:
         log.error("Step 5: la respuesta del modelo no es JSON válido (%s): %r", exc, variables_response)
-        log.info("WORKFLOW RCA: análisis interrumpido en el Step 5. Step 6 no ejecutado.")
+        _fallo(trace, "El modelo devolvió una respuesta con formato inválido al "
+                      "decidir qué variables analizar.")
         return
 
     # Puerta de autorización: el modelo propone, el código decide qué se
@@ -1186,7 +1238,8 @@ async def run_rca_analysis(notification_payload: dict, trace: dict | None = None
         variables, missing_variables = _validate_selected_variables(parsed_response, af_context)
     except VariableSelectionError as exc:
         log.error("Step 5: seleccion de variables no valida (%s): %r", exc, variables_response)
-        log.info("WORKFLOW RCA: análisis interrumpido en el Step 5. Step 6 no ejecutado.")
+        _fallo(trace, "El modelo pidió variables que no existen. Conviene revisar "
+                      "la sincronización entre PI System y la aplicación.")
         return
 
     log.info("Step 4: %d variables autorizadas para consultar en PI.", len(variables))
@@ -1226,7 +1279,8 @@ async def run_rca_analysis(notification_payload: dict, trace: dict | None = None
             )
         except pi_client.PIQueryError as exc:
             log.error("Step 5 fallido: %s", exc)
-            log.info("WORKFLOW RCA: análisis interrumpido en el Step 5. Step 6 no ejecutado.")
+            _fallo(trace, "No se pudieron obtener los datos históricos de PI System "
+                          "para las variables analizadas.")
             return
 
         log.info(
@@ -1254,7 +1308,7 @@ async def run_rca_analysis(notification_payload: dict, trace: dict | None = None
             diagnosis_response = await _generar(diagnosis_prompt)
         except llm_client.LLMGenerationError as exc:
             log.error("Step 6 fallido: %s", exc)
-            log.info("WORKFLOW RCA: análisis interrumpido en el Step 6.")
+            _fallo(trace, "El modelo no respondió con un diagnóstico.")
             return
         if trace is not None:
             trace.setdefault("step6_responses", []).append(diagnosis_response)
@@ -1265,7 +1319,7 @@ async def run_rca_analysis(notification_payload: dict, trace: dict | None = None
             diagnosis = json.loads(_extract_json_payload(diagnosis_response))
         except json.JSONDecodeError as exc:
             log.error("Step 6: la respuesta del modelo no es JSON válido (%s): %r", exc, diagnosis_response)
-            log.info("WORKFLOW RCA: análisis interrumpido en el Step 6.")
+            _fallo(trace, "El modelo devolvió el diagnóstico con formato inválido.")
             return
 
         # ¿Pide el modelo más histórico? Se registra siempre, se conceda o no:
@@ -1305,13 +1359,12 @@ async def run_rca_analysis(notification_payload: dict, trace: dict | None = None
             interval[0], interval[1], reason,
         )
 
-    # TODO: presentar esto al usuario final (interfaz web, notificación...) en
-    # vez de solo dejarlo en el log -- pendiente de decidir el canal de salida.
     log.info("=" * 60)
     log.info("WORKFLOW RCA: DIAGNÓSTICO FINAL")
     for i, cause in enumerate(diagnosis.get("root_causes", []), 1):
         log.info("%d. %s", i, cause.get("cause"))
-        log.info("   Explicación: %s", cause.get("explanation"))
+        for hecho in _evidencias(cause):
+            log.info("   - %s", hecho)
         log.info("   Acción recomendada: %s", cause.get("recommended_action"))
     log.info("=" * 60)
 

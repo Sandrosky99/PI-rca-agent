@@ -32,6 +32,7 @@ SUITES = [
     ("Decisiones de seguridad del webhook", "test_seguridad.py"),
     ("Validacion de la notificacion entrante", "test_validacion.py"),
     ("Limite de analisis simultaneos", "test_concurrencia.py"),
+    ("Pantalla de la sala de control", "test_pantalla.py"),
 ]
 
 

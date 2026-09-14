@@ -176,6 +176,126 @@ def _leer(ruta: Path) -> dict | None:
         return None
 
 
+# Un id de incidente es siempre "<identidad>__<marca>": la identidad es un
+# resumen hexadecimal y la marca sale de re.sub(r"[^0-9A-Za-z]", "", StartTime),
+# con un sufijo hexadecimal cuando hay colisión. Así que estos son todos los
+# caracteres que puede llevar.
+#
+# Importa porque el id llega desde la URL en GET /incidentes/{id}: sin esta
+# comprobación, un id con ".." o con separadores de ruta serviría para leer
+# cualquier fichero de la máquina. Se valida el formato en vez de intentar
+# limpiarlo -- lo segundo es una carrera que se pierde.
+_ID_VALIDO = re.compile(r"^[A-Za-z0-9_]{1,120}$")
+
+
+def _resumen(registro: dict) -> dict:
+    """Los campos que necesita la vista de conjunto, y ninguno más.
+
+    Deja fuera el payload entero, el trace y el texto de las causas: la lista
+    puede tener docenas de incidentes y solo necesita identificarlos y decir en
+    qué estado están. El detalle se pide por separado.
+    """
+    diagnostico = registro.get("diagnostico") or {}
+    return {
+        "id": registro.get("id"),
+        "asset": registro.get("asset"),
+        "kpiName": registro.get("kpi_name"),
+        "thresholdType": registro.get("threshold_type"),
+        "startTime": registro.get("start_time"),
+        "recibidoEn": registro.get("recibido_en"),
+        "actualizadoEn": registro.get("actualizado_en"),
+        "estado": registro.get("estado"),
+        "numCausas": len(diagnostico.get("root_causes", [])),
+        "intentos": registro.get("intentos", 1),
+    }
+
+
+# Cuánto tiempo sigue apareciendo un incidente FALLIDO en la vista por defecto.
+#
+# Fijo a propósito, sin variable de entorno. Un fallo técnico interesa mientras
+# alguien pueda hacer algo con él -- mirarlo, reintentarlo cuando lo haya --, y
+# pasado ese rato solo estorba: se acumula en la lista de un monitor donde lo
+# que importa son las alertas vivas. Sigue estando, y se ve pidiendo el estado
+# 'fallido' expresamente o ampliando el rango de fechas; lo que deja de hacer es
+# competir por la atención.
+#
+# 12 h y no 6: un turno completo. Con 6 h, un fallo de la madrugada ya no estaba
+# cuando entraba el turno de mañana, que es justo quien podía hacer algo.
+_HORAS_FALLIDO_EN_VISTA = 12
+
+
+def listar(desde: str | None = None, hasta: str | None = None,
+           limite: int | None = None, estado: str | None = None) -> dict:
+    """Resumen de incidentes, del más reciente al más antiguo, acotado.
+
+    Sin acotar esto no sirve: no se borra ningún incidente nunca, así que con
+    veinte alertas al día son 7.300 al año, y una lista de 7.300 elementos en un
+    monitor de sala de control no la lee nadie.
+
+    Filtra por 'recibido_en' y no por 'start_time' a propósito: el operario
+    razona sobre cuándo se enteró el sistema, que es lo que ordena la lista.
+
+    Devuelve también cuántos coincidían ANTES de aplicar el límite, para que la
+    pantalla pueda decir "50 de 213" en vez de mentir por omisión.
+    """
+    resumenes = []
+    try:
+        for ruta in _directorio().glob("*.json"):
+            registro = _leer(ruta)
+            if registro:
+                resumenes.append(_resumen(registro))
+    except OSError as exc:
+        log.warning("No se pudo recorrer el registro de incidentes", extra={"errorMsg": str(exc)})
+
+    if estado:
+        resumenes = [r for r in resumenes if r.get("estado") == estado]
+    else:
+        # Los fallidos viejos salen de la vista por defecto. Solo cuando NO se
+        # ha pedido un estado concreto: si alguien filtra por 'fallido' es que
+        # los está buscando, y esconderlos entonces sería absurdo.
+        corte = (datetime.now(timezone.utc)
+                 - timedelta(hours=_HORAS_FALLIDO_EN_VISTA)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        resumenes = [r for r in resumenes
+                     if r.get("estado") != FALLIDO or (r.get("recibidoEn") or "") >= corte]
+
+    # Las marcas de tiempo son ISO 8601 en UTC con formato fijo, así que se
+    # comparan como cadenas sin necesidad de parsearlas.
+    if desde:
+        resumenes = [r for r in resumenes if (r.get("recibidoEn") or "") >= desde]
+    if hasta:
+        resumenes = [r for r in resumenes if (r.get("recibidoEn") or "") <= hasta]
+
+    resumenes.sort(key=lambda r: r.get("recibidoEn") or "", reverse=True)
+
+    coincidentes = len(resumenes)
+    if limite and limite > 0:
+        resumenes = resumenes[:limite]
+    return {
+        "incidentes": resumenes,
+        "mostrados": len(resumenes),
+        "coincidentes": coincidentes,
+        "truncado": coincidentes > len(resumenes),
+    }
+
+
+def leer_por_id(incidente_id: str) -> dict | None:
+    """Un incidente completo, o None si no existe o el id no es válido.
+
+    Se devuelve SIN el trace. Medido sobre un incidente real, el trace es el
+    98,9 % del fichero (501 KB de 507 KB) y son los prompts enviados al modelo y
+    sus respuestas en crudo: nada que pinte en una pantalla de sala de control,
+    y mucho que transferir en cada refresco.
+    """
+    if not _ID_VALIDO.match(incidente_id or ""):
+        log.warning("Id de incidente con formato no válido; se rechaza.",
+                    extra={"incidentId": (incidente_id or "")[:60]})
+        return None
+    registro = _leer(_directorio() / f"{incidente_id}.json")
+    if registro is None:
+        return None
+    return {k: v for k, v in registro.items() if k != "trace"}
+
+
 def _duplicado_por_enfriamiento(identidad: str, ahora: datetime) -> dict | None:
     """Busca un incidente del mismo sujeto dentro de la ventana de enfriamiento.
 
@@ -340,15 +460,27 @@ def claim(payload: dict) -> dict | None:
 
 
 def mark(registro: dict, estado: str, diagnostico: dict | None = None,
-         trace: dict | None = None) -> None:
+         trace: dict | None = None, motivo: str | None = None) -> None:
     """Actualiza el estado del incidente en disco. Nunca propaga excepciones:
-    un fallo escribiendo el registro no debe tumbar el análisis en curso."""
+    un fallo escribiendo el registro no debe tumbar el análisis en curso.
+
+    'motivo' explica en una frase por qué el incidente acabó así. Se añadió el
+    2026-09-14 porque un incidente en FALLIDO no decía en ninguna parte qué
+    había fallado: el log lo tenía, pero el fichero del caso no, y la pantalla
+    solo podía enseñar "fallo del análisis" y encogerse de hombros. Quien mira
+    un monitor en una sala de control no va a abrir webhook.log.
+
+    Va en un campo propio y no dentro del trace a propósito: el trace se poda a
+    los 90 días (podar_traces) y el motivo del fallo forma parte del caso.
+    """
     ruta = _directorio() / f"{registro['id']}.json"
     observability.audit(
         "incident.mark", {"incidentId": registro["id"], "estado": estado},
     )
     registro["estado"] = estado
     registro["actualizado_en"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if motivo:
+        registro["motivo"] = motivo
     if diagnostico is not None:
         registro["diagnostico"] = diagnostico
     if trace:

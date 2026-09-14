@@ -96,7 +96,19 @@ def _is_transient_anthropic_error(exc: BaseException) -> bool:
 
 _RETRY_COMMON = dict(
     wait=tenacity.wait_exponential(multiplier=2, min=2, max=30),
-    stop=tenacity.stop_after_attempt(3),
+    # Se para por TIEMPO, no por número de intentos. Antes era
+    # stop_after_attempt(3), que con esta espera exponencial daba 2 + 4 = SEIS
+    # SEGUNDOS de aguante total: ante un corte de tres minutos del proveedor, el
+    # análisis se rendía cuando faltaban 174 segundos para que volviera.
+    #
+    # Contar tiempo dice lo que de verdad importa -- cuánto corte se aguanta --
+    # y no depende de lo rápido que falle cada intento. Con la espera
+    # exponencial de arriba (2, 4, 8, 16, 30, 30...) caben unos ocho intentos en
+    # la ventana.
+    #
+    # El valor sale del presupuesto de ANALYSIS_TIMEOUT_SECONDS, no del aire:
+    # ver la nota en config.LLM_RETRY_WINDOW_SECONDS.
+    stop=tenacity.stop_after_delay(config.LLM_RETRY_WINDOW_SECONDS),
     before_sleep=tenacity.before_sleep_log(log, logging.WARNING),
     reraise=True,
 )
@@ -108,7 +120,12 @@ def _generate_gemini(system_prompt: str, user_message: str) -> str:
     from google import genai
     from google.genai import types
 
-    client = genai.Client(api_key=config.GEMINI_API_KEY)
+    # Mismo tope que en la ruta de Anthropic, para que las dos se comporten
+    # igual. google-genai lo toma en milisegundos.
+    client = genai.Client(
+        api_key=config.GEMINI_API_KEY,
+        http_options=types.HttpOptions(timeout=config.LLM_TIMEOUT_SECONDS * 1000),
+    )
     response = client.models.generate_content(
         model=config.GEMINI_MODEL,
         contents=user_message,
@@ -125,7 +142,16 @@ def _generate_anthropic(system_prompt: str, user_message: str) -> str:
     """Llama a Claude vía el SDK anthropic."""
     import anthropic
 
-    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    # max_retries=0 a propósito: el SDK reintenta dos veces por su cuenta y
+    # tenacity otras tres, así que los dos juntos daban NUEVE intentos de hasta
+    # diez minutos cada uno. Hora y media para una sola llamada, y nadie decidió
+    # eso -- salió de encajar dos políticas de reintento sin mirar. La política
+    # de reintentos la tiene tenacity, que es donde está escrita y donde se lee.
+    client = anthropic.Anthropic(
+        api_key=config.ANTHROPIC_API_KEY,
+        timeout=config.LLM_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
     response = client.messages.create(
         model=config.ANTHROPIC_MODEL,
         max_tokens=config.LLM_MAX_TOKENS,

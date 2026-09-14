@@ -157,6 +157,34 @@ final = incidents._leer(TMP / "inc" / f"{r['id']}.json")
 check("y el incidente queda 'fallido', no colgado en 'analizando'",
       final and final["estado"] == incidents.FALLIDO, final and final["estado"])
 
+print("\n=== 6b. Un analisis que se cuelga no ocupa su plaza para siempre ===")
+# Sin tope duro, un analisis atascado -- una llamada MCP que no vuelve, por
+# ejemplo -- retenia su plaza del semaforo indefinidamente y los que esperaban
+# turno no arrancaban NUNCA. Y las llamadas MCP de los Steps 2 y 5 no tienen
+# timeout propio, asi que el caso no es teorico.
+limpiar()
+con_limite(1)
+config.ANALYSIS_TIMEOUT_SECONDS = 1
+
+async def _se_cuelga(payload, trace=None):
+    await asyncio.sleep(30)          # nunca termina dentro del tope
+
+workflow.run_rca_analysis = _se_cuelga
+colgado = incidents.claim(payload("PS20102 A03 PS02 Pump 50"))
+import time as _t
+t0 = _t.monotonic()
+asyncio.run(webhook._analizar_incidente(colgado["payload"], colgado))
+tardo = _t.monotonic() - t0
+
+check("se corta cerca del tope, no a los 30 s", tardo < 5, f"{tardo:.1f} s")
+check("libera la plaza del semaforo", webhook._ANALISIS_EN_CURSO._value == 1,
+      f"cupos={webhook._ANALISIS_EN_CURSO._value}")
+final = incidents._leer(TMP / "inc" / f"{colgado['id']}.json")
+check("queda 'fallido'", final and final["estado"] == incidents.FALLIDO, final and final["estado"])
+check("y dice que fue por tiempo", final and "tiempo máximo" in final.get("motivo", ""),
+      final and final.get("motivo"))
+config.ANALYSIS_TIMEOUT_SECONDS = 600
+
 print("\n=== 7. El incidente espera turno en 'recibido', no en 'analizando' ===")
 # Esto es lo que hace honesto el estado que va a leer la pantalla de la sala de
 # control: 'analizando' debe significar que corre de verdad, no que hace cola.

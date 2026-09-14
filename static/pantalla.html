@@ -1,0 +1,612 @@
+<!doctype html>
+<!--
+  Pantalla de la sala de control -- Fase 1 (solo lectura).
+
+  Diseño completo en docs/DISENO-INTERACCION-HUMANA.md. Aquí NO hay veredicto,
+  ni feedback, ni botones de causa: esta fase solo muestra. Lo que falta llegará
+  cuando el esquema del fichero de incidente crezca para soportarlo.
+
+  Sin dependencias externas a propósito: la máquina que sirve esto no tiene por
+  qué tener salida a internet, y un monitor de sala de control que se queda en
+  blanco porque no carga una fuente de un CDN es peor que uno feo.
+
+  Se refresca por sondeo y no con SSE. Para un kiosco que mira cuatro incidentes
+  cada pocos segundos, el sondeo es más simple y se recupera solo de un corte de
+  red sin código de reconexión.
+-->
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RCA — Sala de control</title>
+<style>
+  /* Paleta clara. Los neutros llevan una ligera desviación fría hacia el
+     acento para que no parezcan grises de fábrica, y el contraste del texto se
+     mantiene alto: esto se lee a distancia y a veces con luz de nave. */
+  :root{
+    --fondo:#F4F6F8; --panel:#FFFFFF; --panel-2:#EFF3F6; --borde:#D7DEE5;
+    --texto:#16212C; --texto-2:#4A5A6A; --tenue:#78889A;
+    --acento:#0E6E8C;
+    --ok:#1E7346; --ok-fondo:#E2F1E8;
+    --aviso:#8A5D0C; --aviso-fondo:#F8EEDB;
+    --malo:#A03B26; --malo-fondo:#F8E6E1;
+    --neutro:#55697C; --neutro-fondo:#E6EBF0;
+  }
+  *{box-sizing:border-box}
+  /* La pagina NO se desplaza: ocupa la ventana y cada panel se desplaza por
+     dentro. Asi la lista de incidentes sigue a la vista mientras se lee el
+     detalle -- si no, con muchos incidentes hay que bajar tanto que se pierde
+     de vista cual esta seleccionado, y el panel central queda sin referencia. */
+  body{
+    margin:0; background:var(--fondo); color:var(--texto);
+    font:16px/1.5 "Segoe UI",system-ui,-apple-system,sans-serif;
+    height:100vh; display:flex; flex-direction:column; overflow:hidden;
+  }
+  header{
+    display:flex; align-items:baseline; gap:18px; flex-wrap:wrap;
+    padding:14px 24px; background:var(--panel); border-bottom:1px solid var(--borde);
+    flex:0 0 auto; z-index:5;
+  }
+  header h1{margin:0; font-size:17px; letter-spacing:.06em; text-transform:uppercase; color:var(--acento)}
+  .reloj{margin-left:auto; font-size:13px; color:var(--tenue); font-variant-numeric:tabular-nums}
+  .caido{color:var(--malo); font-weight:600}
+
+  /* min-height:0 no es decorativo: sin el, un hijo de flex o de grid se niega
+     a encogerse por debajo de su contenido y el overflow-y de los paneles no
+     llega a activarse nunca. Es el motivo clasico de que "no funciona el
+     scroll" en este tipo de maquetado. */
+  .cols{
+    display:grid; grid-template-columns:340px 1fr;
+    flex:1 1 auto; min-height:0;
+  }
+  @media(max-width:900px){
+    /* En pantalla estrecha no hay dos columnas que mantener a la vista, asi que
+       se deja desplazar la pagina entera, que es lo natural en un movil. */
+    body{height:auto; overflow:visible}
+    .cols{grid-template-columns:1fr}
+    .lista,.detalle{overflow:visible}
+    .lista{max-height:none}
+  }
+
+  /* ---- lista / selector de incidentes ---- */
+  .lista{
+    border-right:1px solid var(--borde); background:var(--panel);
+    overflow-y:auto; min-height:0;
+  }
+  /* Cabecera y filtros quedan fijos arriba del panel: con veinte incidentes,
+     tener que subir del todo para cambiar de filtro es una molestia diaria. */
+  .lista h2{
+    margin:0; padding:12px 18px 8px; font-size:11px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--tenue); font-weight:600;
+    position:sticky; top:0; background:var(--panel); z-index:2;
+  }
+  /* Filtro por estado. Solo aparecen los estados que existen ahora mismo: una
+     botonera con seis opciones de las que cuatro dan cero no ayuda a nadie. */
+  .filtros{
+    display:flex; flex-wrap:wrap; gap:6px; padding:0 18px 12px;
+    border-bottom:1px solid var(--borde);
+    position:sticky; top:33px; background:var(--panel); z-index:2;
+  }
+  .filtro{
+    font:inherit; font-size:12.5px; cursor:pointer; padding:4px 11px;
+    border-radius:20px; border:1px solid var(--borde);
+    background:var(--panel); color:var(--texto-2);
+  }
+  .filtro:hover{border-color:var(--acento); color:var(--acento)}
+  .filtro[aria-pressed="true"]{
+    background:var(--acento); border-color:var(--acento); color:#FFFFFF; font-weight:600;
+  }
+  .filtro .cuenta{opacity:.7; margin-left:5px; font-variant-numeric:tabular-nums}
+
+  /* Acotar cuantos se muestran. Va arriba del todo porque decide QUE hay en la
+     lista; los filtros de estado operan dentro de lo que esto deja pasar. */
+  .rango{
+    display:flex; flex-wrap:wrap; gap:6px; align-items:center;
+    padding:0 18px 10px; position:sticky; top:0; background:var(--panel); z-index:3;
+  }
+  .rango select,.rango input{
+    font:inherit; font-size:12.5px; padding:3px 7px; border-radius:6px;
+    border:1px solid var(--borde); background:var(--panel); color:var(--texto);
+  }
+  .rango input[type=datetime-local]{font-size:11.5px}
+  .rango input[type=number]{width:64px; font-variant-numeric:tabular-nums}
+  .rango label{font-size:11px; color:var(--tenue); letter-spacing:.06em; text-transform:uppercase}
+  /* "mas recientes" no es decoracion: sin ello, ver 50 de 213 deja la duda de
+     cuales son esos 50. */
+  .nota-rango{font-size:11.5px; color:var(--tenue)}
+  .personalizado{display:flex; flex-wrap:wrap; gap:5px; align-items:center; width:100%}
+  .aviso-truncado{
+    padding:8px 18px; font-size:12.5px; color:var(--aviso);
+    background:var(--aviso-fondo); border-bottom:1px solid var(--borde);
+  }
+  .fila{
+    display:block; width:100%; text-align:left; background:none; border:none;
+    border-bottom:1px solid var(--borde); padding:12px 18px; cursor:pointer;
+    color:inherit; font:inherit;
+  }
+  .fila:hover{background:var(--panel-2)}
+  .fila[aria-current="true"]{background:var(--panel-2); box-shadow:inset 3px 0 0 var(--acento)}
+  .fila .act{font-weight:600; font-size:15px}
+  .fila .sub{font-size:13px; color:var(--texto-2); margin-top:2px}
+  .fila .pie{display:flex; gap:10px; align-items:center; margin-top:7px}
+
+  /* ---- detalle ---- */
+  .detalle{padding:22px 28px; overflow-y:auto; min-height:0}
+  .vacio{color:var(--tenue); padding:40px 0}
+
+  /* Jerarquia de la cabecera, de mas a menos importante:
+       1. el estado         -- lo primero que hay que saber
+       2. el activo         -- de que maquina hablamos
+       3. QUE le pasa       -- el indicador y en que direccion se ha ido
+       4. contexto y tiempo -- tenue, para quien lo necesite
+     Los numeros (valor y limite) van DENTRO de la frase del problema y no en
+     cajas propias: sueltos obligan a recomponer la frase mentalmente. */
+  .titulo{font-size:26px; font-weight:600; margin:6px 0 10px; letter-spacing:-.01em}
+  .problema{
+    font-size:19px; color:var(--texto); margin:0 0 6px; line-height:1.35;
+    padding-left:12px; border-left:3px solid var(--acento);
+  }
+  .problema .kpi{font-weight:600}
+  .problema .cifras{
+    display:block; font-size:14.5px; color:var(--texto-2); margin-top:3px;
+    font-variant-numeric:tabular-nums;
+  }
+  .contexto{
+    color:var(--tenue); font-size:13.5px; margin:14px 0 0;
+    display:flex; flex-wrap:wrap; gap:4px 14px;
+  }
+  .contexto .sep{color:var(--borde)}
+  .contexto b{color:var(--texto-2); font-weight:400}
+  .bloque-cabecera{padding-bottom:18px; border-bottom:1px solid var(--borde); margin-bottom:4px}
+
+  h3{font-size:13px; letter-spacing:.1em; text-transform:uppercase; color:var(--tenue); margin:26px 0 12px}
+  /* Cada causa se lee en tres saltos: QUE pasa (una frase), POR QUE lo decimos
+     (hechos sueltos) y QUE hacer. Antes era un solo parrafo y habia que
+     leerselo entero para llegar a lo unico accionable. */
+  .causa{
+    background:var(--panel); border:1px solid var(--borde);
+    border-radius:8px; padding:0; margin-bottom:14px; overflow:hidden;
+  }
+  .causa .n{
+    font-size:11px; color:var(--tenue); font-weight:600; letter-spacing:.1em;
+    padding:10px 18px 2px;
+  }
+  .causa .q{
+    font-size:18px; font-weight:600; margin:0; line-height:1.35;
+  }
+  .bloque-problema{padding-top:4px}
+  .parrafo{margin:0; color:var(--texto-2); font-size:15px; line-height:1.55}
+  .motivo{
+    background:var(--malo-fondo); border-left:3px solid var(--malo);
+    border-radius:0 8px 8px 0; padding:13px 16px; margin:0;
+    color:var(--texto); font-size:15px; max-width:70ch;
+  }
+  .bloque{padding:13px 18px}
+  .bloque + .bloque{border-top:1px solid var(--borde)}
+  .bloque > b{
+    color:var(--tenue); font-size:10.5px; letter-spacing:.12em;
+    text-transform:uppercase; display:block; margin-bottom:7px; font-weight:600;
+  }
+  .causa ul{margin:0; padding:0; list-style:none; display:grid; gap:8px}
+  .causa li{
+    color:var(--texto-2); font-size:15px; line-height:1.5;
+    padding-left:16px; position:relative;
+  }
+  .causa li::before{
+    content:""; position:absolute; left:0; top:.6em;
+    width:6px; height:6px; border-radius:50%; background:var(--acento); opacity:.55;
+  }
+  .bloque-accion{background:var(--panel-2)}
+  .bloque-accion p{margin:0; color:var(--texto); font-size:15px}
+
+  .chip{
+    display:inline-block; font-size:11.5px; font-weight:600; padding:2px 9px;
+    border-radius:20px; letter-spacing:.03em; white-space:nowrap;
+  }
+  /* 'listo' destaca mas que el resto a proposito: es el unico estado que pide
+     algo de alguien. Los demas solo informan de que el sistema sigue a lo suyo. */
+  .e-finalizado{
+    background:var(--ok); color:#FFFFFF; font-weight:700;
+    box-shadow:0 1px 3px rgba(30,115,70,.35);
+  }
+  .e-analizando,.e-recibido{background:var(--aviso-fondo); color:var(--aviso)}
+  .e-fallido{background:var(--malo-fondo); color:var(--malo)}
+  .e-pausado,.e-interrumpido{background:var(--neutro-fondo); color:var(--neutro)}
+
+  .aviso-ia{
+    margin-top:26px; padding:12px 16px; border-radius:8px;
+    background:var(--panel); border:1px solid var(--borde);
+    font-size:13.5px; color:var(--texto-2);
+  }
+  .aviso-ia b{color:var(--aviso)}
+  .pulso{animation:lat 1.6s ease-in-out infinite}
+  @keyframes lat{0%,100%{opacity:1}50%{opacity:.35}}
+  @media(prefers-reduced-motion:reduce){ .pulso{animation:none} }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>RCA — Sala de control</h1>
+  <span id="resumen" class="reloj"></span>
+  <span id="reloj" class="reloj"></span>
+</header>
+
+<div class="cols">
+  <nav class="lista">
+    <div class="rango" id="rango"></div>
+    <div class="filtros" id="filtros"></div>
+    <div id="truncado"></div>
+    <div id="lista"></div>
+  </nav>
+  <main class="detalle" id="detalle">
+    <p class="vacio">Selecciona un incidente.</p>
+  </main>
+</div>
+
+<script>
+"use strict";
+
+// Cada cuánto se vuelve a preguntar. 5 s es suficiente para un monitor: un
+// análisis tarda minutos, así que refrescar más deprisa solo gasta.
+const CADA_MS = 5000;
+
+let seleccionado = null;
+let ultimoOk = null;
+let filtro = "";   // "" = todos; si no, el estado por el que se filtra
+
+// Que ventana de incidentes se pide. Hace falta porque no se borra ninguno
+// nunca: con veinte alertas al dia son 7.300 al ano, y esa lista no la lee
+// nadie en un monitor. Los valores iniciales los pone el servidor.
+let rango = {horas: null, desde: "", hasta: "", limite: null};
+
+const PERIODOS = [
+  ["8",   "Últimas 8 h"],
+  ["24",  "Últimas 24 h"],
+  ["72",  "Últimos 3 días"],
+  ["168", "Últimos 7 días"],
+  ["0",   "Todo"],
+  ["x",   "Rango concreto…"],
+];
+
+const ESTADOS = {
+  recibido:    "en cola",
+  analizando:  "procesando",
+  finalizado:  "listo",
+  fallido:     "fallo del análisis",
+  interrumpido:"interrumpido",
+  pausado:     "en pausa",
+};
+
+const esc = (t) => String(t ?? "").replace(/[&<>"']/g, c => (
+  {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]
+));
+
+// Las horas llegan en UTC desde PI. Se muestran en la del navegador, que es la
+// de la planta: un operario no debe tener que restar dos horas mentalmente.
+function fecha(iso){
+  if(!iso) return null;
+  const d = new Date(iso.endsWith("Z") ? iso : iso + "Z");
+  return isNaN(d) ? null : d;
+}
+
+function hora(iso){
+  const d = fecha(iso);
+  return d ? d.toLocaleString("es-ES",
+    {day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}) : (iso || "—");
+}
+
+// Cuanto lleva pasando es mas util que a que hora empezo: el operario quiere
+// saber si esto es de hace diez minutos o de ayer, no hacer la resta.
+function desde(iso){
+  const d = fecha(iso);
+  if(!d) return "";
+  const min = Math.floor((Date.now() - d.getTime()) / 60000);
+  if(min < 0)  return "";
+  if(min < 1)  return "ahora mismo";
+  if(min < 60) return `hace ${min} min`;
+  const h = Math.floor(min / 60);
+  if(h < 24)   return `hace ${h} h${min % 60 ? ` ${min % 60} min` : ""}`;
+  const dias = Math.floor(h / 24);
+  return `hace ${dias} día${dias === 1 ? "" : "s"}${h % 24 ? ` ${h % 24} h` : ""}`;
+}
+
+const num = (v) => typeof v === "number" ? v.toLocaleString("es-ES") : esc(v ?? "—");
+
+// Las evidencias de una causa, venga en el esquema nuevo o en el viejo.
+//
+// Hasta el 2026-09-14 el modelo devolvia "explanation": un parrafo unico que
+// mezclaba los hechos con su interpretacion. Ahora devuelve "evidence", una
+// lista de hechos sueltos. Los incidentes ya guardados conservan el campo viejo
+// y no se migran -- un diagnostico es el registro de lo que el modelo dijo aquel
+// dia --, asi que la pantalla lee los dos.
+//
+// Se devuelve tambien COMO hay que pintarlo, y no es un detalle: un parrafo de
+// ocho lineas metido en una vinieta parece una lista rota. Si el dato es un
+// parrafo, se pinta como parrafo.
+function evidencias(c){
+  if(Array.isArray(c.evidence)){
+    const l = c.evidence.map(String).filter(e => e.trim());
+    if(l.length) return {tipo:"lista", items:l};
+  }
+  if(typeof c.evidence === "string" && c.evidence.trim())
+    return {tipo:"parrafo", items:[c.evidence]};
+  if(typeof c.explanation === "string" && c.explanation.trim())
+    return {tipo:"parrafo", items:[c.explanation]};
+  return {tipo:"vacio", items:[]};
+}
+
+// LimitThresholdType dice de que lado salta la alarma: 'Low' es por debajo del
+// limite, 'High' por encima. Decirlo con palabras ahorra deducirlo de los
+// numeros, que es justo lo que hay que evitar en una sala de control.
+function direccion(tipo){
+  const t = String(tipo || "").toLowerCase();
+  if(t === "low")  return "por debajo del límite";
+  if(t === "high") return "por encima del límite";
+  return "fuera del límite";
+}
+
+function chip(estado){
+  return `<span class="chip e-${esc(estado)}${estado==="analizando"?" pulso":""}">`
+       + `${esc(ESTADOS[estado] || estado)}</span>`;
+}
+
+async function pedir(url){
+  const r = await fetch(url, {cache:"no-store"});
+  if(!r.ok) throw new Error(r.status);
+  return r.json();
+}
+
+function pintarRango(){
+  const personalizado = rango.horas === "x";
+  document.getElementById("rango").innerHTML = `
+    <label for="periodo">Periodo</label>
+    <select id="periodo">${PERIODOS.map(([v,t]) =>
+      `<option value="${v}"${String(rango.horas)===v?" selected":""}>${esc(t)}</option>`).join("")}</select>
+    <label for="limite">Máx.</label>
+    <input type="number" id="limite" min="1" max="500" step="1" value="${rango.limite}">
+    <span class="nota-rango">más recientes</span>
+    ${personalizado ? `<div class="personalizado">
+      <label for="desde">De</label>
+      <input type="datetime-local" id="desde" value="${esc(rango.desde)}">
+      <label for="hasta">a</label>
+      <input type="datetime-local" id="hasta" value="${esc(rango.hasta)}">
+    </div>` : ""}`;
+
+  document.getElementById("periodo").onchange = (e) => {
+    rango.horas = e.target.value;
+    if(rango.horas !== "x"){ rango.desde = ""; rango.hasta = ""; }
+    refrescar();
+  };
+  // Se acota tambien aqui, ademas de en el servidor: asi la casilla corrige lo
+  // que el operario vea escrito en vez de dejarle un numero que el servidor
+  // ignora por su cuenta.
+  document.getElementById("limite").onchange = (e) => {
+    const n = Number(e.target.value);
+    rango.limite = Number.isFinite(n) ? Math.max(1, Math.min(Math.round(n), 500)) : 50;
+    e.target.value = rango.limite;
+    refrescar();
+  };
+  ["desde","hasta"].forEach(id => {
+    const el = document.getElementById(id);
+    if(el) el.onchange = (e) => { rango[id] = e.target.value; refrescar(); };
+  });
+}
+
+// Traduce el rango elegido a los parametros del endpoint.
+function parametros(){
+  const p = new URLSearchParams();
+  if(rango.horas === "x"){
+    // datetime-local da hora LOCAL sin zona; el servidor compara en UTC.
+    if(rango.desde) p.set("desde", new Date(rango.desde).toISOString().slice(0,19) + "Z");
+    if(rango.hasta) p.set("hasta", new Date(rango.hasta).toISOString().slice(0,19) + "Z");
+    if(!rango.desde && !rango.hasta) p.set("horas", "0");
+  } else if(rango.horas !== null){
+    p.set("horas", rango.horas);
+  }
+  if(rango.limite) p.set("limite", rango.limite);
+  return p.toString() ? "?" + p.toString() : "";
+}
+
+function pintarFiltros(todos){
+  // Solo se ofrecen los estados que hay ahora mismo, con su cuenta. Una
+  // botonera fija con seis opciones de las que la mitad dan cero es ruido.
+  const cuentas = {};
+  todos.forEach(i => cuentas[i.estado] = (cuentas[i.estado] || 0) + 1);
+  const opciones = [["", "Todos", todos.length]].concat(
+    Object.keys(cuentas).sort().map(e => [e, ESTADOS[e] || e, cuentas[e]]));
+
+  // Si el estado filtrado desaparece (el ultimo 'procesando' termino), se
+  // vuelve a Todos en vez de dejar la lista vacia sin explicacion.
+  if(filtro && !cuentas[filtro]) filtro = "";
+
+  const cont = document.getElementById("filtros");
+  cont.innerHTML = opciones.map(([valor, etiqueta, n]) =>
+    `<button class="filtro" data-estado="${esc(valor)}" aria-pressed="${valor===filtro}">`
+    + `${esc(etiqueta)}<span class="cuenta">${n}</span></button>`).join("");
+  cont.querySelectorAll(".filtro").forEach(b =>
+    b.onclick = () => { filtro = b.dataset.estado; refrescar(); });
+}
+
+function pintarLista(incidentes){
+  const cont = document.getElementById("lista");
+  if(!incidentes.length){
+    cont.innerHTML = '<p class="vacio" style="padding:18px">'
+      + (filtro ? "Ninguno en este estado." : "Sin incidentes registrados.") + '</p>';
+    return;
+  }
+  cont.innerHTML = incidentes.map(i => `
+    <button class="fila" data-id="${esc(i.id)}" aria-current="${i.id===seleccionado}">
+      <div class="act">${esc(i.asset)}</div>
+      <div class="sub">${esc(i.kpiName)}</div>
+      <div class="sub" style="color:var(--tenue)">${esc(desde(i.startTime) || hora(i.startTime))}</div>
+      <div class="pie">${chip(i.estado)}
+        ${i.numCausas ? `<span class="sub">${i.numCausas} causas</span>` : ""}</div>
+    </button>`).join("");
+  cont.querySelectorAll(".fila").forEach(b =>
+    b.onclick = () => {
+      seleccionado = b.dataset.id;
+      // El detalle vuelve arriba al cambiar de incidente. Si no, quien estaba
+      // leyendo la tercera causa de uno largo aterriza a media pagina del
+      // siguiente, sin ver de que activo es.
+      document.getElementById("detalle").scrollTop = 0;
+      refrescar();
+    });
+}
+
+function pintarDetalle(d){
+  const p = d.payload || {};
+  const causas = (d.diagnostico && d.diagnostico.root_causes) || [];
+  const ia = d.diagnostico && d.diagnostico._ai_generated;
+
+  // El motivo, cuando lo hay, se dice con las palabras que guardo el workflow.
+  // Es lo unico que separa un "fallo del analisis" util de uno que obliga a
+  // abrir el log del servicio -- que quien mira este monitor no va a hacer.
+  const motivo = d.motivo ? `<p class="motivo">${esc(d.motivo)}</p>` : "";
+
+  let cuerpo = "";
+  if(d.estado === "analizando"){
+    cuerpo = `<p class="vacio">El análisis está en marcha. Esta pantalla se
+              actualiza sola en cuanto termine.</p>`;
+  } else if(d.estado === "recibido"){
+    // NO es lo mismo que 'analizando', y confundirlos hacia que la pantalla
+    // dijera "en marcha" de algo que ni siquiera habia empezado. El porque
+    // espera (el limite de simultaneos) es fontaneria nuestra: al operario le
+    // basta con saber que esta registrada y que va a analizarse.
+    cuerpo = `<p class="vacio">La alerta está registrada y espera turno para ser
+              analizada.</p>`;
+  } else if(d.estado === "fallido"){
+    cuerpo = `<p class="vacio">El análisis no pudo completarse, así que no hay
+              diagnóstico para este incidente.</p>${motivo}`;
+  } else if(d.estado === "pausado"){
+    cuerpo = `<p class="vacio">Llegó con el análisis automático desactivado, así
+              que no se ha ejecutado. La alerta queda registrada y se retomará
+              cuando vuelva a activarse.</p>`;
+  } else if(d.estado === "interrumpido"){
+    cuerpo = `<p class="vacio">El análisis se cortó a mitad porque el servicio se
+              detuvo. No llegó a producir diagnóstico. Se reintentará cuando PI
+              vuelva a notificar esta alerta.</p>`;
+  } else if(!causas.length){
+    cuerpo = `<p class="vacio">Sin causas propuestas.</p>`;
+  } else {
+    cuerpo = `<h3>Causas propuestas</h3>` + causas.map((c,n) => {
+      const ev = evidencias(c);
+      return `
+      <article class="causa">
+        <div class="n">CAUSA ${n+1} DE ${causas.length}</div>
+        <div class="bloque bloque-problema">
+          <b>Problema</b>
+          <h4 class="q">${esc(c.cause)}</h4>
+        </div>
+        ${ev.tipo === "vacio" ? "" : `<div class="bloque"><b>Evidencias</b>${
+          ev.tipo === "lista"
+            ? `<ul>${ev.items.map(e => `<li>${esc(e)}</li>`).join("")}</ul>`
+            // Esquema viejo: un parrafo. Se pinta como parrafo, no como una
+            // vinieta gigante que parezca una lista rota.
+            : `<p class="parrafo">${esc(ev.items[0])}</p>`
+        }</div>`}
+        ${c.recommended_action ? `<div class="bloque bloque-accion">
+          <b>Acción recomendada</b><p>${esc(c.recommended_action)}</p></div>` : ""}
+      </article>`;
+    }).join("");
+  }
+
+  // El contexto tenue: donde esta y desde cuando. La planta NO se muestra --
+  // esto es de una sola planta, asi que repetir "WWTP" en cada incidente no
+  // distingue nada y solo compite por la atencion.
+  // Ni la planta ni la hora de recepcion. La planta es siempre la misma y no
+  // distingue nada. La hora a la que NOSOTROS recibimos el POST es fontaneria
+  // interna: a las personas las avisa PI cuando arranca la alarma, no cuando
+  // este servicio se entera, asi que enseñar esa diferencia solo confundia.
+  const arranque = desde(d.start_time);
+  const contexto = [
+    p.Subsystem ? `<b>${esc(p.Subsystem)}</b>` : "",
+    d.start_time
+      ? `empezó ${arranque ? arranque + " " : ""}<b>(${hora(d.start_time)})</b>`
+      : "",
+  ].filter(Boolean);
+
+  document.getElementById("detalle").innerHTML = `
+    <div class="bloque-cabecera">
+      ${chip(d.estado)}
+      <h2 class="titulo">${esc(d.asset)}</h2>
+      <p class="problema">
+        <span class="kpi">${esc(d.kpi_name)}</span> ${esc(direccion(d.threshold_type))}
+        <span class="cifras">${num(p.KPI)} frente a un límite de ${num(p.Limit)}</span>
+      </p>
+      <p class="contexto">${contexto.join('<span class="sep">·</span>')}</p>
+    </div>
+    ${cuerpo}
+    ${ia ? `<p class="aviso-ia"><b>Generado por IA.</b> ${esc(ia.notice)}
+            <br><span style="color:var(--tenue)">Modelo: ${esc(ia.model)}</span></p>`
+         : `<p class="aviso-ia"><b>Aviso.</b> Los diagnósticos de esta pantalla
+            los genera un sistema de inteligencia artificial a partir de datos de
+            PI. Son hipótesis pendientes de verificación, no causas
+            confirmadas.</p>`}`;
+}
+
+async function refrescar(){
+  try{
+    const datos = await pedir("/incidentes" + parametros());
+    const incidentes = datos.incidentes;
+
+    // La primera vez, los valores por defecto los pone el servidor: asi la
+    // pantalla no lleva su propia copia que se desincronice del config.
+    if(rango.horas === null){
+      rango.limite = datos.filtro.limite;
+      const h = datos.filtro.desde
+        ? Math.round((Date.now() - new Date(datos.filtro.desde).getTime()) / 3600000)
+        : 0;
+      rango.horas = String([8,24,72,168].reduce((a,b) =>
+        Math.abs(b - h) < Math.abs(a - h) ? b : a, 24));
+    }
+    pintarRango();
+
+    // Aviso cuando el limite recorta: la pantalla dice cuantos se esta dejando
+    // fuera en vez de mentir por omision.
+    document.getElementById("truncado").innerHTML = datos.truncado
+      ? `<div class="aviso-truncado">Se muestran los ${datos.mostrados} más
+         recientes de ${datos.coincidentes}. Sube el máximo o acorta el periodo.</div>` : "";
+
+    pintarFiltros(incidentes);                       // puede reajustar 'filtro'
+    const visibles = filtro ? incidentes.filter(i => i.estado === filtro) : incidentes;
+
+    if(seleccionado && !visibles.some(i => i.id === seleccionado)) seleccionado = null;
+    if(!seleccionado && visibles.length) seleccionado = visibles[0].id;
+    pintarLista(visibles);
+
+    document.getElementById("resumen").textContent = filtro
+      ? `${visibles.length} de ${incidentes.length}`
+      : `${incidentes.length} incidente${incidentes.length===1?"":"s"}`;
+
+    if(seleccionado){
+      pintarDetalle(await pedir("/incidentes/" + encodeURIComponent(seleccionado)));
+    }else{
+      // Sin nada seleccionado hay que limpiar el detalle. Si no, se queda el del
+      // incidente anterior junto a una lista que ya no lo contiene: la pantalla
+      // estaria enseñando una alerta que el filtro dice que no esta ahi.
+      document.getElementById("detalle").innerHTML =
+        '<p class="vacio">Selecciona un incidente.</p>';
+    }
+
+    ultimoOk = new Date();
+    document.getElementById("reloj").className = "reloj";
+    document.getElementById("reloj").textContent =
+      "actualizado " + ultimoOk.toLocaleTimeString("es-ES");
+  }catch(e){
+    // Se dice que se perdió el contacto en vez de dejar datos viejos con pinta
+    // de recientes. Una pantalla que miente en una sala de control es peor que
+    // una que admite que no sabe.
+    const r = document.getElementById("reloj");
+    r.className = "reloj caido";
+    r.textContent = ultimoOk
+      ? "SIN CONTACTO — último dato " + ultimoOk.toLocaleTimeString("es-ES")
+      : "SIN CONTACTO con el servicio";
+  }
+}
+
+refrescar();
+setInterval(refrescar, CADA_MS);
+</script>
+</body>
+</html>
