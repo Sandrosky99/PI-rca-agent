@@ -253,8 +253,8 @@ import workflow
 instr = workflow._DIAGNOSIS_FINAL_INSTRUCTION
 check('pide "evidence"', '"evidence"' in instr)
 check('ya no pide "explanation"', '"explanation"' not in instr, instr[:200])
-check("pide que la causa sea una sola frase corta", "15 palabras" in instr)
-check("pide las evidencias como array", "array de 2 a 4 cadenas" in instr)
+check("pide que la causa sea una sola frase", "UNA sola frase" in instr)
+check("pide las evidencias como array", "array de 1 a 4 cadenas" in instr)
 
 print("\n=== 8d. _evidencias() lee los dos esquemas ===")
 check("esquema nuevo", workflow._evidencias({"evidence": ["a", "b"]}) == ["a", "b"])
