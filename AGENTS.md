@@ -110,16 +110,59 @@ Otros cabos sueltos, por orden de urgencia:
    concurrencia sin techo— están resueltos. Hay cuatro incidentes de desarrollo en
    `dev-fixtures/incidents/` para verla con varios casos abiertos a la vez.
 
-3. **Completar la prueba del interruptor.** Probado el 2026-09-08 y **funciona**: la notificación
+3. **PENDIENTE (2026-09-14) — Relanzar un análisis fallido.** Hoy un incidente en `fallido` es un
+   callejón sin salida: `_RECLAMABLES` es `(interrumpido, pausado)` y `fallido` está excluido con
+   este razonamiento — *«el análisis se ejecutó y falló por algo suyo; reintentar daría el mismo
+   error»*. **Esa premisa es falsa para la mitad de los ocho motivos de fallo**, que son cortes
+   externos.
+
+   Mitigado en parte el 2026-09-14 con `LLM_RETRY_WINDOW_SECONDS`: antes el análisis se rendía
+   tras **6 segundos** de reintentos (3 intentos con esperas de 2 y 4 s), así que un corte de tres
+   minutos lo tumbaba con 174 s por delante. Ahora aguanta 90 s, así que los cortes cortos ya no
+   llegan a ser fallos. Queda lo que dure más.
+
+   Lo que falta, decidido pero sin implementar:
+
+   - **Botón «volver a analizar» en la pantalla**, no un planificador. El workflow no sabe cuándo
+     ha vuelto PI —solo se entera cuando le toca hablar con él— y montar sondeo y comprobaciones
+     de salud en un sistema puramente reactivo es la solución equivocada. Quien sabe es la persona
+     que está delante. **Implica que la pantalla deja de ser de solo lectura**, así que va con el
+     resto de acciones (Fase 2), no antes.
+   - **Relanzar siempre desde el principio.** Reanudar a mitad ahorraría una llamada al modelo y
+     costaría guardar estado intermedio reutilizable. No compensa — y además, si falló bajando
+     datos de PI, volver a bajarlos es lo correcto: los datos pueden haber cambiado, y reutilizar
+     los viejos daría un diagnóstico sobre una foto que ya no es.
+   - **Un tope de relanzamientos, visible**, como el contador de reanálisis del diseño.
+   - **Separar `fallido`** en transitorio (re-reclamable) y propio (bloqueado), igual que se hizo
+     con `interrumpido` y `pausado`. El código ya sabe cuál es cuál: es la rama de excepción que
+     se disparó, la misma que elige el mensaje.
+
+   Qué motivo necesita qué, de los ocho mensajes de `_fallo()` y `webhook`:
+
+   | Grupo | Motivos | Relanzar |
+   |---|---|---|
+   | Corte externo | no respondió al elegir variables · datos de PI · no respondió con diagnóstico · superó el tiempo máximo | Sí, funciona |
+   | Salida del modelo mal formada | formato inválido al elegir variables · diagnóstico con formato inválido | Sí; si se repite, el problema es el prompt |
+   | Hace falta arreglar algo antes | variables que no existen (configuración) · error inesperado (fallo nuestro) | No sirve hasta arreglarlo; después sí, y recupera la alerta |
+
+4. **PENDIENTE — Separar los cierres del diseño de los estados del código.** La pantalla filtra hoy
+   por los seis estados que existen (`recibido`…`pausado`), pero el documento de diseño define
+   otros seis **cierres** (`causa confirmada`, `revisado parcialmente`, `causa no determinada`,
+   `visto sin veredicto`, `desatendido`, `fallo del análisis`) que **no existen en el código**:
+   todos necesitan el veredicto humano. Hasta que llegue la Fase 2, `finalizado` es precisamente
+   el estado que **sí** requiere atención — tiene un diagnóstico esperando a que alguien lo lea —,
+   así que no se puede archivar por estado. Por eso el acotado de la lista es por tiempo.
+
+5. **Completar la prueba del interruptor.** Probado el 2026-09-08 y **funciona**: la notificación
    se acepta, se registra como `pausado`, queda `BLOCKED` en el audit trail y no se ejecuta
    ningún Step 2-6 — coste cero. Falta el último tramo del procedimiento (reactivar y reenviar
    para procesar la alerta pausada), que ya es posible desde que se arregló el re-lanzado.
-4. **La llamada a Anthropic no usa adaptive thinking**, mientras que Gemini sí razona por defecto
+6. **La llamada a Anthropic no usa adaptive thinking**, mientras que Gemini sí razona por defecto
    (ver «Asimetría de razonamiento» más abajo). Activar `thinking: {type: "adaptive"}` en
    `_generate_anthropic()` igualaría las dos rutas, y `LLM_MAX_TOKENS=16000` ya deja sitio para
    ello. Pendiente de decidir: sin evaluación no habría forma de medir si mejora el diagnóstico.
    Si se activa, hacerlo detrás de un flag y en ambos proveedores.
-5. **Ampliar la validación** a más KPIs y tipos de activo. Las tres ejecuciones reales que hay son
+7. **Ampliar la validación** a más KPIs y tipos de activo. Las tres ejecuciones reales que hay son
    del mismo activo y el mismo indicador, y ninguna causa se ha confirmado.
 
 Resueltos el 2026-09-08: el servicio quedó registrado y en marcha, el gate de CI se ejecuta y
