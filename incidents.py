@@ -247,6 +247,33 @@ def listar(desde: str | None = None, hasta: str | None = None,
     except OSError as exc:
         log.warning("No se pudo recorrer el registro de incidentes", extra={"errorMsg": str(exc)})
 
+    # Las marcas de tiempo son ISO 8601 en UTC con formato fijo, así que se
+    # comparan como cadenas sin necesidad de parsearlas.
+    if desde:
+        resumenes = [r for r in resumenes if (r.get("recibidoEn") or "") >= desde]
+    if hasta:
+        resumenes = [r for r in resumenes if (r.get("recibidoEn") or "") <= hasta]
+
+    # Recuento por estado ANTES de filtrar y de recortar. Es lo que alimenta las
+    # pastillas de la pantalla, y cada una dice exactamente lo que saldría al
+    # pulsarla: por eso se cuenta sin aplicar el envejecimiento de los fallidos,
+    # que solo rige en la vista por defecto.
+    recuento: dict[str, int] = {}
+    for r in resumenes:
+        e = r.get("estado", "desconocido")
+        recuento[e] = recuento.get(e, 0) + 1
+
+    # Cuántos saldrían sin filtrar por estado -- o sea, con el envejecimiento de
+    # los fallidos aplicado. Es lo que debe decir la pastilla "Todos", y no
+    # coincide con sumar el resto: los fallidos viejos cuentan en su pastilla
+    # pero no aquí, que es justo lo que pasaría al pulsar una u otra.
+    _corte = (datetime.now(timezone.utc)
+              - timedelta(hours=_HORAS_FALLIDO_EN_VISTA)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    recuento_sin_filtro = sum(
+        1 for r in resumenes
+        if r.get("estado") != FALLIDO or (r.get("recibidoEn") or "") >= _corte
+    )
+
     if estado:
         resumenes = [r for r in resumenes if r.get("estado") == estado]
     else:
@@ -258,15 +285,13 @@ def listar(desde: str | None = None, hasta: str | None = None,
         resumenes = [r for r in resumenes
                      if r.get("estado") != FALLIDO or (r.get("recibidoEn") or "") >= corte]
 
-    # Las marcas de tiempo son ISO 8601 en UTC con formato fijo, así que se
-    # comparan como cadenas sin necesidad de parsearlas.
-    if desde:
-        resumenes = [r for r in resumenes if (r.get("recibidoEn") or "") >= desde]
-    if hasta:
-        resumenes = [r for r in resumenes if (r.get("recibidoEn") or "") <= hasta]
-
     resumenes.sort(key=lambda r: r.get("recibidoEn") or "", reverse=True)
 
+    # El límite se aplica AQUÍ, después del filtro por estado. Al revés --como
+    # estaba-- el servidor recortaba a los N más recientes de todos y luego el
+    # navegador descartaba de esos los que no eran del estado pedido: con
+    # "listo" y máximo 2 podían salir cero. Lo que se pide son los N más
+    # recientes DE LO FILTRADO.
     coincidentes = len(resumenes)
     if limite and limite > 0:
         resumenes = resumenes[:limite]
@@ -275,6 +300,8 @@ def listar(desde: str | None = None, hasta: str | None = None,
         "mostrados": len(resumenes),
         "coincidentes": coincidentes,
         "truncado": coincidentes > len(resumenes),
+        "recuento": recuento,
+        "recuentoSinFiltro": recuento_sin_filtro,
     }
 
 
