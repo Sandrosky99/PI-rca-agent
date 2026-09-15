@@ -722,6 +722,29 @@ async def pantalla() -> HTMLResponse:
 #        máquina: verificado que el riesgo era real, no teórico.
 #      - La lista devuelve un resumen, no los registros enteros.
 #
+# 6. LOGIN EN LA PANTALLA -- NO SE IMPLEMENTA (decidido el 2026-09-15)
+#    La Fase 2 de la pantalla (docs/DISENO-INTERACCION-HUMANA.md) le dará al
+#    navegador capacidad de ESCRIBIR en el expediente: veredictos sobre las
+#    causas y la evidencia que los sostiene. Eso es otra clase de riesgo que
+#    leer, así que se evaluó aparte en vez de heredar el punto 5.
+#
+#    No lleva login porque la pantalla es alcanzable SOLO desde el HMI de la
+#    sala de control -- en planta, una regla de firewall de dos IPs fijas: PI y
+#    ese puesto. Quien autentica es la cerradura de la sala: el conjunto de
+#    personas que pueden escribir en un expediente es el de las que han entrado
+#    ahí. Por eso tampoco el veredicto lleva autor.
+#
+#    Nótese que este SÍ es una decisión, a diferencia de los puntos 1 y 2, que
+#    son limitaciones de PI. El navegador puede mandar cabeceras, hablar TLS y
+#    pedir credenciales; si algún día hace falta, la puerta está abierta.
+#
+#    ⚠️ DEPENDENCIA INVISIBLE, y es el motivo de que esto esté escrito aquí:
+#    una regla de red y una decisión de diseño de la aplicación se sostienen
+#    mutuamente, y viven en sitios distintos. El día que la pantalla se abra a
+#    más máquinas -- una peticion razonable: "¿puedo verla desde mi mesa?" --
+#    esta decisión se vuelve incorrecta EN SILENCIO: nada falla, nada avisa.
+#    Si eso pasa, hay que reabrir si el veredicto necesita autor.
+#
 # Lo que sí protege este despliegue, con independencia de lo anterior:
 #   - Ninguna credencial en el código ni en el log (config.py, .gitignore).
 #   - Los errores no exponen trazas ni rutas internas (observability.py).

@@ -26,7 +26,7 @@
   :root{
     --fondo:#F4F6F8; --panel:#FFFFFF; --panel-2:#EFF3F6; --borde:#D7DEE5;
     --texto:#16212C; --texto-2:#4A5A6A; --tenue:#78889A;
-    --acento:#0E6E8C;
+    --acento:#0E6E8C; --acento-fondo:#DDEDF3;
     --ok:#1E7346; --ok-fondo:#E2F1E8;
     --aviso:#8A5D0C; --aviso-fondo:#F8EEDB;
     --malo:#A03B26; --malo-fondo:#F8E6E1;
@@ -109,15 +109,31 @@
     border:1px solid var(--borde); background:var(--panel); color:var(--texto);
   }
   .rango input[type=datetime-local]{font-size:11.5px}
-  .rango input[type=number]{width:64px; font-variant-numeric:tabular-nums}
+  /* Sin las flechitas de subir/bajar: para pasar de 50 a 200 no sirven, y el
+     numero se teclea igual. */
+  .rango input[type=number]{
+    width:58px; font-variant-numeric:tabular-nums; text-align:right;
+    -moz-appearance:textfield; appearance:textfield;
+  }
+  .rango input[type=number]::-webkit-outer-spin-button,
+  .rango input[type=number]::-webkit-inner-spin-button{
+    -webkit-appearance:none; margin:0;
+  }
+  /* La etiqueta del numero dice "Mas recientes" y no "Max." a proposito: sin
+     ello, ver "50 de 213" deja la duda de cuales son esos 50. Que ademas sea el
+     maximo se entiende solo. */
   .rango label{font-size:11px; color:var(--tenue); letter-spacing:.06em; text-transform:uppercase}
-  /* "mas recientes" no es decoracion: sin ello, ver 50 de 213 deja la duda de
-     cuales son esos 50. */
-  .nota-rango{font-size:11.5px; color:var(--tenue)}
+  /* Cada etiqueta con su control en su propia linea. Sin esto, el ajuste de
+     linea partia el par: "MAS RECIENTES" se quedaba arriba con el periodo y el
+     numero caia solo abajo, sin decir de que era. */
+  .linea{display:flex; flex-wrap:wrap; gap:6px; align-items:center; width:100%}
   .personalizado{display:flex; flex-wrap:wrap; gap:5px; align-items:center; width:100%}
+  /* En el color de acento y no en gris: quien mira tiene que ENTERARSE de que
+     hay mas de los que ve. Pero no en ambar ni en rojo, que son los tonos de
+     los estados que piden accion -- esto informa, no alarma. */
   .aviso-truncado{
-    padding:8px 18px; font-size:12.5px; color:var(--aviso);
-    background:var(--aviso-fondo); border-bottom:1px solid var(--borde);
+    padding:8px 18px; font-size:12.5px; font-weight:600; color:var(--acento);
+    background:var(--acento-fondo); border-bottom:1px solid var(--borde);
   }
   .fila{
     display:block; width:100%; text-align:left; background:none; border:none;
@@ -363,9 +379,10 @@ function pintarRango(){
     <label for="periodo">Periodo</label>
     <select id="periodo">${PERIODOS.map(([v,t]) =>
       `<option value="${v}"${String(rango.horas)===v?" selected":""}>${esc(t)}</option>`).join("")}</select>
-    <label for="limite">Máx.</label>
-    <input type="number" id="limite" min="1" max="500" step="1" value="${rango.limite}">
-    <span class="nota-rango">más recientes</span>
+    <div class="linea">
+      <label for="limite">Más recientes</label>
+      <input type="number" id="limite" min="1" max="500" step="1" value="${rango.limite}">
+    </div>
     ${personalizado ? `<div class="personalizado">
       <label for="desde">De</label>
       <input type="datetime-local" id="desde" value="${esc(rango.desde)}">
@@ -405,20 +422,24 @@ function parametros(){
     p.set("horas", rango.horas);
   }
   if(rango.limite) p.set("limite", rango.limite);
+  // El estado va al SERVIDOR, no se filtra aqui. Si se filtrase en el navegador,
+  // el limite se habria aplicado antes y estaria recortando sobre el conjunto
+  // equivocado: con "listo" y maximo 2 podian salir cero, porque el servidor
+  // mandaba los 2 mas recientes de TODOS y aqui se descartaban.
+  if(filtro) p.set("estado", filtro);
   return p.toString() ? "?" + p.toString() : "";
 }
 
-function pintarFiltros(todos){
-  // Solo se ofrecen los estados que hay ahora mismo, con su cuenta. Una
-  // botonera fija con seis opciones de las que la mitad dan cero es ruido.
-  const cuentas = {};
-  todos.forEach(i => cuentas[i.estado] = (cuentas[i.estado] || 0) + 1);
-  const opciones = [["", "Todos", todos.length]].concat(
+function pintarFiltros(datos){
+  // Las cuentas las da el SERVIDOR, sobre el periodo completo y antes de
+  // recortar por el maximo. Contarlas aqui sobre la lista recibida daria
+  // numeros falsos en cuanto el limite recortase algo.
+  //
+  // Solo se ofrecen los estados que hay ahora mismo. Una botonera fija con seis
+  // opciones de las que la mitad dan cero es ruido.
+  const cuentas = datos.recuento || {};
+  const opciones = [["", "Todos", datos.recuentoSinFiltro]].concat(
     Object.keys(cuentas).sort().map(e => [e, ESTADOS[e] || e, cuentas[e]]));
-
-  // Si el estado filtrado desaparece (el ultimo 'procesando' termino), se
-  // vuelve a Todos en vez de dejar la lista vacia sin explicacion.
-  if(filtro && !cuentas[filtro]) filtro = "";
 
   const cont = document.getElementById("filtros");
   cont.innerHTML = opciones.map(([valor, etiqueta, n]) =>
@@ -545,9 +566,19 @@ function pintarDetalle(d){
             confirmadas.</p>`}`;
 }
 
-async function refrescar(){
+async function refrescar(reintento){
   try{
     const datos = await pedir("/incidentes" + parametros());
+
+    // Si el estado filtrado ya no existe (termino el ultimo 'procesando'), se
+    // vuelve a Todos y se pide de nuevo. Antes esto se hacia al pintar los
+    // filtros, y dejaba en pantalla una lista traida con el filtro viejo.
+    // 'reintento' corta cualquier posibilidad de bucle: como mucho, una vez.
+    if(filtro && !(datos.recuento || {})[filtro] && !reintento){
+      filtro = "";
+      return refrescar(true);
+    }
+
     const incidentes = datos.incidentes;
 
     // La primera vez, los valores por defecto los pone el servidor: asi la
@@ -564,20 +595,22 @@ async function refrescar(){
 
     // Aviso cuando el limite recorta: la pantalla dice cuantos se esta dejando
     // fuera en vez de mentir por omision.
+    // Informativo, no una advertencia: que el limite recorte es lo normal y
+    // esperado, no algo que haya ido mal.
     document.getElementById("truncado").innerHTML = datos.truncado
       ? `<div class="aviso-truncado">Se muestran los ${datos.mostrados} más
-         recientes de ${datos.coincidentes}. Sube el máximo o acorta el periodo.</div>` : "";
+         recientes de ${datos.coincidentes}.</div>` : "";
 
-    pintarFiltros(incidentes);                       // puede reajustar 'filtro'
-    const visibles = filtro ? incidentes.filter(i => i.estado === filtro) : incidentes;
+    // La lista ya viene filtrada y recortada por el servidor: aqui no se
+    // descarta nada mas.
+    pintarFiltros(datos);                            // puede reajustar 'filtro'
 
-    if(seleccionado && !visibles.some(i => i.id === seleccionado)) seleccionado = null;
-    if(!seleccionado && visibles.length) seleccionado = visibles[0].id;
-    pintarLista(visibles);
+    if(seleccionado && !incidentes.some(i => i.id === seleccionado)) seleccionado = null;
+    if(!seleccionado && incidentes.length) seleccionado = incidentes[0].id;
+    pintarLista(incidentes);
 
-    document.getElementById("resumen").textContent = filtro
-      ? `${visibles.length} de ${incidentes.length}`
-      : `${incidentes.length} incidente${incidentes.length===1?"":"s"}`;
+    document.getElementById("resumen").textContent =
+      `${datos.mostrados} incidente${datos.mostrados===1?"":"s"}`;
 
     if(seleccionado){
       pintarDetalle(await pedir("/incidentes/" + encodeURIComponent(seleccionado)));

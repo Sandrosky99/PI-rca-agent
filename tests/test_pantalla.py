@@ -238,10 +238,14 @@ check("'interrumpido' tambien tiene el suyo", "se cortó a mitad" in html)
 
 print("\n=== 8e. El filtro por estado ===")
 check("hay botonera de filtros", 'id="filtros"' in html)
-check("las opciones salen de los estados presentes", "cuentas[i.estado]" in html)
+check("las opciones salen de los estados que devuelve el servidor",
+      "Object.keys(cuentas)" in html)
 # Si el estado filtrado desaparece (termina el ultimo 'procesando'), volver a
-# Todos en vez de dejar una lista vacia sin explicacion.
-check("se recupera si el estado filtrado desaparece", "!cuentas[filtro]" in html)
+# Todos en vez de dejar una lista vacia sin explicacion. Se hace al refrescar y
+# no al pintar: al pintar dejaba en pantalla una lista traida con el filtro
+# viejo. El 'reintento' corta cualquier posibilidad de bucle.
+check("se recupera si el estado filtrado desaparece",
+      "!(datos.recuento || {})[filtro]" in html and "refrescar(true)" in html)
 check("limpia el detalle cuando no hay seleccion", "Selecciona un incidente" in html)
 
 print("\n=== 8c. El prompt del Step 6 pide el esquema nuevo ===")
@@ -249,8 +253,8 @@ import workflow
 instr = workflow._DIAGNOSIS_FINAL_INSTRUCTION
 check('pide "evidence"', '"evidence"' in instr)
 check('ya no pide "explanation"', '"explanation"' not in instr, instr[:200])
-check("pide que la causa sea una sola frase corta", "15 palabras" in instr)
-check("pide las evidencias como array", "array de 2 a 4 cadenas" in instr)
+check("pide que la causa sea una sola frase", "UNA sola frase" in instr)
+check("pide las evidencias como array", "array de 1 a 4 cadenas" in instr)
 
 print("\n=== 8d. _evidencias() lee los dos esquemas ===")
 check("esquema nuevo", workflow._evidencias({"evidence": ["a", "b"]}) == ["a", "b"])
@@ -323,12 +327,50 @@ incidents.mark(reciente_roto, incidents.FALLIDO, motivo="acaba de pasar")
 check("un fallido reciente si sale",
       reciente_roto["id"] in [i["id"] for i in _pedir("?horas=0&limite=500")["incidentes"]])
 
+print("\n=== 8o. EL FALLO: el limite se aplica DESPUES de filtrar por estado ===")
+# Antes el servidor recortaba a los N mas recientes de TODOS y luego el
+# navegador descartaba de esos los que no eran del estado pedido. Con "listo" y
+# maximo 2 podian salir cero incidentes aunque hubiera diez finalizados.
+for n in range(4):
+    r = sembrar(f"PS20177 Y77 PS77 Pump {n:02d}", incidents.FINALIZADO, True,
+                start=f"2026-09-14T1{n}:00:00Z")
+for n in range(2):
+    r = sembrar(f"PS20177 Y77 PS77 Bomb {n:02d}", incidents.RECIBIDO,
+                start=f"2026-09-14T2{n}:00:00Z")
+
+dos_listos = _pedir("?horas=0&limite=2&estado=finalizado")
+check("pide 2 finalizados y devuelve 2", dos_listos["mostrados"] == 2, dos_listos["mostrados"])
+check("y los 2 SON finalizados",
+      all(i["estado"] == incidents.FINALIZADO for i in dos_listos["incidentes"]),
+      [i["estado"] for i in dos_listos["incidentes"]])
+check("cuenta los finalizados que habia, no el total",
+      dos_listos["coincidentes"] == len([i for i in _pedir("?horas=0&limite=500")["incidentes"]
+                                         if i["estado"] == incidents.FINALIZADO]),
+      dos_listos["coincidentes"])
+
+print("\n=== 8p. Las cuentas de las pastillas las da el servidor ===")
+# Contarlas en el navegador sobre la lista recibida daria numeros falsos en
+# cuanto el limite recortase algo: con maximo 2 diria "finalizado 2" habiendo
+# diez. Y cada pastilla debe decir lo que saldria AL PULSARLA.
+recortado = _pedir("?horas=0&limite=1")
+check("el recuento no depende del limite",
+      recortado["recuento"][incidents.FINALIZADO] > 1,
+      recortado["recuento"])
+for estado_pedido, cuenta in recortado["recuento"].items():
+    real = _pedir(f"?horas=0&limite=500&estado={estado_pedido}")["mostrados"]
+    check(f"la pastilla '{estado_pedido}' dice lo que saldria al pulsarla",
+          cuenta == real, f"dice {cuenta}, salen {real}")
+check("la pantalla usa el recuento del servidor", "datos.recuento" in html)
+
 print("\n=== 8m. La pantalla trae los controles de rango ===")
 check("selector de periodo", 'id="periodo"' in html)
 check("el maximo se teclea, no se elige de una lista",
       'type="number" id="limite"' in html)
-# Ver "50 de 213" sin mas deja la duda de cuales son esos 50.
-check("dice que son los mas recientes", "más recientes" in html)
+# Ver "50 de 213" sin mas deja la duda de cuales son esos 50. La etiqueta lo
+# dice; que ademas sea el maximo se entiende solo.
+check("la casilla se etiqueta 'Más recientes'", ">Más recientes</label>" in html)
+check("y el aviso de recorte tambien lo dice", "más\n         recientes de" in html or
+      "más recientes de" in html.replace("\n", " ").replace("         ", " "))
 check("rango concreto con fechas", "datetime-local" in html)
 check("avisa cuando recorta", "aviso-truncado" in html)
 
