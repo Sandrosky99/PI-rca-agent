@@ -33,6 +33,7 @@ SUITES = [
     ("Validacion de la notificacion entrante", "test_validacion.py"),
     ("Limite de analisis simultaneos", "test_concurrencia.py"),
     ("Pantalla de la sala de control", "test_pantalla.py"),
+    ("Revision humana: veredictos", "test_revision.py"),
 ]
 
 

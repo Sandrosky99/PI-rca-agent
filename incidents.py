@@ -583,6 +583,147 @@ def mark(incidente_id: str, estado: str, diagnostico: dict | None = None,
     return _actualizar(incidente_id, cambios)
 
 
+# =============================================================================
+# La revisión humana (Fase 2 de docs/DISENO-INTERACCION-HUMANA.md)
+# =============================================================================
+# El bloque 'revision' es HERMANO de 'diagnostico' y no va dentro, a propósito:
+# 'diagnostico' es la salida del modelo y lleva su etiqueta '_ai_generated'.
+# Todo el proyecto cuida esa frontera -- las causas son del modelo y se
+# etiquetan; los motivos de fallo son del código y no --, y este es el sitio
+# donde emborronarla saldría más caro.
+
+CONFIRMADA = "confirmada"
+DESCARTADA = "descartada"
+PENDIENTE = "pendiente"
+_VEREDICTOS = (CONFIRMADA, DESCARTADA, PENDIENTE)
+
+# La única reclasificación que hace falta. El diseño preveía también
+# "causa_confirmada", para quien vuelve en frío y dice "la primera era la
+# buena"; sobra, porque el veredicto no caduca nunca y el cierre se deduce, así
+# que eso es un veredicto normal dado más tarde. Lo que NO se puede expresar
+# como veredicto sobre una causa es que la alerta no debió existir: el modelo no
+# se equivocó, le dieron un problema inventado, y eso es información para quien
+# mantiene los umbrales de PI.
+ALERTA_NO_VALIDA = "alerta_no_valida"
+_RECLASIFICACIONES = (ALERTA_NO_VALIDA,)
+
+
+class RevisionError(ValueError):
+    """Un veredicto que no se puede registrar. El mensaje va dirigido a quien
+    está delante de la pantalla, así que se muestra tal cual."""
+
+
+def _causas_de(registro: dict) -> list[dict]:
+    return ((registro.get("diagnostico") or {}).get("root_causes") or [])
+
+
+def estado_de_causas(registro: dict) -> list[str]:
+    """Estado actual de cada causa: pendiente, confirmada o descartada.
+
+    Los veredictos son una lista de SOLO AÑADIR -- corregir es anotar encima --,
+    así que el estado de una causa es el de su último apunte. Se calcula, no se
+    guarda: guardarlo sería un segundo sitio del que fiarse, que puede
+    desincronizarse del primero.
+    """
+    estados = [PENDIENTE] * len(_causas_de(registro))
+    for v in (registro.get("revision") or {}).get("veredictos", []):
+        i = v.get("causa")
+        if isinstance(i, int) and 0 <= i < len(estados):
+            estados[i] = v.get("veredicto", PENDIENTE)
+    return estados
+
+
+def registrar_veredicto(incidente_id: str, causa: int, veredicto: str,
+                        evidencia: str = "", sospecha: str = "",
+                        iteracion: int = 1) -> dict:
+    """Anota lo que una persona ha concluido sobre UNA causa concreta.
+
+    Por causa y no en bloque: el modelo propone dos o tres, y descartar una no
+    es rechazar el análisis -- es reducirlo. Ver el §2 del documento de diseño.
+
+    Levanta RevisionError si el veredicto no se puede registrar, con un mensaje
+    que se le puede enseñar tal cual a quien está delante de la pantalla.
+    """
+    registro = leer_por_id(incidente_id)
+    if registro is None:
+        raise RevisionError("El incidente no existe.")
+
+    causas = _causas_de(registro)
+    if not causas:
+        # Un 'fallido' o un 'pausado' no llegaron a producir causas. No es que
+        # falte el dato: es que no hay nada que juzgar.
+        raise RevisionError("Este incidente no tiene causas propuestas que juzgar.")
+    if not isinstance(causa, int) or not 0 <= causa < len(causas):
+        raise RevisionError(f"La causa {causa} no existe: hay {len(causas)}.")
+    if veredicto not in _VEREDICTOS:
+        raise RevisionError(f"Veredicto no válido: {veredicto!r}.")
+
+    evidencia = (evidencia or "").strip()
+    sospecha = (sospecha or "").strip()
+    if veredicto == DESCARTADA and not evidencia:
+        # La evidencia es obligatoria al descartar, y no por burocracia: es lo
+        # ÚNICO que hace que un reanálisis valga para algo. Sin ella, la segunda
+        # pasada sería el segundo clasificado ascendido sobre los mismos datos.
+        raise RevisionError("Hace falta decir por qué no es esta causa.")
+
+    apunte = {
+        "en": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "iteracion": iteracion,
+        "causa": causa,
+        "veredicto": veredicto,
+    }
+    if evidencia:
+        apunte["evidencia"] = evidencia
+    if sospecha:
+        # Entra marcada como lo que es: una pista a contrastar, nunca una
+        # conclusión. La distinción la impone la estructura y no el prompt.
+        apunte["sospecha"] = sospecha
+
+    revision = dict(registro.get("revision") or {})
+    revision["veredictos"] = list(revision.get("veredictos", [])) + [apunte]
+
+    observability.audit(
+        "incident.veredicto",
+        {"incidentId": incidente_id, "causa": causa, "veredicto": veredicto},
+    )
+    actualizado = _actualizar(incidente_id, {"revision": revision})
+    if actualizado is None:
+        raise RevisionError("No se pudo guardar el veredicto.")
+    log.info("Veredicto humano sobre una causa.",
+             extra={"incidentId": incidente_id, "causa": causa, "veredicto": veredicto})
+    return actualizado
+
+
+def registrar_reclasificacion(incidente_id: str, reclasificacion: str | None) -> dict:
+    """Marca que la alerta no debió existir, o retira esa marca (con None).
+
+    No es un juicio sobre el diagnóstico sino sobre la alerta: el modelo no se
+    equivocó, le dieron un problema que no existía. Por eso no va en la pantalla
+    en caliente -- ahí todos los botones actúan sobre UNA causa y este actuaría
+    sobre el incidente entero, que es la mezcla de alcances que hace que alguien
+    con prisa pulse el que no era.
+    """
+    if reclasificacion is not None and reclasificacion not in _RECLASIFICACIONES:
+        raise RevisionError(f"Reclasificación no válida: {reclasificacion!r}.")
+    registro = leer_por_id(incidente_id)
+    if registro is None:
+        raise RevisionError("El incidente no existe.")
+
+    revision = dict(registro.get("revision") or {})
+    revision["reclasificacion"] = reclasificacion
+
+    observability.audit(
+        "incident.reclasificacion",
+        {"incidentId": incidente_id, "reclasificacion": reclasificacion},
+    )
+    actualizado = _actualizar(incidente_id, {"revision": revision})
+    if actualizado is None:
+        raise RevisionError("No se pudo guardar la reclasificación.")
+    log.info("Reclasificación humana de un incidente.",
+             extra={"incidentId": incidente_id, "reclasificacion": reclasificacion})
+    return actualizado
+
+
 def podar_traces() -> tuple[int, int]:
     """Elimina el 'trace' de los incidentes antiguos y conserva el caso.
 

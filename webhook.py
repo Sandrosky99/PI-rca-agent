@@ -30,6 +30,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse, HTMLResponse
+from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 
 import config
@@ -606,6 +607,16 @@ async def listar_incidentes(
     return resultado
 
 
+def _con_estado_de_causas(registro: dict) -> dict:
+    """Añade el estado actual de cada causa, que se calcula y no se guarda.
+
+    Va aquí y no en el fichero porque los veredictos son una lista de solo
+    añadir: el estado de una causa es el de su último apunte. Guardarlo sería un
+    segundo sitio del que fiarse, y los dos pueden desincronizarse.
+    """
+    return dict(registro, estadoCausas=incidents.estado_de_causas(registro))
+
+
 @app.get(
     "/incidentes/{incidente_id}",
     summary="Detalle de un incidente",
@@ -625,7 +636,71 @@ async def detalle_incidente(incidente_id: str) -> dict:
     registro = incidents.leer_por_id(incidente_id)
     if registro is None:
         raise HTTPException(status_code=404, detail="Incidente no encontrado")
-    return registro
+    return _con_estado_de_causas(registro)
+
+
+class _Veredicto(BaseModel):
+    """Lo que una persona concluye sobre UNA causa concreta."""
+    causa: int
+    veredicto: str
+    evidencia: str = ""
+    sospecha: str = ""
+    iteracion: int = 1
+
+
+class _Reclasificacion(BaseModel):
+    """`null` retira la marca; hoy el único valor es "alerta_no_valida"."""
+    reclasificacion: str | None = None
+
+
+@app.post(
+    "/incidentes/{incidente_id}/veredicto",
+    summary="Registra lo que una persona concluye sobre una causa",
+    description=(
+        "Confirma, descarta o devuelve a pendiente UNA causa del diagnóstico. "
+        "Al descartar hace falta la evidencia; la sospecha es opcional y entra "
+        "marcada como pista a contrastar, nunca como conclusión.\n\n"
+        "No caduca: se puede dar en caliente o días después, desde la pestaña "
+        "de cerrados."
+    ),
+)
+async def registrar_veredicto(incidente_id: str, cuerpo: _Veredicto) -> dict:
+    """Escribe en el expediente desde la pantalla.
+
+    Es el primer endpoint del sistema que MODIFICA el registro de un caso, y no
+    lleva autenticación: autentica la cerradura de la sala de control, porque la
+    pantalla solo se alcanza desde su HMI. Ver el punto 6 de DECISIONES DE
+    SEGURIDAD más abajo, y el aviso de que esa premisa y esta decisión se
+    sostienen mutuamente desde ficheros distintos.
+    """
+    try:
+        registro = incidents.registrar_veredicto(
+            incidente_id, cuerpo.causa, cuerpo.veredicto,
+            evidencia=cuerpo.evidencia, sospecha=cuerpo.sospecha,
+            iteracion=cuerpo.iteracion,
+        )
+    except incidents.RevisionError as exc:
+        # 400 con el mensaje tal cual: está escrito para que lo lea quien está
+        # delante de la pantalla, no para depurar.
+        raise HTTPException(status_code=400, detail=str(exc))
+    return _con_estado_de_causas(registro)
+
+
+@app.post(
+    "/incidentes/{incidente_id}/reclasificacion",
+    summary="Marca que la alerta no debió existir",
+    description=(
+        "Para el falso positivo: el modelo no se equivocó, le dieron un "
+        "problema que no existía. Es información para quien mantiene los "
+        "umbrales de PI. Enviar `null` retira la marca."
+    ),
+)
+async def registrar_reclasificacion(incidente_id: str, cuerpo: _Reclasificacion) -> dict:
+    try:
+        registro = incidents.registrar_reclasificacion(incidente_id, cuerpo.reclasificacion)
+    except incidents.RevisionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return _con_estado_de_causas(registro)
 
 
 @app.get(

@@ -397,8 +397,22 @@ Lo que la Fase 2 añade es **un bloque y nada más**:
 ```
 revision:
   veredictos:      [ {en, iteracion, causa, veredicto, evidencia, sospecha} ]
-  reclasificacion: null | "causa_confirmada" | "alerta_no_valida"
+  reclasificacion: null | "alerta_no_valida"
 ```
+
+`veredicto` es `confirmada`, `descartada` o `pendiente` — este último para
+corregir un clic mal dado.
+
+> **`reclasificacion` tiene un solo valor, no dos** (corregido al implementar,
+> 2026-09-15). El diseño preveía también `causa_confirmada`, para quien vuelve en
+> frío y dice «la primera era la buena». Sobra: como el veredicto no caduca y el
+> cierre se deduce, eso es **un veredicto normal dado más tarde**, y la etiqueta
+> pasa a *causa confirmada* sola. Tener dos caminos para lo mismo es tener dos
+> sitios que pueden discrepar.
+>
+> Lo que sí necesita campo propio es *alerta no válida*, porque no se puede
+> expresar como veredicto sobre una causa: no dice que el modelo se equivocara,
+> dice que le dieron un problema que no existía.
 
 Cuatro decisiones dentro, todas con motivo:
 
