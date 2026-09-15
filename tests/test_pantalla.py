@@ -71,7 +71,7 @@ def sembrar(activo, estado, con_diagnostico=False, start="2026-09-14T09:00:00Z")
     }
     r = incidents.claim(payload)
     assert r is not None, f"claim devolvio None para {activo}"
-    incidents.mark(r, estado, diagnostico=DIAGNOSTICO if con_diagnostico else None,
+    incidents.mark(r["id"], estado, diagnostico=DIAGNOSTICO if con_diagnostico else None,
                    trace={"step3_prompt": "x" * 5000, "step4_response": "y" * 5000})
     return r
 
@@ -118,7 +118,7 @@ print("\n=== 4b. Un diagnostico con el esquema viejo se sigue sirviendo ===")
 # dijo aquel dia, y reescribirlo para que encaje en el esquema de hoy seria
 # falsearlo. Tiene que poder leerse igual.
 viejo = sembrar("PS20104 B02 PS01 Pump 09", incidents.FINALIZADO, start="2026-09-14T07:00:00Z")
-incidents.mark(viejo, incidents.FINALIZADO, diagnostico=DIAGNOSTICO_VIEJO)
+incidents.mark(viejo["id"], incidents.FINALIZADO, diagnostico=DIAGNOSTICO_VIEJO)
 dv = CLIENTE.get(f"/incidentes/{viejo['id']}").json()
 check("se sirve sin error", dv["estado"] == incidents.FINALIZADO)
 check("conserva 'explanation' tal cual se guardo",
@@ -187,7 +187,7 @@ print("\n=== 8f. Un fallo dice POR QUE fallo ===")
 # habia fallado: el log lo tenia y el fichero del caso no, asi que la pantalla
 # solo podia enseñar "fallo del analisis" y encogerse de hombros.
 roto = sembrar("PS20104 B02 PS01 Pump 11", incidents.RECIBIDO, start="2026-09-14T06:00:00Z")
-incidents.mark(roto, incidents.FALLIDO, motivo="No se pudieron obtener los datos de PI.")
+incidents.mark(roto["id"], incidents.FALLIDO, motivo="No se pudieron obtener los datos de PI.")
 dr = CLIENTE.get(f"/incidentes/{roto['id']}").json()
 check("el motivo se guarda en el fichero del caso", dr.get("motivo") == "No se pudieron obtener los datos de PI.")
 check("la pagina lo pinta", "d.motivo" in html)
@@ -314,7 +314,7 @@ print("\n=== 8l. Un fallido viejo sale de la vista por defecto ===")
 # unas horas solo estorba en un monitor donde lo que importa son las alertas
 # vivas. Pero NO desaparece: se sigue viendo pidiendolo por estado.
 viejo_roto = sembrar("PS20199 Z99 PS99 Pump 77", incidents.RECIBIDO, start="2026-09-02T03:00:00Z")
-incidents.mark(viejo_roto, incidents.FALLIDO, motivo="algo se torcio")
+incidents.mark(viejo_roto["id"], incidents.FALLIDO, motivo="algo se torcio")
 _envejecer(viejo_roto, incidents._HORAS_FALLIDO_EN_VISTA + 2)
 
 por_defecto = [i["id"] for i in _pedir("?horas=0&limite=500")["incidentes"]]
@@ -323,7 +323,7 @@ por_estado = [i["id"] for i in _pedir("?horas=0&limite=500&estado=fallido")["inc
 check("pero si al pedir 'fallido' expresamente", viejo_roto["id"] in por_estado)
 
 reciente_roto = sembrar("PS20199 Z99 PS99 Pump 78", incidents.RECIBIDO, start="2026-09-02T04:00:00Z")
-incidents.mark(reciente_roto, incidents.FALLIDO, motivo="acaba de pasar")
+incidents.mark(reciente_roto["id"], incidents.FALLIDO, motivo="acaba de pasar")
 check("un fallido reciente si sale",
       reciente_roto["id"] in [i["id"] for i in _pedir("?horas=0&limite=500")["incidentes"]])
 

@@ -458,6 +458,18 @@ def claim(payload: dict) -> dict | None:
         estado_previo = (previo or {}).get("estado")
         if previo is not None and estado_previo in _RECLAMABLES:
             registro["intentos"] = previo.get("intentos", 1) + 1
+            # Se conserva lo que NO es del workflow. Esta rama reconstruye el
+            # registro desde el payload, así que sin esto se llevaría por delante
+            # el bloque de la revisión humana -- el mismo fallo que se arregló
+            # en _actualizar(), en el único sitio donde todavía se escribe un
+            # documento construido de cero.
+            #
+            # Hoy no puede pasar: solo se re-reserva desde INTERRUMPIDO y
+            # PAUSADO, y ninguno de los dos llegó a producir causas que juzgar.
+            # Se hace igualmente porque el día que eso cambie, el fallo sería
+            # silencioso y la pérdida irrecuperable.
+            if "revision" in previo:
+                registro["revision"] = previo["revision"]
             _escribir(ruta, registro)
             observability.audit(
                 "incident.claim", {"incidentId": ruta.stem, "intento": registro["intentos"]},
@@ -486,10 +498,65 @@ def claim(payload: dict) -> dict | None:
     return registro
 
 
-def mark(registro: dict, estado: str, diagnostico: dict | None = None,
-         trace: dict | None = None, motivo: str | None = None) -> None:
+def _actualizar(incidente_id: str, cambios: dict) -> dict | None:
+    """Cambia SOLO los campos indicados de un incidente, releyendo el disco.
+
+    Esta es la única forma de escribir un incidente ya existente, y la firma es
+    deliberada: recibe los campos a cambiar, nunca el documento entero.
+
+    El motivo (2026-09-15). Hasta hoy, mark() recibía el incidente tal como el
+    workflow lo tenía cargado en memoria y escribía ese objeto COMPLETO encima
+    del fichero. Como editar un documento compartido bajándotelo, cambiando tu
+    copia y subiéndola encima: lo que otro tocara mientras tanto desaparecía sin
+    dejar rastro.
+
+    Daba igual mientras el workflow fuese el único escritor. Deja de darlo con
+    la pantalla (docs/DISENO-INTERACCION-HUMANA.md, Fase 2):
+
+        15:00  el operario descarta las causas y pide reanalizar
+        15:00  el workflow arranca y carga el incidente en memoria
+        15:02  el operario añade otra evidencia; la pantalla la escribe
+        15:04  el workflow termina y escribe SU copia, la de las 15:00
+               -> la evidencia de las 15:02 ha desaparecido
+
+    Y no es un caso raro: en la Fase 3 el análisis lo dispara una persona que
+    está delante de la pantalla en ese momento.
+
+    Releer antes de escribir hace que lo que añadió el otro sobreviva, porque
+    nunca estuvo en manos de quien escribe. Cada escritor es dueño de sus
+    campos -- el workflow de 'estado', 'diagnostico', 'trace' y 'motivo'; la
+    pantalla de 'revision' -- y no puede pisar los del otro AUNQUE QUIERA, que
+    es mejor que confiar en que se acuerde.
+
+    Queda una carrera teórica entre releer y escribir. Con un puesto y un
+    workflow es despreciable, y lo peor que produce es perder una escritura, no
+    corromper el fichero: _escribir() es atómico. Si algún día hace falta
+    certeza, un contador de versión cuesta poco.
+
+    Devuelve el registro tal como quedó, o None si no se pudo.
+    """
+    ruta = _directorio() / f"{incidente_id}.json"
+    registro = _leer(ruta)
+    if registro is None:
+        log.error("No se pudo actualizar el incidente %s: no se pudo leer.", incidente_id)
+        return None
+    registro.update(cambios)
+    registro["actualizado_en"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        _escribir(ruta, registro)
+    except OSError as exc:
+        log.error("No se pudo actualizar el incidente %s: %s", incidente_id, exc)
+        return None
+    return registro
+
+
+def mark(incidente_id: str, estado: str, diagnostico: dict | None = None,
+         trace: dict | None = None, motivo: str | None = None) -> dict | None:
     """Actualiza el estado del incidente en disco. Nunca propaga excepciones:
     un fallo escribiendo el registro no debe tumbar el análisis en curso.
+
+    Recibe el ID y no el registro: ver _actualizar() para el porqué. Si tienes
+    el registro a mano, pasa registro["id"].
 
     'motivo' explica en una frase por qué el incidente acabó así. Se añadió el
     2026-09-14 porque un incidente en FALLIDO no decía en ninguna parte qué
@@ -500,25 +567,20 @@ def mark(registro: dict, estado: str, diagnostico: dict | None = None,
     Va en un campo propio y no dentro del trace a propósito: el trace se poda a
     los 90 días (podar_traces) y el motivo del fallo forma parte del caso.
     """
-    ruta = _directorio() / f"{registro['id']}.json"
     observability.audit(
-        "incident.mark", {"incidentId": registro["id"], "estado": estado},
+        "incident.mark", {"incidentId": incidente_id, "estado": estado},
     )
-    registro["estado"] = estado
-    registro["actualizado_en"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cambios: dict = {"estado": estado}
     if motivo:
-        registro["motivo"] = motivo
+        cambios["motivo"] = motivo
     if diagnostico is not None:
-        registro["diagnostico"] = diagnostico
+        cambios["diagnostico"] = diagnostico
     if trace:
         # Prompts y respuestas del modelo. Aquí y no en el log: con el logging
         # estructurado se truncarían a 200 caracteres, y este fichero es el
         # registro del caso -- base/software-spec §1.5 (procedencia del prompt).
-        registro["trace"] = trace
-    try:
-        _escribir(ruta, registro)
-    except OSError as exc:
-        log.error("No se pudo actualizar el incidente %s a '%s': %s", registro["id"], estado, exc)
+        cambios["trace"] = trace
+    return _actualizar(incidente_id, cambios)
 
 
 def podar_traces() -> tuple[int, int]:

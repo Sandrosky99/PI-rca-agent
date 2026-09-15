@@ -94,7 +94,7 @@ async def _analizar_incidente(payload: dict, registro: dict) -> None:
 
 async def _ejecutar_analisis(payload: dict, registro: dict) -> None:
     """El análisis propiamente dicho, ya con turno concedido."""
-    incidents.mark(registro, incidents.ANALIZANDO)
+    incidents.mark(registro["id"], incidents.ANALIZANDO)
     trace: dict = {}
     try:
         # Tope duro. Es la única garantía que cubre TODO el análisis, incluidas
@@ -116,13 +116,13 @@ async def _ejecutar_analisis(payload: dict, registro: dict) -> None:
         log.error("Analisis abortado por exceder el tiempo maximo.",
                   extra={"incidentId": registro["id"],
                          "limiteSegundos": config.ANALYSIS_TIMEOUT_SECONDS})
-        incidents.mark(registro, incidents.FALLIDO, trace=trace,
+        incidents.mark(registro["id"], incidents.FALLIDO, trace=trace,
                        motivo="El análisis superó el tiempo máximo.")
         return
     except Exception:
         log.exception("Analisis abortado por un error no controlado.",
                       extra={"incidentId": registro["id"]})
-        incidents.mark(registro, incidents.FALLIDO, trace=trace,
+        incidents.mark(registro["id"], incidents.FALLIDO, trace=trace,
                        motivo="El análisis se detuvo por un error inesperado. "
                               "El detalle técnico está en el log del servicio.")
         return
@@ -131,7 +131,7 @@ async def _ejecutar_analisis(payload: dict, registro: dict) -> None:
         # en el trace por qué. Si no lo dejó -- no debería pasar --, se guarda
         # algo antes que nada: un incidente que solo dice "fallido" no le sirve
         # a quien está mirando la pantalla.
-        incidents.mark(registro, incidents.FALLIDO, trace=trace,
+        incidents.mark(registro["id"], incidents.FALLIDO, trace=trace,
                        motivo=trace.get("motivo_fallo")
                        or "El análisis no llegó a completarse. El detalle está "
                           "en el log del servicio.")
@@ -146,7 +146,7 @@ async def _ejecutar_analisis(payload: dict, registro: dict) -> None:
                        "NO es una causa raiz confirmada: requiere verificacion por un ingeniero "
                        "de procesos antes de actuar."),
         }
-        incidents.mark(registro, incidents.FINALIZADO, diagnostico=diagnostico, trace=trace)
+        incidents.mark(registro["id"], incidents.FINALIZADO, diagnostico=diagnostico, trace=trace)
 
 
 class Expect100ContinueMiddleware(BaseHTTPMiddleware):
@@ -476,7 +476,7 @@ async def receive_notification(
             "run_rca_analysis", {"incidentId": registro["id"], "asset": registro["asset"]},
             status="BLOCKED", detail="WORKFLOW_ENABLED=false (parada en caliente)",
         )
-        incidents.mark(registro, incidents.PAUSADO)
+        incidents.mark(registro["id"], incidents.PAUSADO)
         log.warning(
             "Analisis NO lanzado: el workflow esta deshabilitado por configuracion.",
             extra={"incidentId": registro["id"]},
