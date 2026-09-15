@@ -245,7 +245,7 @@ check("las opciones salen de los estados que devuelve el servidor",
 # no al pintar: al pintar dejaba en pantalla una lista traida con el filtro
 # viejo. El 'reintento' corta cualquier posibilidad de bucle.
 check("se recupera si el estado filtrado desaparece",
-      "!(datos.recuento || {})[filtro]" in html and "refrescar(true)" in html)
+      "!(datos.recuento || {})[filtro]" in html and "reintento: true" in html)
 check("limpia el detalle cuando no hay seleccion", "Selecciona un incidente" in html)
 
 print("\n=== 8c. El prompt del Step 6 pide el esquema nuevo ===")
@@ -273,11 +273,18 @@ def _sello(horas_atras):
     return (_dt.datetime.now(_dt.timezone.utc)
             - _dt.timedelta(hours=horas_atras)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-def _envejecer(registro, horas):
-    """Retrasa 'recibido_en' en disco, que es por donde se filtra."""
+def _envejecer(registro, horas, movimiento=False):
+    """Retrasa el incidente en disco.
+
+    'recibido_en' es por donde filtra el periodo. 'actualizado_en' es el ultimo
+    movimiento, que es lo que mira el reloj de 12 h para cerrarlo; se retrasa
+    solo cuando la prueba quiere un incidente CERRADO, no solo antiguo.
+    """
     f = TMP / "inc" / f"{registro['id']}.json"
     d = json.loads(f.read_text(encoding="utf-8"))
     d["recibido_en"] = _sello(horas)
+    if movimiento:
+        d["actualizado_en"] = _sello(horas)
     f.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
 
 for h in (1, 5, 30, 200):
@@ -310,22 +317,22 @@ check("y dice cuantos habia en total", cap["coincidentes"] > 2, cap["coincidente
 check("sin recorte, truncado es False", _pedir("?horas=0&limite=500")["truncado"] is False)
 
 print("\n=== 8l. Un fallido viejo sale de la vista por defecto ===")
-# Un fallo tecnico interesa mientras alguien pueda hacer algo con el. Pasadas
-# unas horas solo estorba en un monitor donde lo que importa son las alertas
-# vivas. Pero NO desaparece: se sigue viendo pidiendolo por estado.
+# Un fallo tecnico interesa mientras alguien pueda hacer algo con el. Pasado un
+# turno completo deja de competir por la atencion en un monitor donde lo que
+# importa son las alertas vivas -- pero NO desaparece: se va a la otra pestaña.
 viejo_roto = sembrar("PS20199 Z99 PS99 Pump 77", incidents.RECIBIDO, start="2026-09-02T03:00:00Z")
 incidents.mark(viejo_roto["id"], incidents.FALLIDO, motivo="algo se torcio")
-_envejecer(viejo_roto, incidents._HORAS_FALLIDO_EN_VISTA + 2)
+_envejecer(viejo_roto, incidents.HORAS_EN_ACTIVOS + 2, movimiento=True)
 
-por_defecto = [i["id"] for i in _pedir("?horas=0&limite=500")["incidentes"]]
-check("no sale en la vista por defecto", viejo_roto["id"] not in por_defecto)
-por_estado = [i["id"] for i in _pedir("?horas=0&limite=500&estado=fallido")["incidentes"]]
-check("pero si al pedir 'fallido' expresamente", viejo_roto["id"] in por_estado)
+activos = [i["id"] for i in _pedir("?horas=0&limite=500&cerrados=false")["incidentes"]]
+check("ya no esta en activos", viejo_roto["id"] not in activos)
+cerrados = [i["id"] for i in _pedir("?horas=0&limite=500&cerrados=true")["incidentes"]]
+check("pero si en cerrados", viejo_roto["id"] in cerrados)
 
 reciente_roto = sembrar("PS20199 Z99 PS99 Pump 78", incidents.RECIBIDO, start="2026-09-02T04:00:00Z")
 incidents.mark(reciente_roto["id"], incidents.FALLIDO, motivo="acaba de pasar")
-check("un fallido reciente si sale",
-      reciente_roto["id"] in [i["id"] for i in _pedir("?horas=0&limite=500")["incidentes"]])
+check("un fallido reciente sigue en activos",
+      reciente_roto["id"] in [i["id"] for i in _pedir("?horas=0&limite=500&cerrados=false")["incidentes"]])
 
 print("\n=== 8o. EL FALLO: el limite se aplica DESPUES de filtrar por estado ===")
 # Antes el servidor recortaba a los N mas recientes de TODOS y luego el

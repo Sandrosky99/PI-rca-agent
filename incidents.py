@@ -196,6 +196,7 @@ def _resumen(registro: dict) -> dict:
     qué estado están. El detalle se pide por separado.
     """
     diagnostico = registro.get("diagnostico") or {}
+    etiqueta, _ = cierre(registro)
     return {
         "id": registro.get("id"),
         "asset": registro.get("asset"),
@@ -207,25 +208,14 @@ def _resumen(registro: dict) -> dict:
         "estado": registro.get("estado"),
         "numCausas": len(diagnostico.get("root_causes", [])),
         "intentos": registro.get("intentos", 1),
+        "cierre": etiqueta,
+        "cerrado": esta_cerrado(registro),
     }
 
 
-# Cuánto tiempo sigue apareciendo un incidente FALLIDO en la vista por defecto.
-#
-# Fijo a propósito, sin variable de entorno. Un fallo técnico interesa mientras
-# alguien pueda hacer algo con él -- mirarlo, reintentarlo cuando lo haya --, y
-# pasado ese rato solo estorba: se acumula en la lista de un monitor donde lo
-# que importa son las alertas vivas. Sigue estando, y se ve pidiendo el estado
-# 'fallido' expresamente o ampliando el rango de fechas; lo que deja de hacer es
-# competir por la atención.
-#
-# 12 h y no 6: un turno completo. Con 6 h, un fallo de la madrugada ya no estaba
-# cuando entraba el turno de mañana, que es justo quien podía hacer algo.
-_HORAS_FALLIDO_EN_VISTA = 12
-
-
 def listar(desde: str | None = None, hasta: str | None = None,
-           limite: int | None = None, estado: str | None = None) -> dict:
+           limite: int | None = None, estado: str | None = None,
+           cerrados: bool | None = None) -> dict:
     """Resumen de incidentes, del más reciente al más antiguo, acotado.
 
     Sin acotar esto no sirve: no se borra ningún incidente nunca, así que con
@@ -254,36 +244,36 @@ def listar(desde: str | None = None, hasta: str | None = None,
     if hasta:
         resumenes = [r for r in resumenes if (r.get("recibidoEn") or "") <= hasta]
 
-    # Recuento por estado ANTES de filtrar y de recortar. Es lo que alimenta las
-    # pastillas de la pantalla, y cada una dice exactamente lo que saldría al
-    # pulsarla: por eso se cuenta sin aplicar el envejecimiento de los fallidos,
-    # que solo rige en la vista por defecto.
+    # La pestaña primero: activos y cerrados son dos mundos, y el resto de
+    # filtros y contadores operan dentro del que se esté mirando.
+    #
+    # PAUSADO no sale en ninguno de los dos. No es información de un incidente
+    # sino del sistema entero -- que alguien bajó el interruptor --, y eso va en
+    # un aviso arriba de la pantalla en vez de llenar la lista de ruido.
+    resumenes = [r for r in resumenes if r.get("estado") != PAUSADO]
+
+    # Cuántos hay en CADA pestaña, dentro del periodo pedido. Las dos cuentas se
+    # calculan aquí y viajan juntas: la pantalla tiene que rotular las dos
+    # pestañas, y pedirlas en dos peticiones seria el doble de trabajo para el
+    # mismo recorrido de disco.
+    cuentas_pestanas = {
+        "activos": sum(1 for r in resumenes if not r.get("cerrado")),
+        "cerrados": sum(1 for r in resumenes if r.get("cerrado")),
+    }
+    if cerrados is not None:
+        resumenes = [r for r in resumenes if bool(r.get("cerrado")) == cerrados]
+
+    # Recuento por estado ANTES de filtrar por estado y de recortar. Es lo que
+    # alimenta las pastillas, y cada una dice exactamente lo que saldría al
+    # pulsarla.
     recuento: dict[str, int] = {}
     for r in resumenes:
         e = r.get("estado", "desconocido")
         recuento[e] = recuento.get(e, 0) + 1
-
-    # Cuántos saldrían sin filtrar por estado -- o sea, con el envejecimiento de
-    # los fallidos aplicado. Es lo que debe decir la pastilla "Todos", y no
-    # coincide con sumar el resto: los fallidos viejos cuentan en su pastilla
-    # pero no aquí, que es justo lo que pasaría al pulsar una u otra.
-    _corte = (datetime.now(timezone.utc)
-              - timedelta(hours=_HORAS_FALLIDO_EN_VISTA)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    recuento_sin_filtro = sum(
-        1 for r in resumenes
-        if r.get("estado") != FALLIDO or (r.get("recibidoEn") or "") >= _corte
-    )
+    recuento_sin_filtro = len(resumenes)
 
     if estado:
         resumenes = [r for r in resumenes if r.get("estado") == estado]
-    else:
-        # Los fallidos viejos salen de la vista por defecto. Solo cuando NO se
-        # ha pedido un estado concreto: si alguien filtra por 'fallido' es que
-        # los está buscando, y esconderlos entonces sería absurdo.
-        corte = (datetime.now(timezone.utc)
-                 - timedelta(hours=_HORAS_FALLIDO_EN_VISTA)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        resumenes = [r for r in resumenes
-                     if r.get("estado") != FALLIDO or (r.get("recibidoEn") or "") >= corte]
 
     resumenes.sort(key=lambda r: r.get("recibidoEn") or "", reverse=True)
 
@@ -302,6 +292,7 @@ def listar(desde: str | None = None, hasta: str | None = None,
         "truncado": coincidentes > len(resumenes),
         "recuento": recuento,
         "recuentoSinFiltro": recuento_sin_filtro,
+        "pestanas": cuentas_pestanas,
     }
 
 
@@ -692,6 +683,78 @@ def registrar_veredicto(incidente_id: str, causa: int, veredicto: str,
     log.info("Veredicto humano sobre una causa.",
              extra={"incidentId": incidente_id, "causa": causa, "veredicto": veredicto})
     return actualizado
+
+
+# Cuánto sigue un incidente en la pestaña de activos desde el último movimiento
+# -- lo que ocurra más tarde entre que el sistema terminó algo y que una persona
+# hizo algo. Cualquier acción lo reinicia, porque lo que el reloj persigue es si
+# la persona que puede aportar evidencia sigue por ahí.
+#
+# Doce y no ocho: si un número tiene que servir para las dos cosas que gobierna
+# -- qué se ve y, en la Fase 3, hasta cuándo se puede reanalizar --, conviene el
+# que no pierde nada. Quedarse corto hace desaparecer del monitor algo sobre lo
+# que aún se podía actuar; quedarse largo solo ensucia la lista, y para eso está
+# el filtro. Además, si el turno dura ocho horas y el incidente puede caer en
+# cualquier momento de él, solo doce garantizan que lo vea el turno siguiente.
+HORAS_EN_ACTIVOS = 12
+
+# Las cinco etiquetas de cierre. Ver §3 del documento de diseño.
+CAUSA_CONFIRMADA = "causa_confirmada"
+CAUSA_NO_DETERMINADA = "causa_no_determinada"
+REVISADO_PARCIALMENTE = "revisado_parcialmente"
+SIN_VEREDICTO = "sin_veredicto"
+FALLO_DEL_ANALISIS = "fallo_del_analisis"
+
+
+def cierre(registro: dict) -> tuple[str | None, bool]:
+    """Cómo termina un incidente y si ya ha terminado.
+
+    Devuelve (etiqueta, terminal). 'terminal' significa que la pregunta está
+    contestada y no hay nada que esperar, así que el incidente se cierra EN ESE
+    MOMENTO sin aguardar al reloj: tener en la pantalla de «lo que pide
+    atención» algo que no pide nada es lo contrario de para lo que sirve.
+
+    Se deduce, no se guarda. Los hechos -- los veredictos y sus fechas -- sí
+    están en el fichero; la etiqueta es su consecuencia, y un segundo sitio del
+    que fiarse es un sitio que puede discrepar del primero.
+    """
+    estado = registro.get("estado")
+    if estado in _EN_CURSO:
+        return None, False                       # está en marcha; no ha terminado
+    if estado == FALLIDO:
+        return FALLO_DEL_ANALISIS, False         # se ve 12 h y luego cierra
+    if estado != FINALIZADO:
+        # PAUSADO e INTERRUMPIDO se recogen solos cuando PI vuelve a notificar.
+        return None, False
+
+    estados = estado_de_causas(registro)
+    if CONFIRMADA in estados:
+        return CAUSA_CONFIRMADA, True
+    if estados and all(e == DESCARTADA for e in estados):
+        # En la Fase 2 esto es terminal. En la Fase 3 dejará de serlo: se
+        # intercalará el relanzado, y solo al agotarse el presupuesto de
+        # reanálisis se concluirá que la causa no se determinó.
+        return CAUSA_NO_DETERMINADA, True
+    if DESCARTADA in estados:
+        return REVISADO_PARCIALMENTE, False
+    return SIN_VEREDICTO, False
+
+
+def esta_cerrado(registro: dict, ahora: datetime | None = None) -> bool:
+    """Si el incidente ya no pide atención: por respuesta terminal o por reloj."""
+    etiqueta, terminal = cierre(registro)
+    if terminal:
+        return True
+    if registro.get("estado") in _EN_CURSO:
+        return False
+    if etiqueta is None:
+        # PAUSADO no aparece en ninguna de las dos pestañas: no es información
+        # de un incidente sino del sistema entero -- que alguien bajó el
+        # interruptor --, y eso va en un aviso arriba de la pantalla.
+        return registro.get("estado") == PAUSADO
+    ahora = ahora or datetime.now(timezone.utc)
+    limite = (ahora - timedelta(hours=HORAS_EN_ACTIVOS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return (registro.get("actualizado_en") or "") < limite
 
 
 def registrar_reclasificacion(incidente_id: str, reclasificacion: str | None) -> dict:

@@ -210,6 +210,133 @@ auditoria = (TMP / "audit.jsonl").read_text(encoding="utf-8")
 check("los veredictos se auditan", "incident.veredicto" in auditoria)
 check("las reclasificaciones tambien", "incident.reclasificacion" in auditoria)
 
+print("\n=== 13b. Confirmar una causa CIERRA el incidente al momento ===")
+# La ventana es lo que esperas cuando no hay respuesta. Con una causa confirmada
+# la pregunta esta contestada, asi que no hay nada que esperar: tener en la
+# pantalla de "lo que pide atencion" algo que no pide nada es lo contrario de
+# para lo que sirve.
+iid7 = sembrar()
+reg = incidents.leer_por_id(iid7)
+check("recien analizado esta en activos", not incidents.esta_cerrado(reg))
+check("y su cierre provisional es 'sin veredicto'", incidents.cierre(reg)[0] == incidents.SIN_VEREDICTO)
+veredicto(iid7, causa=0, veredicto="confirmada")
+reg = incidents.leer_por_id(iid7)
+check("tras confirmar, cerrado", incidents.esta_cerrado(reg))
+etiqueta, terminal = incidents.cierre(reg)
+check("etiquetado 'causa confirmada'", etiqueta == incidents.CAUSA_CONFIRMADA, etiqueta)
+check("y marcado como terminal", terminal is True)
+
+print("\n=== 13c. Descartarlas TODAS tambien cierra (en la Fase 2) ===")
+# En la Fase 3 dejara de ser terminal: se intercalara el relanzado, y solo al
+# agotarse el presupuesto se concluira que la causa no se determino.
+iid8 = sembrar()
+for n in range(3):
+    veredicto(iid8, causa=n, veredicto="descartada", evidencia=f"Comprobado que no es la {n}.")
+reg = incidents.leer_por_id(iid8)
+check("cerrado", incidents.esta_cerrado(reg))
+check("como 'causa no determinada'", incidents.cierre(reg)[0] == incidents.CAUSA_NO_DETERMINADA)
+
+print("\n=== 13d. Descartar SOLO ALGUNAS no cierra: aun puede volver ===")
+iid9 = sembrar()
+veredicto(iid9, causa=0, veredicto="descartada", evidencia="Esta no.")
+reg = incidents.leer_por_id(iid9)
+check("sigue en activos", not incidents.esta_cerrado(reg))
+check("con cierre provisional 'revisado parcialmente'",
+      incidents.cierre(reg)[0] == incidents.REVISADO_PARCIALMENTE)
+
+print("\n=== 13e. Las dos pestañas ===")
+def lista(qs=""):
+    return CLIENTE.get("/incidentes?horas=0&limite=500" + qs).json()
+
+act = [i["id"] for i in lista("&cerrados=false")["incidentes"]]
+cer = [i["id"] for i in lista("&cerrados=true")["incidentes"]]
+check("el confirmado esta en cerrados", iid7 in cer and iid7 not in act)
+check("el parcial esta en activos", iid9 in act and iid9 not in cer)
+check("ningun incidente esta en las dos", not (set(act) & set(cer)))
+cuentas = lista()["pestanas"]
+check("las cuentas de las dos vienen juntas", set(cuentas) == {"activos", "cerrados"}, cuentas)
+check("y cuadran", cuentas["activos"] == len(act) and cuentas["cerrados"] == len(cer), cuentas)
+
+print("\n=== 13f. 'pausado' no sale en NINGUNA pestaña ===")
+# No es informacion de un incidente sino del sistema entero -- que alguien bajo
+# el interruptor --, y eso va en un aviso arriba de la pantalla. Cuarenta filas
+# iguales serian ruido donde basta una linea.
+pausado = sembrar(estado=incidents.PAUSADO, diagnostico=None)
+check("no esta en activos", pausado not in [i["id"] for i in lista("&cerrados=false")["incidentes"]])
+check("ni en cerrados", pausado not in [i["id"] for i in lista("&cerrados=true")["incidentes"]])
+check("la pantalla avisa de que el analisis esta parado",
+      "análisis automático está desactivado" in CLIENTE.get("/pantalla").text)
+
+print("\n=== 14. La pantalla trae los botones de veredicto ===")
+html = CLIENTE.get("/pantalla").text
+check("boton de confirmar", "data-confirmar" in html)
+check("boton de descartar", "data-descartar" in html)
+check("boton de deshacer", "data-deshacer" in html)
+check("campo obligatorio de evidencia", 'name="evidencia"' in html and "required" in html)
+check("campo opcional de sospecha", 'name="sospecha"' in html)
+check("la sospecha se marca como opcional", "opcional" in html)
+check("envia al endpoint de veredicto", "/veredicto" in html)
+
+print("\n=== 15. EL FALLO QUE HABRIA TENIDO: el refresco borra lo escrito ===")
+# La pantalla se refresca cada 5 s. Si al refrescar re-pinta el detalle mientras
+# alguien escribe la evidencia, le borra el texto -- y el operario no entiende
+# por que. El refresco AUTOMATICO se abstiene de re-pintar mientras hay un
+# formulario abierto; el que disparan los propios botones si re-pinta, porque es
+# el que tiene que mostrar el resultado.
+check("el refresco distingue automatico de manual", "auto = false" in html)
+check("el temporizador se marca como automatico", "refrescar({auto: true})" in html)
+check("y con formulario abierto no re-pinta el detalle",
+      "auto && formAbierto !== null" in html)
+# La lista SI sigue actualizandose: si se suspendiera todo, un formulario que
+# alguien deja abierto y olvida congelaria el monitor entero.
+check("pero la lista sigue viva", "La lista ya se ha" in html)
+
+print("\n=== 16. El contenido del modelo no se concatena dentro de codigo ===")
+# Los manejadores se conectan desde JavaScript, no como atributos onclick en el
+# HTML. Asi el texto que devuelve el modelo nunca acaba dentro de algo
+# ejecutable, pase lo que pase con el escapado.
+check("no hay onclick= en las plantillas", "onclick=\"" not in html)
+check("los manejadores se conectan aparte", "conectarVeredictos" in html)
+
+print("\n=== 17. Se avisa del fallo sin perder lo escrito ===")
+# Si el servidor rechaza el veredicto, el mensaje se enseña tal cual -- esta
+# escrito para quien esta delante -- y el formulario conserva lo tecleado.
+check("guarda el error para mostrarlo", "errorForm" in html)
+check("y repinta el formulario con lo que habia", "previo.evidencia" in html)
+
+print("\n=== 17b. Se dice que el veredicto lo dio una PERSONA ===")
+# En la misma pantalla conviven lo que propuso la IA y lo que concluyo un
+# humano. Que una causa ponga solo "descartada" deja sin decir lo unico que
+# importa de ese apunte: que no lo decidio el modelo.
+check("la confirmada dice quien fue", "Confirmada por el operario" in html)
+check("la descartada tambien", "Descartada por el operario" in html)
+check("y se dice cuando", "cuando-veredicto" in html)
+# Rodeada de rojo, como la confirmada de verde: las dos estan juzgadas y las dos
+# se ven de un vistazo.
+check("la descartada se rodea de rojo", ".causa.descartada{border-color:var(--malo)" in html)
+# Y NO se atenua: dentro lleva la evidencia que escribio una persona, que es la
+# parte mas valiosa del expediente. Al 62 % de opacidad costaba leerla justo a
+# quien tiene que leerla.
+check("sin atenuar el bloque entero", ".causa.descartada{opacity" not in html)
+
+print("\n=== 18. Con una causa confirmada, las demas pierden los botones ===")
+# La pregunta esta contestada: juzgar las otras no aporta nada y solo invita a
+# dejar el expediente en un estado raro. La confirmada conserva su "Deshacer",
+# que es la via para rectificar.
+check("la pantalla contempla ese caso", "hayConfirmada" in html)
+check("y deja ver la evidencia de las ya descartadas", "bloqueDescartada" in html)
+
+print("\n=== 19. En cerrados, la causa confirmada va primera ===")
+# En un expediente cerrado lo que se busca es la respuesta, no el orden en que
+# el modelo la propuso. En activos se respeta el orden del modelo, que esta por
+# probabilidad decreciente y guia la revision.
+check("reordena solo en la pestaña de cerrados", "if(verCerrados){" in html)
+check("pone la confirmada delante", 'estados[b] === "confirmada"' in html)
+# El numero NO se toca: si era la 2 de 3, sigue diciendo 2 de 3. Renumerar haria
+# que el expediente y la conversacion sobre el ("la segunda causa") dejasen de
+# coincidir.
+check("pero el numero mostrado sigue siendo el original", "CAUSA ${n+1} DE" in html)
+
 print("\n" + "=" * 62)
 if fallos:
     print(f"FALLOS: {len(fallos)} -> {fallos}")

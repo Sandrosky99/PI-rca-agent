@@ -1,10 +1,10 @@
 <!doctype html>
 <!--
-  Pantalla de la sala de control -- Fase 1 (solo lectura).
+  Pantalla de la sala de control.
 
-  Diseño completo en docs/DISENO-INTERACCION-HUMANA.md. Aquí NO hay veredicto,
-  ni feedback, ni botones de causa: esta fase solo muestra. Lo que falta llegará
-  cuando el esquema del fichero de incidente crezca para soportarlo.
+  Diseño completo en docs/DISENO-INTERACCION-HUMANA.md. Fase 1 (mostrar) y
+  Fase 2 (recoger el veredicto humano). Lo que todavía NO hay es el reanálisis
+  con feedback ni el cierre automático por reloj: eso es la Fase 3.
 
   Sin dependencias externas a propósito: la máquina que sirve esto no tiene por
   qué tener salida a internet, y un monitor de sala de control que se queda en
@@ -73,19 +73,10 @@
     border-right:1px solid var(--borde); background:var(--panel);
     overflow-y:auto; min-height:0;
   }
-  /* Cabecera y filtros quedan fijos arriba del panel: con veinte incidentes,
-     tener que subir del todo para cambiar de filtro es una molestia diaria. */
-  .lista h2{
-    margin:0; padding:12px 18px 8px; font-size:11px; letter-spacing:.14em;
-    text-transform:uppercase; color:var(--tenue); font-weight:600;
-    position:sticky; top:0; background:var(--panel); z-index:2;
-  }
   /* Filtro por estado. Solo aparecen los estados que existen ahora mismo: una
      botonera con seis opciones de las que cuatro dan cero no ayuda a nadie. */
   .filtros{
     display:flex; flex-wrap:wrap; gap:6px; padding:0 18px 12px;
-    border-bottom:1px solid var(--borde);
-    position:sticky; top:33px; background:var(--panel); z-index:2;
   }
   .filtro{
     font:inherit; font-size:12.5px; cursor:pointer; padding:4px 11px;
@@ -98,11 +89,29 @@
   }
   .filtro .cuenta{opacity:.7; margin-left:5px; font-variant-numeric:tabular-nums}
 
-  /* Acotar cuantos se muestran. Va arriba del todo porque decide QUE hay en la
-     lista; los filtros de estado operan dentro de lo que esto deja pasar. */
+  /* Las dos pestañas. Activos y cerrados son dos mundos, no dos filtros: el
+     periodo y el estado operan DENTRO del que se este mirando. */
+  .cabecera-lista{
+    position:sticky; top:0; background:var(--panel); z-index:4;
+    border-bottom:1px solid var(--borde);
+  }
+  .pestanas{display:flex; border-bottom:1px solid var(--borde)}
+  .pestana{
+    flex:1; font:inherit; font-size:13.5px; font-weight:600; cursor:pointer;
+    padding:11px 8px; border:none; background:none; color:var(--tenue);
+    border-bottom:3px solid transparent;
+  }
+  .pestana:hover{color:var(--texto)}
+  .pestana[aria-selected="true"]{color:var(--acento); border-bottom-color:var(--acento)}
+  .pestana .cuenta{
+    margin-left:6px; font-variant-numeric:tabular-nums; opacity:.75; font-weight:400;
+  }
+
+  /* Acotar cuantos se muestran. Va debajo de las pestañas porque decide QUE hay
+     en la lista; los filtros de estado operan dentro de lo que esto deja pasar. */
   .rango{
     display:flex; flex-wrap:wrap; gap:6px; align-items:center;
-    padding:0 18px 10px; position:sticky; top:0; background:var(--panel); z-index:3;
+    padding:10px 18px;
   }
   .rango select,.rango input{
     font:inherit; font-size:12.5px; padding:3px 7px; border-radius:6px;
@@ -215,6 +224,66 @@
   .bloque-accion{background:var(--panel-2)}
   .bloque-accion p{margin:0; color:var(--texto); font-size:15px}
 
+  /* ---- veredicto sobre una causa ---- */
+  .bloque-veredicto{background:var(--panel-2); display:flex; flex-wrap:wrap;
+    gap:10px; align-items:center}
+  .btn{
+    font:inherit; font-size:14.5px; font-weight:600; cursor:pointer;
+    padding:7px 16px; border-radius:7px; border:1px solid var(--borde);
+    background:var(--panel); color:var(--texto);
+  }
+  .btn:hover{border-color:var(--acento); color:var(--acento)}
+  .btn-si{border-color:var(--ok); color:var(--ok)}
+  .btn-si:hover{background:var(--ok); color:#fff; border-color:var(--ok)}
+  .btn-no{border-color:var(--malo); color:var(--malo)}
+  .btn-no:hover{background:var(--malo); color:#fff; border-color:var(--malo)}
+  .btn-sec{font-weight:400; font-size:13px; padding:5px 12px; color:var(--tenue)}
+
+  /* Las dos causas juzgadas se rodean, cada una de su color. La descartada NO
+     se atenua: lo que lleva dentro es la evidencia que escribio una persona, y
+     es la parte mas valiosa del expediente -- dejarla al 62 % de opacidad la
+     hacia costosa de leer justo a quien tiene que leerla. La tachadura del
+     titulo ya dice que esa causa esta fuera de juego. */
+  .causa.confirmada{border-color:var(--ok); border-left:4px solid var(--ok)}
+  .causa.descartada{border-color:var(--malo); border-left:4px solid var(--malo)}
+  .causa.descartada .q{
+    text-decoration:line-through; text-decoration-thickness:1px; color:var(--texto-2);
+  }
+  .marca{
+    display:inline-block; font-size:12.5px; font-weight:700; padding:3px 11px;
+    border-radius:20px; letter-spacing:.02em;
+  }
+  .marca-si{background:var(--ok); color:#fff}
+  .marca-no{background:var(--malo); color:#fff}
+
+  /* El formulario de descarte. Mientras esta abierto se suspende el refresco
+     automatico del detalle: re-pintar por debajo de alguien que esta
+     escribiendo le borraria el texto. */
+  .form-descarte{display:grid; gap:9px; width:100%}
+  .form-descarte label{
+    font-size:11px; letter-spacing:.08em; text-transform:uppercase;
+    color:var(--tenue); font-weight:600;
+  }
+  .form-descarte label .opcional{text-transform:none; letter-spacing:0; font-weight:400}
+  .form-descarte textarea{
+    font:inherit; font-size:15px; padding:9px 11px; border-radius:7px;
+    border:1px solid var(--borde); background:var(--panel); color:var(--texto);
+    resize:vertical; min-height:62px; width:100%;
+  }
+  .form-descarte textarea:focus{outline:2px solid var(--acento); outline-offset:-1px}
+  .form-acciones{display:flex; gap:9px; align-items:center; flex-wrap:wrap}
+  .error-form{color:var(--malo); font-size:14px; font-weight:600}
+  .evidencia-dada{
+    width:100%; font-size:14.5px; color:var(--texto-2);
+    border-left:2px solid var(--borde); padding-left:12px;
+  }
+  .evidencia-dada b{
+    display:block; font-size:10.5px; letter-spacing:.1em; text-transform:uppercase;
+    color:var(--tenue); margin-bottom:3px;
+  }
+  .evidencia-dada + .evidencia-dada{margin-top:8px}
+  .cuando-veredicto{font-size:12.5px; color:var(--tenue)}
+
   .chip{
     display:inline-block; font-size:11.5px; font-weight:600; padding:2px 9px;
     border-radius:20px; letter-spacing:.03em; white-space:nowrap;
@@ -228,6 +297,24 @@
   .e-analizando,.e-recibido{background:var(--aviso-fondo); color:var(--aviso)}
   .e-fallido{background:var(--malo-fondo); color:var(--malo)}
   .e-pausado,.e-interrumpido{background:var(--neutro-fondo); color:var(--neutro)}
+
+  /* Las etiquetas de cierre, solo en la pestaña de cerrados. La confirmada
+     destaca por el mismo motivo que 'listo' en activos: es la unica que dice
+     que el sistema acerto. */
+  .c-causa_confirmada{background:var(--ok); color:#fff; font-weight:700}
+  .c-causa_no_determinada{background:var(--aviso-fondo); color:var(--aviso)}
+  .c-revisado_parcialmente{background:var(--acento-fondo); color:var(--acento)}
+  .c-sin_veredicto{background:var(--neutro-fondo); color:var(--neutro)}
+  .c-fallo_del_analisis{background:var(--malo-fondo); color:var(--malo)}
+
+  /* Aviso de que el interruptor esta bajado. Sustituye a listar los incidentes
+     en 'pausado': eso no es informacion de un incidente sino del sistema
+     entero, y cuarenta filas iguales serian ruido donde basta una linea. */
+  .aviso-parado{
+    padding:11px 24px; background:var(--aviso-fondo); color:var(--aviso);
+    font-size:14px; font-weight:600; border-bottom:1px solid var(--borde);
+    flex:0 0 auto;
+  }
 
   .aviso-ia{
     margin-top:26px; padding:12px 16px; border-radius:8px;
@@ -248,11 +335,16 @@
   <span id="reloj" class="reloj"></span>
 </header>
 
+<div id="aviso-parado"></div>
+
 <div class="cols">
   <nav class="lista">
-    <div class="rango" id="rango"></div>
-    <div class="filtros" id="filtros"></div>
-    <div id="truncado"></div>
+    <div class="cabecera-lista">
+      <div class="pestanas" id="pestanas"></div>
+      <div class="rango" id="rango"></div>
+      <div class="filtros" id="filtros"></div>
+      <div id="truncado"></div>
+    </div>
     <div id="lista"></div>
   </nav>
   <main class="detalle" id="detalle">
@@ -275,6 +367,25 @@ let filtro = "";   // "" = todos; si no, el estado por el que se filtra
 // nunca: con veinte alertas al dia son 7.300 al ano, y esa lista no la lee
 // nadie en un monitor. Los valores iniciales los pone el servidor.
 let rango = {horas: null, desde: "", hasta: "", limite: null};
+
+// Indice de la causa cuyo formulario de descarte esta abierto, o null.
+//
+// Mientras hay uno abierto se suspende el re-pintado del detalle: la pantalla
+// se refresca cada 5 s, y re-pintar por debajo de alguien que esta escribiendo
+// la evidencia le borraria el texto. La lista sigue actualizandose.
+let formAbierto = null;
+let errorForm = "";
+
+// false = pestaña de activos; true = la de cerrados.
+let verCerrados = false;
+
+const CIERRES = {
+  causa_confirmada:      "Causa confirmada",
+  causa_no_determinada:  "Causa no determinada",
+  revisado_parcialmente: "Revisado parcialmente",
+  sin_veredicto:         "Sin veredicto",
+  fallo_del_analisis:    "Fallo del análisis",
+};
 
 const PERIODOS = [
   ["8",   "Últimas 8 h"],
@@ -373,6 +484,23 @@ async function pedir(url){
   return r.json();
 }
 
+function pintarPestanas(cuentas){
+  const cont = document.getElementById("pestanas");
+  cont.innerHTML = [[false, "Activos"], [true, "Cerrados"]].map(([v, t]) =>
+    `<button class="pestana" data-cerrados="${v}" aria-selected="${v === verCerrados}">`
+    + `${esc(t)}<span class="cuenta">${cuentas[v ? "cerrados" : "activos"] ?? ""}</span>`
+    + `</button>`).join("");
+  cont.querySelectorAll(".pestana").forEach(b => b.onclick = () => {
+    if((b.dataset.cerrados === "true") === verCerrados) return;
+    verCerrados = b.dataset.cerrados === "true";
+    // Al cambiar de mundo no se arrastra nada del anterior: ni el filtro de
+    // estado, ni la seleccion, ni un formulario a medio escribir sobre un
+    // incidente que ya no se ve.
+    filtro = ""; seleccionado = null; formAbierto = null; errorForm = "";
+    refrescar();
+  });
+}
+
 function pintarRango(){
   const personalizado = rango.horas === "x";
   document.getElementById("rango").innerHTML = `
@@ -422,6 +550,7 @@ function parametros(){
     p.set("horas", rango.horas);
   }
   if(rango.limite) p.set("limite", rango.limite);
+  p.set("cerrados", verCerrados);
   // El estado va al SERVIDOR, no se filtra aqui. Si se filtrase en el navegador,
   // el limite se habria aplicado antes y estaria recortando sobre el conjunto
   // equivocado: con "listo" y maximo 2 podian salir cero, porque el servidor
@@ -461,7 +590,9 @@ function pintarLista(incidentes){
       <div class="act">${esc(i.asset)}</div>
       <div class="sub">${esc(i.kpiName)}</div>
       <div class="sub" style="color:var(--tenue)">${esc(desde(i.startTime) || hora(i.startTime))}</div>
-      <div class="pie">${chip(i.estado)}
+      <div class="pie">${verCerrados && i.cierre
+        ? `<span class="chip c-${esc(i.cierre)}">${esc(CIERRES[i.cierre] || i.cierre)}</span>`
+        : chip(i.estado)}
         ${i.numCausas ? `<span class="sub">${i.numCausas} causas</span>` : ""}</div>
     </button>`).join("");
   cont.querySelectorAll(".fila").forEach(b =>
@@ -473,6 +604,146 @@ function pintarLista(incidentes){
       document.getElementById("detalle").scrollTop = 0;
       refrescar();
     });
+}
+
+// El ultimo apunte sobre una causa. Los veredictos son una lista de solo
+// anadir, asi que corregir deja los dos: el que vale es el ultimo.
+function ultimoApunte(d, n){
+  const v = ((d.revision || {}).veredictos || []).filter(x => x.causa === n);
+  return v.length ? v[v.length - 1] : null;
+}
+
+// Que se puede hacer con una causa, segun como este.
+function zonaVeredicto(d, n, estado, estados){
+  // Con una causa ya confirmada, la pregunta esta contestada: juzgar las demas
+  // no aporta nada y solo invita a dejar el expediente en un estado raro. La
+  // confirmada conserva su "Deshacer", que es la via para rectificar.
+  const hayConfirmada = estados.includes("confirmada");
+  if(hayConfirmada && estado !== "confirmada"){
+    return estado === "descartada" ? bloqueDescartada(d, n) : "";
+  }
+
+  if(formAbierto === n){
+    const previo = ultimoApunte(d, n) || {};
+    return `<div class="bloque bloque-veredicto">
+      <form class="form-descarte" data-causa="${n}">
+        <div>
+          <label for="ev${n}">Por qué no es esta causa</label>
+          <textarea id="ev${n}" name="evidencia" required
+            placeholder="Lo que has comprobado. Por ejemplo: «no hay obstrucción, inspección visual del rodete»."
+            >${esc(previo.evidencia || "")}</textarea>
+        </div>
+        <div>
+          <label for="sos${n}">Qué sospechas tú <span class="opcional">— opcional</span></label>
+          <textarea id="sos${n}" name="sospecha"
+            placeholder="Si tienes una idea de por dónde puede ir."
+            >${esc(previo.sospecha || "")}</textarea>
+        </div>
+        <div class="form-acciones">
+          <button type="submit" class="btn btn-no">Descartar causa</button>
+          <button type="button" class="btn btn-sec" data-cancelar="1">Cancelar</button>
+          ${errorForm ? `<span class="error-form">${esc(errorForm)}</span>` : ""}
+        </div>
+      </form></div>`;
+  }
+
+  if(estado === "confirmada"){
+    // "por el operario" y no solo "confirmada": lo que hay que distinguir es
+    // que esto NO lo decidio el modelo. En la misma pantalla conviven lo que
+    // propuso la IA y lo que concluyo una persona, y confundirlos es
+    // exactamente lo que este proyecto lleva evitando.
+    return `<div class="bloque bloque-veredicto">
+      <span class="marca marca-si">Confirmada por el operario</span>
+      <button class="btn btn-sec" data-deshacer="${n}">Deshacer</button></div>`;
+  }
+
+  if(estado === "descartada") return bloqueDescartada(d, n, true);
+
+  return `<div class="bloque bloque-veredicto">
+    <button class="btn btn-si" data-confirmar="${n}">Es esta causa</button>
+    <button class="btn btn-no" data-descartar="${n}">No es esta</button></div>`;
+}
+
+// Lo que se enseña de una causa descartada. 'conBoton' es false cuando otra
+// causa ya esta confirmada: la evidencia se sigue viendo -- es el trabajo que
+// hizo alguien y no se tira -- pero ya no hay nada que rectificar aqui.
+function bloqueDescartada(d, n, conBoton){
+  const a = ultimoApunte(d, n) || {};
+  return `<div class="bloque bloque-veredicto">
+    <span class="marca marca-no">Descartada por el operario</span>
+    ${conBoton ? `<button class="btn btn-sec" data-deshacer="${n}">Deshacer</button>` : ""}
+    ${a.en ? `<span class="cuando-veredicto">${desde(a.en) || hora(a.en)}</span>` : ""}
+    ${a.evidencia ? `<div class="evidencia-dada"><b>Por qué no era</b>${esc(a.evidencia)}</div>` : ""}
+    ${a.sospecha ? `<div class="evidencia-dada"><b>Lo que se sospecha</b>${esc(a.sospecha)}</div>` : ""}
+    </div>`;
+}
+
+async function enviarVeredicto(iid, cuerpo){
+  const r = await fetch(`/incidentes/${encodeURIComponent(iid)}/veredicto`, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(cuerpo),
+  });
+  if(!r.ok){
+    // El mensaje del servidor esta escrito para quien esta delante de la
+    // pantalla, asi que se enseña tal cual.
+    const cuerpoErr = await r.json().catch(() => ({}));
+    throw new Error(cuerpoErr.detail || "No se pudo guardar.");
+  }
+  return r.json();
+}
+
+// Los manejadores van aqui y no como atributos onclick en el HTML: asi el
+// contenido del modelo nunca se concatena dentro de codigo ejecutable.
+function conectarVeredictos(iid){
+  const cont = document.getElementById("detalle");
+
+  cont.querySelectorAll("[data-confirmar]").forEach(b => b.onclick = async () => {
+    try{
+      pintarDetalle(await enviarVeredicto(iid, {causa: +b.dataset.confirmar, veredicto: "confirmada"}));
+    }catch(e){ errorForm = e.message; refrescar(); }
+  });
+
+  cont.querySelectorAll("[data-descartar]").forEach(b => b.onclick = () => {
+    formAbierto = +b.dataset.descartar;      // suspende el refresco del detalle
+    errorForm = "";
+    refrescar();
+  });
+
+  cont.querySelectorAll("[data-deshacer]").forEach(b => b.onclick = async () => {
+    // Deshacer no borra: anota "pendiente" encima y el expediente conserva los
+    // dos apuntes. Sin pedir motivo -- casi siempre sera un clic mal dado, y
+    // poner fricción a corregir un error solo consigue que no se corrija.
+    try{
+      pintarDetalle(await enviarVeredicto(iid, {causa: +b.dataset.deshacer, veredicto: "pendiente"}));
+    }catch(e){ errorForm = e.message; refrescar(); }
+  });
+
+  const form = cont.querySelector(".form-descarte");
+  if(form){
+    form.querySelector("[data-cancelar]").onclick = () => {
+      formAbierto = null; errorForm = ""; refrescar();
+    };
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const evidencia = form.evidencia.value.trim();
+      if(!evidencia){
+        // Se comprueba aqui ademas de en el servidor: asi el aviso sale al
+        // instante y sin perder lo escrito en el otro campo.
+        errorForm = "Hace falta decir por qué no es esta causa.";
+        return refrescar();
+      }
+      try{
+        const actualizado = await enviarVeredicto(iid, {
+          causa: formAbierto, veredicto: "descartada",
+          evidencia, sospecha: form.sospecha.value.trim(),
+        });
+        formAbierto = null; errorForm = "";
+        pintarDetalle(actualizado);
+      }catch(err){ errorForm = err.message; refrescar(); }
+    };
+    form.querySelector("textarea").focus();
+  }
 }
 
 function pintarDetalle(d){
@@ -510,10 +781,27 @@ function pintarDetalle(d){
   } else if(!causas.length){
     cuerpo = `<p class="vacio">Sin causas propuestas.</p>`;
   } else {
-    cuerpo = `<h3>Causas propuestas</h3>` + causas.map((c,n) => {
+    const estados = d.estadoCausas || causas.map(() => "pendiente");
+
+    // En la pestaña de cerrados, la causa confirmada va primero: en un
+    // expediente cerrado lo que se busca es la respuesta, no el orden en que el
+    // modelo la propuso. En activos se respeta el orden del modelo, que esta
+    // por probabilidad decreciente y es el que guia la revision.
+    //
+    // El NUMERO no se toca: si era la 2 de 3, sigue diciendo 2 de 3. Renumerar
+    // haria que el expediente y la conversacion sobre el ("la segunda causa")
+    // dejasen de coincidir.
+    const orden = causas.map((c, n) => n);
+    if(verCerrados){
+      orden.sort((a, b) =>
+        (estados[b] === "confirmada") - (estados[a] === "confirmada") || a - b);
+    }
+
+    cuerpo = `<h3>Causas propuestas</h3>` + orden.map(n => {
+      const c = causas[n];
       const ev = evidencias(c);
       return `
-      <article class="causa">
+      <article class="causa ${esc(estados[n])}">
         <div class="n">CAUSA ${n+1} DE ${causas.length}</div>
         <div class="bloque bloque-problema">
           <b>Problema</b>
@@ -528,6 +816,7 @@ function pintarDetalle(d){
         }</div>`}
         ${c.recommended_action ? `<div class="bloque bloque-accion">
           <b>Acción recomendada</b><p>${esc(c.recommended_action)}</p></div>` : ""}
+        ${zonaVeredicto(d, n, estados[n], estados)}
       </article>`;
     }).join("");
   }
@@ -564,9 +853,15 @@ function pintarDetalle(d){
             los genera un sistema de inteligencia artificial a partir de datos de
             PI. Son hipótesis pendientes de verificación, no causas
             confirmadas.</p>`}`;
+
+  conectarVeredictos(d.id);
 }
 
-async function refrescar(reintento){
+// 'auto' distingue el refresco del temporizador del que disparan los botones.
+// Solo el automatico se abstiene de re-pintar el detalle cuando hay un
+// formulario abierto: la lista sigue actualizandose, asi que el monitor no se
+// congela aunque alguien deje el formulario abierto y se marche.
+async function refrescar({reintento = false, auto = false} = {}){
   try{
     const datos = await pedir("/incidentes" + parametros());
 
@@ -576,7 +871,7 @@ async function refrescar(reintento){
     // 'reintento' corta cualquier posibilidad de bucle: como mucho, una vez.
     if(filtro && !(datos.recuento || {})[filtro] && !reintento){
       filtro = "";
-      return refrescar(true);
+      return refrescar({reintento: true, auto});
     }
 
     const incidentes = datos.incidentes;
@@ -591,6 +886,7 @@ async function refrescar(reintento){
       rango.horas = String([8,24,72,168].reduce((a,b) =>
         Math.abs(b - h) < Math.abs(a - h) ? b : a, 24));
     }
+    pintarPestanas(datos.pestanas || {});
     pintarRango();
 
     // Aviso cuando el limite recorta: la pantalla dice cuantos se esta dejando
@@ -612,8 +908,20 @@ async function refrescar(reintento){
     document.getElementById("resumen").textContent =
       `${datos.mostrados} incidente${datos.mostrados===1?"":"s"}`;
 
-    if(seleccionado){
+    if(seleccionado && auto && formAbierto !== null){
+      // Alguien esta escribiendo la evidencia. Re-pintar por debajo le borraria
+      // el texto, asi que el detalle se deja como esta. La lista ya se ha
+      // actualizado arriba.
+    }else if(seleccionado){
       pintarDetalle(await pedir("/incidentes/" + encodeURIComponent(seleccionado)));
+    }else if(formAbierto !== null){
+      // No deberia ocurrir -- el formulario vive dentro del incidente
+      // seleccionado --, pero si el filtro lo sacara de la lista, cerrarlo es
+      // mejor que dejar un formulario huerfano que escribe en un incidente que
+      // ya no se ve.
+      formAbierto = null; errorForm = "";
+      document.getElementById("detalle").innerHTML =
+        '<p class="vacio">Selecciona un incidente.</p>';
     }else{
       // Sin nada seleccionado hay que limpiar el detalle. Si no, se queda el del
       // incidente anterior junto a una lista que ya no lo contiene: la pantalla
@@ -621,6 +929,17 @@ async function refrescar(reintento){
       document.getElementById("detalle").innerHTML =
         '<p class="vacio">Selecciona un incidente.</p>';
     }
+
+    // El interruptor de parada es informacion del SISTEMA, no de un incidente:
+    // si esta bajado, las alertas se registran y no se analizan, y quien mira la
+    // pantalla tiene que saberlo aunque la lista parezca normal.
+    try{
+      const salud = await pedir("/health");
+      document.getElementById("aviso-parado").innerHTML = salud.workflow_enabled
+        ? ""
+        : `<div class="aviso-parado">El análisis automático está desactivado.
+           Las alertas se registran pero no se analizan.</div>`;
+    }catch(e){ /* si /health falla, ya lo dira el indicador de contacto */ }
 
     ultimoOk = new Date();
     document.getElementById("reloj").className = "reloj";
@@ -639,7 +958,7 @@ async function refrescar(reintento){
 }
 
 refrescar();
-setInterval(refrescar, CADA_MS);
+setInterval(() => refrescar({auto: true}), CADA_MS);
 </script>
 </body>
 </html>

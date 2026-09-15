@@ -573,6 +573,7 @@ async def listar_incidentes(
     limite: int | None = None,
     estado: str | None = None,
     horas: int | None = None,
+    cerrados: bool | None = None,
 ) -> dict:
     """Alimenta la lista de la pantalla.
 
@@ -599,8 +600,10 @@ async def listar_incidentes(
         limite = config.SCREEN_DEFAULT_LIMIT
     limite = max(1, min(int(limite), _LIMITE_MAXIMO))
 
-    resultado = incidents.listar(desde=desde, hasta=hasta, limite=limite, estado=estado)
-    resultado["filtro"] = {"desde": desde, "hasta": hasta, "limite": limite, "estado": estado}
+    resultado = incidents.listar(desde=desde, hasta=hasta, limite=limite,
+                                 estado=estado, cerrados=cerrados)
+    resultado["filtro"] = {"desde": desde, "hasta": hasta, "limite": limite,
+                           "estado": estado, "cerrados": cerrados}
     # 'total' se conserva por compatibilidad con lo que ya consumía este
     # endpoint; es el número de los que se devuelven.
     resultado["total"] = resultado["mostrados"]
