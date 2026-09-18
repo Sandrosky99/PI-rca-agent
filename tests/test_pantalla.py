@@ -240,12 +240,19 @@ print("\n=== 8e. El filtro por estado ===")
 check("hay botonera de filtros", 'id="filtros"' in html)
 check("las opciones salen de los estados que devuelve el servidor",
       "Object.keys(cuentas)" in html)
-# Si el estado filtrado desaparece (termina el ultimo 'procesando'), volver a
-# Todos en vez de dejar una lista vacia sin explicacion. Se hace al refrescar y
-# no al pintar: al pintar dejaba en pantalla una lista traida con el filtro
-# viejo. El 'reintento' corta cualquier posibilidad de bucle.
-check("se recupera si el estado filtrado desaparece",
-      "!(datos.recuento || {})[filtro]" in html and "reintento: true" in html)
+# Si la opcion filtrada desaparece (termina el ultimo 'procesando', o se cambia
+# de pestaña), volver a Todos en vez de dejar una lista vacia sin explicacion.
+# Se hace al refrescar y no al pintar: al pintar dejaba en pantalla una lista
+# traida con el filtro viejo. El 'reintento' corta cualquier posibilidad de
+# bucle.
+#
+# La comprobacion mira el recuento de la pestaña ACTUAL, no siempre
+# 'datos.recuento': eso fue un fallo real (2026-09-18) -- comparaba el filtro de
+# Cerrados contra las claves de Activos, que nunca coinciden, asi que todo
+# filtro en Cerrados se autoanulaba antes de pintarse. Ver test_revision.py,
+# seccion 17e bis, para la reproduccion del fallo.
+check("se recupera si la opcion filtrada desaparece",
+      "!cuentasPestanaActual[filtro]" in html and "reintento: true" in html)
 check("limpia el detalle cuando no hay seleccion", "Selecciona un incidente" in html)
 
 print("\n=== 8c. El prompt del Step 6 pide el esquema nuevo ===")
@@ -276,15 +283,19 @@ def _sello(horas_atras):
 def _envejecer(registro, horas, movimiento=False):
     """Retrasa el incidente en disco.
 
-    'recibido_en' es por donde filtra el periodo. 'actualizado_en' es el ultimo
-    movimiento, que es lo que mira el reloj de 12 h para cerrarlo; se retrasa
-    solo cuando la prueba quiere un incidente CERRADO, no solo antiguo.
+    'recibido_en' es por donde filtra el periodo.
+
+    'movimiento_workflow' es lo que mira el reloj de 12 h para cerrarlo: la
+    ultima vez que el WORKFLOW lo movio, no la ultima escritura de cualquiera.
+    Se retrasa solo cuando la prueba quiere un incidente CERRADO, no solo
+    antiguo. Se toca tambien 'actualizado_en' para que el fichero sea coherente.
     """
     f = TMP / "inc" / f"{registro['id']}.json"
     d = json.loads(f.read_text(encoding="utf-8"))
     d["recibido_en"] = _sello(horas)
     if movimiento:
         d["actualizado_en"] = _sello(horas)
+        d["movimiento_workflow"] = _sello(horas)
     f.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
 
 for h in (1, 5, 30, 200):
@@ -368,6 +379,24 @@ for estado_pedido, cuenta in recortado["recuento"].items():
     check(f"la pastilla '{estado_pedido}' dice lo que saldria al pulsarla",
           cuenta == real, f"dice {cuenta}, salen {real}")
 check("la pantalla usa el recuento del servidor", "datos.recuento" in html)
+
+print("\n=== 8m bis. Pasada una semana se da la fecha, no 'hace 92 dias' ===")
+# No es por coste -- son tres restas por fila sobre una lista ya recortada a 500
+# como mucho --, es porque "hace 92 dias 7 h" obliga a hacer la cuenta al reves
+# para saber de que dia habla. Lo relativo sirve mientras el suceso siga en la
+# cabeza de quien lee; a partir de ahi, la fecha.
+check("hay un umbral declarado", "DIAS_EN_RELATIVO" in html)
+check("y por encima se formatea como fecha", "toLocaleDateString" in html)
+# El año solo cuando no es el actual: repetirlo en todas las filas es ruido.
+check("el año solo si no es el actual", "esteAno" in html)
+
+print("\n=== 8m ter. Sin comentarios de Python dentro del JavaScript ===")
+# Una linea que empiece por '#' dentro del <script> es un error de sintaxis que
+# deja la pagina EN BLANCO, sin nada en el log del servidor que lo explique. Se
+# colo uno el 2026-09-15 al editar; esto lo caza en el sitio.
+_js = html[html.index("<script>") + 8:html.rindex("</script>")]
+_malas = [l.strip()[:60] for l in _js.splitlines() if l.strip().startswith("#")]
+check("ninguna linea del script empieza por '#'", not _malas, _malas)
 
 print("\n=== 8m. La pantalla trae los controles de rango ===")
 check("selector de periodo", 'id="periodo"' in html)

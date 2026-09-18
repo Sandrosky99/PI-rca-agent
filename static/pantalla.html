@@ -154,6 +154,13 @@
   .fila .act{font-weight:600; font-size:15px}
   .fila .sub{font-size:13px; color:var(--texto-2); margin-top:2px}
   .fila .pie{display:flex; gap:10px; align-items:center; margin-top:7px}
+  /* La fila esta ahi porque la tienes abierta, no porque cumpla el filtro, y la
+     pantalla lo dice: una lista que enseña algo que no cumple su propia consulta
+     sin explicarlo es una lista que miente. */
+  .fila .fuera-filtro{
+    margin-top:7px; font-size:11.5px; line-height:1.35; color:var(--acento);
+    border-left:2px solid var(--acento); padding-left:8px;
+  }
 
   /* ---- detalle ---- */
   .detalle{padding:22px 28px; overflow-y:auto; min-height:0}
@@ -376,6 +383,16 @@ let rango = {horas: null, desde: "", hasta: "", limite: null};
 let formAbierto = null;
 let errorForm = "";
 
+// Id del incidente que se mantiene en la lista aunque haya dejado de cumplir el
+// filtro, porque fue una accion del propio operario la que lo saco. Se pone al
+// dar un veredicto y se suelta al tocar cualquier filtro.
+let fijado = null;
+
+// Suelta el incidente fijado. Se llama desde TODOS los controles que cambian la
+// consulta -- pestaña, periodo, maximo, fechas y pastillas de estado --, porque
+// tocar cualquiera de ellos es decir "enseñame otra cosa".
+function soltarFijado(){ fijado = null; }
+
 // false = pestaña de activos; true = la de cerrados.
 let verCerrados = false;
 
@@ -399,7 +416,11 @@ const PERIODOS = [
 const ESTADOS = {
   recibido:    "en cola",
   analizando:  "procesando",
-  finalizado:  "listo",
+  // "listo" solo decia que el analisis habia terminado, y quien lo leia no
+  // sacaba de ahi que se esperase algo de el. "Pendiente de revisar" dice lo
+  // mismo y ademas dice a quien le toca -- que es lo unico que puede hacer que
+  // alguien pulse un boton en vez de irse.
+  finalizado:  "pendiente de revisar",
   fallido:     "fallo del análisis",
   interrumpido:"interrumpido",
   pausado:     "en pausa",
@@ -425,6 +446,15 @@ function hora(iso){
 
 // Cuanto lleva pasando es mas util que a que hora empezo: el operario quiere
 // saber si esto es de hace diez minutos o de ayer, no hacer la resta.
+// Pasada una semana se deja de contar hacia atras y se da la fecha.
+//
+// No es por coste: esto son tres restas por fila sobre una lista ya recortada a
+// 500 como mucho, y pintar esas filas cuesta cien veces mas. Es porque "hace 92
+// dias 7 h" no le sirve a nadie -- hay que hacer la cuenta mental al reves para
+// saber de que dia habla. Lo relativo es util mientras el suceso siga en la
+// cabeza de quien lee; a partir de ahi, la fecha.
+const DIAS_EN_RELATIVO = 7;
+
 function desde(iso){
   const d = fecha(iso);
   if(!d) return "";
@@ -435,6 +465,14 @@ function desde(iso){
   const h = Math.floor(min / 60);
   if(h < 24)   return `hace ${h} h${min % 60 ? ` ${min % 60} min` : ""}`;
   const dias = Math.floor(h / 24);
+  if(dias > DIAS_EN_RELATIVO){
+    // Con año solo cuando no es el actual: el "de 2026" repetido en todas las
+    // filas es ruido, y el año importa justo cuando NO es el que se da por hecho.
+    const esteAno = d.getFullYear() === new Date().getFullYear();
+    return d.toLocaleDateString("es-ES", {day: "numeric", month: "short",
+      ...(esteAno ? {} : {year: "numeric"})})
+      + " · " + d.toLocaleTimeString("es-ES", {hour: "2-digit", minute: "2-digit"});
+  }
   return `hace ${dias} día${dias === 1 ? "" : "s"}${h % 24 ? ` ${h % 24} h` : ""}`;
 }
 
@@ -478,6 +516,22 @@ function chip(estado){
        + `${esc(ESTADOS[estado] || estado)}</span>`;
 }
 
+// La marca que resume un incidente, en la lista y en el detalle.
+//
+// Si esta cerrado manda el CIERRE, no el estado del workflow: el cierre es
+// posterior y dice mas. "Listo" solo cuenta que el analisis termino; "causa no
+// determinada" cuenta en que acabo, que es lo que alguien quiere saber al abrir
+// un expediente cerrado.
+//
+// Mientras sigue activo manda el estado: el cierre que se deduce ahi es
+// provisional -- puede cambiar en cuanto alguien toque algo -- y presentarlo
+// como si fuera un hecho seria adelantar una conclusion que no esta tomada.
+function chipEstado(x){
+  return x.cerrado && x.cierre
+    ? `<span class="chip c-${esc(x.cierre)}">${esc(CIERRES[x.cierre] || x.cierre)}</span>`
+    : chip(x.estado);
+}
+
 async function pedir(url){
   const r = await fetch(url, {cache:"no-store"});
   if(!r.ok) throw new Error(r.status);
@@ -493,6 +547,7 @@ function pintarPestanas(cuentas){
   cont.querySelectorAll(".pestana").forEach(b => b.onclick = () => {
     if((b.dataset.cerrados === "true") === verCerrados) return;
     verCerrados = b.dataset.cerrados === "true";
+    soltarFijado();
     // Al cambiar de mundo no se arrastra nada del anterior: ni el filtro de
     // estado, ni la seleccion, ni un formulario a medio escribir sobre un
     // incidente que ya no se ve.
@@ -521,6 +576,7 @@ function pintarRango(){
   document.getElementById("periodo").onchange = (e) => {
     rango.horas = e.target.value;
     if(rango.horas !== "x"){ rango.desde = ""; rango.hasta = ""; }
+    soltarFijado();
     refrescar();
   };
   // Se acota tambien aqui, ademas de en el servidor: asi la casilla corrige lo
@@ -530,11 +586,12 @@ function pintarRango(){
     const n = Number(e.target.value);
     rango.limite = Number.isFinite(n) ? Math.max(1, Math.min(Math.round(n), 500)) : 50;
     e.target.value = rango.limite;
+    soltarFijado();
     refrescar();
   };
   ["desde","hasta"].forEach(id => {
     const el = document.getElementById(id);
-    if(el) el.onchange = (e) => { rango[id] = e.target.value; refrescar(); };
+    if(el) el.onchange = (e) => { rango[id] = e.target.value; soltarFijado(); refrescar(); };
   });
 }
 
@@ -551,11 +608,14 @@ function parametros(){
   }
   if(rango.limite) p.set("limite", rango.limite);
   p.set("cerrados", verCerrados);
-  // El estado va al SERVIDOR, no se filtra aqui. Si se filtrase en el navegador,
-  // el limite se habria aplicado antes y estaria recortando sobre el conjunto
-  // equivocado: con "listo" y maximo 2 podian salir cero, porque el servidor
-  // mandaba los 2 mas recientes de TODOS y aqui se descartaban.
-  if(filtro) p.set("estado", filtro);
+  // El filtro va al SERVIDOR, no se aplica aqui. Si se aplicase en el navegador,
+  // el limite ya habria recortado sobre el conjunto equivocado: con un filtro
+  // puesto y maximo 2 podian salir cero, porque el servidor mandaba los 2 mas
+  // recientes de TODOS y aqui se descartaban.
+  //
+  // Y va por el parametro que corresponde a la pestaña: en activos se filtra
+  // por estado del workflow; en cerrados, por etiqueta de cierre.
+  if(filtro) p.set(verCerrados ? "cierre" : "estado", filtro);
   return p.toString() ? "?" + p.toString() : "";
 }
 
@@ -564,25 +624,69 @@ function pintarFiltros(datos){
   // recortar por el maximo. Contarlas aqui sobre la lista recibida daria
   // numeros falsos en cuanto el limite recortase algo.
   //
-  // Solo se ofrecen los estados que hay ahora mismo. Una botonera fija con seis
-  // opciones de las que la mitad dan cero es ruido.
-  const cuentas = datos.recuento || {};
+  // Y cada pestaña filtra por lo SUYO. En activos importa el estado del
+  // workflow -- en cola, procesando, pendiente de revisar -- porque dice que
+  // esta haciendo el sistema con la alerta. En cerrados importa COMO acabo:
+  // filtrar alli por 'finalizado' no distinguiria nada, porque lo son casi
+  // todos. Son dos preguntas distintas y necesitan dos botoneras distintas.
+  //
+  // Solo se ofrecen las opciones que hay ahora mismo. Una botonera fija de la
+  // que la mitad de los botones dan cero es ruido.
+  const cuentas = (verCerrados ? datos.recuentoCierre : datos.recuento) || {};
+  const nombres = verCerrados ? CIERRES : ESTADOS;
   const opciones = [["", "Todos", datos.recuentoSinFiltro]].concat(
-    Object.keys(cuentas).sort().map(e => [e, ESTADOS[e] || e, cuentas[e]]));
+    Object.keys(cuentas).sort().map(e => [e, nombres[e] || e, cuentas[e]]));
 
   const cont = document.getElementById("filtros");
   cont.innerHTML = opciones.map(([valor, etiqueta, n]) =>
     `<button class="filtro" data-estado="${esc(valor)}" aria-pressed="${valor===filtro}">`
     + `${esc(etiqueta)}<span class="cuenta">${n}</span></button>`).join("");
   cont.querySelectorAll(".filtro").forEach(b =>
-    b.onclick = () => { filtro = b.dataset.estado; refrescar(); });
+    b.onclick = () => { filtro = b.dataset.estado; soltarFijado(); refrescar(); });
+}
+
+// Por que no hay nada que enseñar.
+//
+// "Sin incidentes registrados" era mentira en el caso mas frecuente: SI los
+// hay, pero fuera del periodo. Decirle a alguien que no existe nada cuando lo
+// que pasa es que su filtro no lo alcanza es la pantalla mintiendo, y ademas lo
+// deja sin saber que tiene que tocar para verlo.
+function vacioPorque(){
+  if(filtro) return "Ninguno en este estado dentro de este periodo.";
+  const aqui = verCerrados ? "cerrado" : "activo";
+  // Cuantos hay en la otra pestaña NO se dice: la pestaña ya lleva su cuenta.
+  // Repetirlo aqui es ruido, y el unico dato que la pantalla no daba ya era que
+  // el periodo puede estar escondiendolos.
+  if(rango.horas === "0") return `Ninguno ${aqui}.`;
+  return `Ninguno ${aqui} en este periodo. Amplía el periodo para ver más atrás.`;
+}
+
+// Construye una fila de la lista a partir del detalle. Hace falta para el
+// incidente fijado: no viene en la respuesta de /incidentes porque ya no cumple
+// el filtro, pero tiene que seguir viendose.
+function filaDesdeDetalle(d){
+  return {
+    id: d.id, asset: d.asset, kpiName: d.kpi_name,
+    startTime: d.start_time, recibidoEn: d.recibido_en,
+    estado: d.estado, cierre: d.cierre, cerrado: d.cerrado,
+    fueraDelFiltro: true,
+  };
+}
+
+// En su sitio por fecha, no arriba del todo: la lista va ordenada por cuando se
+// recibio, y moverlo seria un salto visual mas encima del que acaba de dar el
+// estado. El resaltado de "seleccionado" ya lo distingue de sobra.
+function insertarPorFecha(lista, fila){
+  const copia = lista.slice();
+  const i = copia.findIndex(x => (x.recibidoEn || "") < (fila.recibidoEn || ""));
+  copia.splice(i < 0 ? copia.length : i, 0, fila);
+  return copia;
 }
 
 function pintarLista(incidentes){
   const cont = document.getElementById("lista");
   if(!incidentes.length){
-    cont.innerHTML = '<p class="vacio" style="padding:18px">'
-      + (filtro ? "Ninguno en este estado." : "Sin incidentes registrados.") + '</p>';
+    cont.innerHTML = `<p class="vacio" style="padding:18px">${vacioPorque()}</p>`;
     return;
   }
   cont.innerHTML = incidentes.map(i => `
@@ -590,10 +694,9 @@ function pintarLista(incidentes){
       <div class="act">${esc(i.asset)}</div>
       <div class="sub">${esc(i.kpiName)}</div>
       <div class="sub" style="color:var(--tenue)">${esc(desde(i.startTime) || hora(i.startTime))}</div>
-      <div class="pie">${verCerrados && i.cierre
-        ? `<span class="chip c-${esc(i.cierre)}">${esc(CIERRES[i.cierre] || i.cierre)}</span>`
-        : chip(i.estado)}
-        ${i.numCausas ? `<span class="sub">${i.numCausas} causas</span>` : ""}</div>
+      <div class="pie">${chipEstado(i)}</div>
+      ${i.fueraDelFiltro ? `<div class="fuera-filtro">Ya no coincide con el filtro;
+        sigue aquí porque lo tienes abierto</div>` : ""}
     </button>`).join("");
   cont.querySelectorAll(".fila").forEach(b =>
     b.onclick = () => {
@@ -690,6 +793,11 @@ async function enviarVeredicto(iid, cuerpo){
     const cuerpoErr = await r.json().catch(() => ({}));
     throw new Error(cuerpoErr.detail || "No se pudo guardar.");
   }
+  // Un veredicto puede cambiar el estado o el cierre del incidente y sacarlo
+  // del filtro que hay puesto. Se fija para que no desaparezca de debajo de
+  // quien acaba de darlo: los contadores y su etiqueta si se actualizan, pero
+  // el sitio se conserva hasta que se toque un filtro.
+  fijado = iid;
   return r.json();
 }
 
@@ -838,7 +946,7 @@ function pintarDetalle(d){
 
   document.getElementById("detalle").innerHTML = `
     <div class="bloque-cabecera">
-      ${chip(d.estado)}
+      ${chipEstado(d)}
       <h2 class="titulo">${esc(d.asset)}</h2>
       <p class="problema">
         <span class="kpi">${esc(d.kpi_name)}</span> ${esc(direccion(d.threshold_type))}
@@ -865,11 +973,20 @@ async function refrescar({reintento = false, auto = false} = {}){
   try{
     const datos = await pedir("/incidentes" + parametros());
 
-    // Si el estado filtrado ya no existe (termino el ultimo 'procesando'), se
-    // vuelve a Todos y se pide de nuevo. Antes esto se hacia al pintar los
-    // filtros, y dejaba en pantalla una lista traida con el filtro viejo.
+    // Si la opcion filtrada ya no existe (termino el ultimo 'procesando', o se
+    // cambio de pestaña y el valor no tiene sentido en la otra), se vuelve a
+    // Todos y se pide de nuevo. Antes esto se hacia al pintar los filtros, y
+    // dejaba en pantalla una lista traida con el filtro viejo.
+    //
+    // Se mira el recuento de la pestaña ACTUAL -- recuentoCierre en cerrados,
+    // recuento en activos --, nunca solo 'recuento': eso comprobaba el filtro
+    // de cerrados (p.ej. "causa_confirmada") contra las claves de activos
+    // (p.ej. "finalizado"), que nunca coinciden, asi que todo filtro en
+    // Cerrados se autoanulaba antes de que se viera en pantalla.
+    //
     // 'reintento' corta cualquier posibilidad de bucle: como mucho, una vez.
-    if(filtro && !(datos.recuento || {})[filtro] && !reintento){
+    const cuentasPestanaActual = (verCerrados ? datos.recuentoCierre : datos.recuento) || {};
+    if(filtro && !cuentasPestanaActual[filtro] && !reintento){
       filtro = "";
       return refrescar({reintento: true, auto});
     }
@@ -901,9 +1018,27 @@ async function refrescar({reintento = false, auto = false} = {}){
     // descarta nada mas.
     pintarFiltros(datos);                            // puede reajustar 'filtro'
 
-    if(seleccionado && !incidentes.some(i => i.id === seleccionado)) seleccionado = null;
+    // Un incidente FIJADO sigue en la lista aunque haya dejado de cumplir el
+    // filtro. El caso: filtras por "sin veredicto", confirmas una causa, y el
+    // incidente pasa a "causa confirmada" -- deja de cumplir el filtro y la
+    // pantalla te lo quitaba de debajo y te metia en el detalle de otra bomba.
+    // Es castigar al operario por hacer justo lo que se le pedia.
+    //
+    // Los contadores y su estado SI se actualizan: lo unico que se conserva es
+    // su sitio. Y se suelta en cuanto se toca un filtro, que es la forma de
+    // decir "enseñame otra cosa".
+    const visible = incidentes.some(i => i.id === seleccionado);
+    if(seleccionado && !visible && seleccionado !== fijado) seleccionado = null;
     if(!seleccionado && incidentes.length) seleccionado = incidentes[0].id;
-    pintarLista(incidentes);
+
+    let lista = incidentes;
+    if(seleccionado && !visible && seleccionado === fijado){
+      // No viene en la respuesta, asi que su fila se construye del detalle --
+      // que hay que pedir igualmente para el panel central.
+      const det = await pedir("/incidentes/" + encodeURIComponent(seleccionado));
+      lista = insertarPorFecha(incidentes, filaDesdeDetalle(det));
+    }
+    pintarLista(lista);
 
     document.getElementById("resumen").textContent =
       `${datos.mostrados} incidente${datos.mostrados===1?"":"s"}`;

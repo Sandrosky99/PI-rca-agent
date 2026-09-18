@@ -215,7 +215,7 @@ def _resumen(registro: dict) -> dict:
 
 def listar(desde: str | None = None, hasta: str | None = None,
            limite: int | None = None, estado: str | None = None,
-           cerrados: bool | None = None) -> dict:
+           cerrados: bool | None = None, cierre_filtro: str | None = None) -> dict:
     """Resumen de incidentes, del más reciente al más antiguo, acotado.
 
     Sin acotar esto no sirve: no se borra ningún incidente nunca, así que con
@@ -263,17 +263,27 @@ def listar(desde: str | None = None, hasta: str | None = None,
     if cerrados is not None:
         resumenes = [r for r in resumenes if bool(r.get("cerrado")) == cerrados]
 
-    # Recuento por estado ANTES de filtrar por estado y de recortar. Es lo que
-    # alimenta las pastillas, y cada una dice exactamente lo que saldría al
-    # pulsarla.
+    # Los dos recuentos, ANTES de filtrar y de recortar, para que cada pastilla
+    # diga exactamente lo que saldría al pulsarla.
+    #
+    # Se cuentan las dos dimensiones porque las pestañas no filtran por lo
+    # mismo: en activos importa el estado del workflow -- en cola, procesando,
+    # listo -- y en cerrados importa CÓMO acabó, que es otra cosa. Filtrar un
+    # cerrado por 'finalizado' no distinguiría nada: lo son casi todos.
     recuento: dict[str, int] = {}
+    recuento_cierre: dict[str, int] = {}
     for r in resumenes:
         e = r.get("estado", "desconocido")
         recuento[e] = recuento.get(e, 0) + 1
+        c = r.get("cierre")
+        if c:
+            recuento_cierre[c] = recuento_cierre.get(c, 0) + 1
     recuento_sin_filtro = len(resumenes)
 
     if estado:
         resumenes = [r for r in resumenes if r.get("estado") == estado]
+    if cierre_filtro:
+        resumenes = [r for r in resumenes if r.get("cierre") == cierre_filtro]
 
     resumenes.sort(key=lambda r: r.get("recibidoEn") or "", reverse=True)
 
@@ -291,6 +301,7 @@ def listar(desde: str | None = None, hasta: str | None = None,
         "coincidentes": coincidentes,
         "truncado": coincidentes > len(resumenes),
         "recuento": recuento,
+        "recuentoCierre": recuento_cierre,
         "recuentoSinFiltro": recuento_sin_filtro,
         "pestanas": cuentas_pestanas,
     }
@@ -561,7 +572,16 @@ def mark(incidente_id: str, estado: str, diagnostico: dict | None = None,
     observability.audit(
         "incident.mark", {"incidentId": incidente_id, "estado": estado},
     )
-    cambios: dict = {"estado": estado}
+    # Marca de tiempo propia del workflow, separada de 'actualizado_en' -- que
+    # es "última modificación de cualquiera" y la pisan los dos escritores.
+    #
+    # Hace falta para el reloj de las 12 h: sin ella no se puede distinguir un
+    # movimiento del sistema de un clic de una persona, y cualquier veredicto
+    # rejuvenecía un incidente de hace tres días. Ver _anclaje_reloj().
+    cambios: dict = {
+        "estado": estado,
+        "movimiento_workflow": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
     if motivo:
         cambios["motivo"] = motivo
     if diagnostico is not None:
@@ -740,6 +760,48 @@ def cierre(registro: dict) -> tuple[str | None, bool]:
     return SIN_VEREDICTO, False
 
 
+def _anclaje_reloj(registro: dict) -> str:
+    """Desde cuándo cuentan las 12 h: el último TRABAJO que sigue en pie.
+
+    No es "la última vez que se tocó el fichero", que era lo que se miraba antes
+    y producía esto: un incidente cerrado hace tres días, alguien confirmaba una
+    causa por error, la deshacía, y el incidente reaparecía en Activos como
+    recién llegado. Deshacer no es trabajo -- es una corrección --, así que no
+    debe rejuvenecer nada.
+
+    Se toma el más tardío entre:
+
+      - el último movimiento del WORKFLOW (analizar, fallar, pausar), y
+      - la fecha del último veredicto de cada causa que NO sea 'pendiente'.
+
+    Un apunte 'pendiente' es un deshacer: no aporta fecha, así que al deshacer
+    el reloj RETROCEDE solo hasta el último trabajo real que quede vigente. Si
+    no queda ninguno, hasta el movimiento del workflow.
+
+    Se calcula y no se guarda: los hechos ya están en la lista de veredictos, y
+    un segundo sitio del que fiarse es un sitio que puede discrepar del primero.
+    """
+    # Para los incidentes anteriores al 2026-09-18, que no tienen el campo
+    # propio del workflow, se recurre a 'recibido_en' y NUNCA a
+    # 'actualizado_en'.
+    #
+    # Parece el respaldo natural y es justo el equivocado: 'actualizado_en' lo
+    # pisa cada escritura, así que en un incidente antiguo el primer veredicto
+    # lo ponía a "ahora" y el fallback lo daba por recién llegado -- exactamente
+    # el fallo que este anclaje venía a arreglar, colado por la puerta de atrás.
+    # 'recibido_en' se escribe una vez y no se vuelve a tocar.
+    anclaje = registro.get("movimiento_workflow") or registro.get("recibido_en") or ""
+
+    ultimo_por_causa: dict[int, dict] = {}
+    for v in (registro.get("revision") or {}).get("veredictos", []):
+        if isinstance(v.get("causa"), int):
+            ultimo_por_causa[v["causa"]] = v
+    for v in ultimo_por_causa.values():
+        if v.get("veredicto") != PENDIENTE:
+            anclaje = max(anclaje, v.get("en") or "")
+    return anclaje
+
+
 def esta_cerrado(registro: dict, ahora: datetime | None = None) -> bool:
     """Si el incidente ya no pide atención: por respuesta terminal o por reloj."""
     etiqueta, terminal = cierre(registro)
@@ -754,7 +816,7 @@ def esta_cerrado(registro: dict, ahora: datetime | None = None) -> bool:
         return registro.get("estado") == PAUSADO
     ahora = ahora or datetime.now(timezone.utc)
     limite = (ahora - timedelta(hours=HORAS_EN_ACTIVOS)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return (registro.get("actualizado_en") or "") < limite
+    return _anclaje_reloj(registro) < limite
 
 
 def registrar_reclasificacion(incidente_id: str, reclasificacion: str | None) -> dict:

@@ -574,6 +574,7 @@ async def listar_incidentes(
     estado: str | None = None,
     horas: int | None = None,
     cerrados: bool | None = None,
+    cierre: str | None = None,
 ) -> dict:
     """Alimenta la lista de la pantalla.
 
@@ -601,9 +602,10 @@ async def listar_incidentes(
     limite = max(1, min(int(limite), _LIMITE_MAXIMO))
 
     resultado = incidents.listar(desde=desde, hasta=hasta, limite=limite,
-                                 estado=estado, cerrados=cerrados)
+                                 estado=estado, cerrados=cerrados,
+                                 cierre_filtro=cierre)
     resultado["filtro"] = {"desde": desde, "hasta": hasta, "limite": limite,
-                           "estado": estado, "cerrados": cerrados}
+                           "estado": estado, "cerrados": cerrados, "cierre": cierre}
     # 'total' se conserva por compatibilidad con lo que ya consumía este
     # endpoint; es el número de los que se devuelven.
     resultado["total"] = resultado["mostrados"]
@@ -611,13 +613,18 @@ async def listar_incidentes(
 
 
 def _con_estado_de_causas(registro: dict) -> dict:
-    """Añade el estado actual de cada causa, que se calcula y no se guarda.
+    """Añade lo que se calcula y no se guarda: el estado de cada causa y el cierre.
 
     Va aquí y no en el fichero porque los veredictos son una lista de solo
-    añadir: el estado de una causa es el de su último apunte. Guardarlo sería un
-    segundo sitio del que fiarse, y los dos pueden desincronizarse.
+    añadir: el estado de una causa es el de su último apunte, y el cierre es su
+    consecuencia. Guardarlos sería un segundo sitio del que fiarse, y los dos
+    pueden desincronizarse.
     """
-    return dict(registro, estadoCausas=incidents.estado_de_causas(registro))
+    etiqueta, _ = incidents.cierre(registro)
+    return dict(registro,
+                estadoCausas=incidents.estado_de_causas(registro),
+                cierre=etiqueta,
+                cerrado=incidents.esta_cerrado(registro))
 
 
 @app.get(

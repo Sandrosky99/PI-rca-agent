@@ -319,6 +319,232 @@ check("la descartada se rodea de rojo", ".causa.descartada{border-color:var(--ma
 # quien tiene que leerla.
 check("sin atenuar el bloque entero", ".causa.descartada{opacity" not in html)
 
+print("\n=== 17c. Una lista vacia dice POR QUE esta vacia ===")
+# "Sin incidentes registrados" era mentira en el caso mas frecuente: SI los hay,
+# pero fuera del periodo. Y ademas dejaba a quien mira sin saber que tocar.
+# Paso de verdad el 2026-09-15 al arrancar el servicio: el unico incidente real
+# era de hacia ocho dias y el periodo por defecto son 24 h.
+check("distingue 'no hay' de 'no hay AQUI'", "vacioPorque" in html)
+check("dice que amplie el periodo", "Amplía el periodo" in html)
+# NO repite cuantos hay en la otra pestaña: la pestaña ya lleva su cuenta, y el
+# unico dato que la pantalla no daba ya era que el periodo puede esconderlos.
+check("sin repetir la cuenta de la otra pestaña", "Hay ${enLaOtra}" not in html)
+check("con el periodo en Todo no aconseja ampliarlo",
+      'if(rango.horas === "0") return `Ninguno ${aqui}.`' in html)
+
+print("\n=== 17d. En un cerrado manda el CIERRE, no el estado del workflow ===")
+# "Listo" solo cuenta que el analisis termino. "Causa no determinada" cuenta en
+# QUE acabo, que es posterior y es lo que alguien quiere saber al abrir un
+# expediente cerrado. Mientras sigue activo manda el estado, porque el cierre
+# que se deduce ahi es provisional y presentarlo como un hecho seria adelantar
+# una conclusion que no esta tomada.
+d_cerrado = CLIENTE.get(f"/incidentes/{iid8}").json()   # el de todas descartadas
+check("el detalle trae si esta cerrado", d_cerrado.get("cerrado") is True)
+check("y con que etiqueta", d_cerrado.get("cierre") == incidents.CAUSA_NO_DETERMINADA,
+      d_cerrado.get("cierre"))
+d_activo = CLIENTE.get(f"/incidentes/{iid9}").json()    # el parcial, sigue activo
+check("un activo no se marca como cerrado", d_activo.get("cerrado") is False)
+check("la pantalla elige una u otra en un solo sitio", "function chipEstado" in html)
+check("y la usan lista y detalle", html.count("chipEstado(") >= 3, html.count("chipEstado("))
+
+print("\n=== 17e. Cada pestaña filtra por lo SUYO ===")
+# En activos importa el estado del workflow -- en cola, procesando, pendiente de
+# revisar -- porque dice que esta haciendo el sistema. En cerrados importa COMO
+# acabo: filtrar alli por 'finalizado' no distinguiria nada, porque lo son casi
+# todos. Son dos preguntas distintas y necesitan dos botoneras distintas.
+cer = lista("&cerrados=true")
+act = lista("&cerrados=false")
+check("el servidor cuenta las dos dimensiones",
+      "recuento" in cer and "recuentoCierre" in cer, list(cer))
+check("en cerrados hay cuentas por etiqueta de cierre",
+      incidents.CAUSA_CONFIRMADA in cer["recuentoCierre"], cer["recuentoCierre"])
+# Y se puede filtrar por ellas.
+solo = lista("&cerrados=true&cierre=causa_confirmada")
+check("filtrar por 'causa confirmada' devuelve solo esos",
+      solo["mostrados"] > 0 and all(i["cierre"] == incidents.CAUSA_CONFIRMADA
+                                     for i in solo["incidentes"]),
+      [i["cierre"] for i in solo["incidentes"]])
+check("y cuadra con lo que decia la pastilla",
+      solo["mostrados"] == cer["recuentoCierre"][incidents.CAUSA_CONFIRMADA])
+check("la pantalla elige la botonera segun la pestaña",
+      "verCerrados ? datos.recuentoCierre : datos.recuento" in html)
+check("y manda el parametro que toca",
+      'p.set(verCerrados ? "cierre" : "estado", filtro)' in html)
+
+print("\n=== 17e bis. EL FALLO: el filtro de Cerrados se autoanulaba ===")
+# refrescar() comprueba si la opcion filtrada sigue existiendo y, si no, vuelve
+# a "Todos". Esa comprobacion miraba SIEMPRE datos.recuento (las claves de
+# activos: 'finalizado', 'fallido'...), nunca datos.recuentoCierre. Al pulsar
+# una pastilla de Cerrados -- p.ej. "causa_confirmada" -- esa clave no existe en
+# 'recuento', la comprobacion daba falso positivo de "ya no existe" y el propio
+# refrescar() deshacia el filtro antes de que llegase a pintarse: el clic no
+# tenia ningun efecto visible.
+check("la comprobacion de reintento no usa SIEMPRE 'datos.recuento'",
+      "!(datos.recuento || {})[filtro]" not in html)
+check("usa el recuento de la pestaña actual",
+      "cuentasPestanaActual" in html and
+      "(verCerrados ? datos.recuentoCierre : datos.recuento) || {}" in html)
+check("y la comparacion se hace contra esa variable",
+      "!cuentasPestanaActual[filtro]" in html)
+
+print("\n=== 17d bis. DESHACER devuelve el incidente a donde estaba ===")
+# El reloj de las 12 h contaba desde "la ultima vez que se toco el fichero", asi
+# que cualquier clic rejuvenecia el incidente: uno cerrado hacia tres dias
+# reaparecia en Activos porque alguien confirmo una causa por error y la
+# deshizo. Deshacer no es trabajo, es una correccion, y no debe rejuvenecer
+# nada.
+#
+# Ahora el reloj cuenta desde el ultimo TRABAJO QUE SIGUE EN PIE: el movimiento
+# del workflow, o el veredicto mas reciente de cada causa que no sea
+# 'pendiente'. Un 'pendiente' es un deshacer y no aporta fecha, asi que el reloj
+# retrocede solo.
+import datetime as _dt
+
+def _envejecer_workflow(iid, horas):
+    """Simula que el workflow lo movio hace N horas y nadie lo toco despues."""
+    f = TMP / "inc" / f"{iid}.json"
+    d = json.loads(f.read_text(encoding="utf-8"))
+    viejo = (_dt.datetime.now(_dt.timezone.utc)
+             - _dt.timedelta(hours=horas)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    d["movimiento_workflow"] = viejo
+    d["actualizado_en"] = viejo
+    f.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+
+def _cierre_de(iid):
+    r = incidents.leer_por_id(iid)
+    return incidents.cierre(r)[0], incidents.esta_cerrado(r)
+
+# --- Caso 1: estaba ACTIVO. Confirmar y deshacer lo deja activo. ---
+act = sembrar()
+check("parte de activo, sin veredicto", _cierre_de(act) == (incidents.SIN_VEREDICTO, False))
+veredicto(act, causa=0, veredicto="confirmada")
+check("confirmar lo cierra", _cierre_de(act) == (incidents.CAUSA_CONFIRMADA, True))
+veredicto(act, causa=0, veredicto="pendiente")
+check("deshacer lo devuelve a ACTIVO, no lo deja cerrado",
+      _cierre_de(act) == (incidents.SIN_VEREDICTO, False), _cierre_de(act))
+
+# --- Caso 2: estaba SIN VEREDICTO (viejo). Debe volver a estarlo. ---
+viejo = sembrar()
+_envejecer_workflow(viejo, incidents.HORAS_EN_ACTIVOS + 6)
+check("parte de cerrado por reloj", _cierre_de(viejo) == (incidents.SIN_VEREDICTO, True))
+veredicto(viejo, causa=0, veredicto="confirmada")
+check("confirmar lo cierra como confirmada", _cierre_de(viejo)[0] == incidents.CAUSA_CONFIRMADA)
+veredicto(viejo, causa=0, veredicto="pendiente")
+check("y al deshacer NO reaparece en activos",
+      _cierre_de(viejo) == (incidents.SIN_VEREDICTO, True), _cierre_de(viejo))
+
+# --- Caso 3: revisado parcialmente con DOS descartadas, se deshace una. ---
+dos = sembrar()
+veredicto(dos, causa=0, veredicto="descartada", evidencia="Esta no.")
+veredicto(dos, causa=1, veredicto="descartada", evidencia="Esta tampoco.")
+check("dos descartadas: revisado parcialmente",
+      _cierre_de(dos)[0] == incidents.REVISADO_PARCIALMENTE)
+veredicto(dos, causa=0, veredicto="pendiente")
+check("al deshacer una, SIGUE revisado parcialmente",
+      _cierre_de(dos)[0] == incidents.REVISADO_PARCIALMENTE, _cierre_de(dos))
+
+# --- Caso 4: una sola descartada en un incidente VIEJO, se deshace. ---
+una = sembrar()
+_envejecer_workflow(una, incidents.HORAS_EN_ACTIVOS + 6)
+veredicto(una, causa=0, veredicto="descartada", evidencia="No es esta.")
+check("con una descartada: revisado parcialmente y ACTIVO (hubo trabajo real)",
+      _cierre_de(una) == (incidents.REVISADO_PARCIALMENTE, False), _cierre_de(una))
+veredicto(una, causa=0, veredicto="pendiente")
+check("al deshacerla vuelve a SIN VEREDICTO y cerrado",
+      _cierre_de(una) == (incidents.SIN_VEREDICTO, True), _cierre_de(una))
+
+# --- Caso 5: causa no determinada, se deshace una: pasa por parcial. ---
+todas = sembrar()
+for n in range(3):
+    veredicto(todas, causa=n, veredicto="descartada", evidencia=f"La {n} no es.")
+check("todas descartadas: causa no determinada",
+      _cierre_de(todas)[0] == incidents.CAUSA_NO_DETERMINADA)
+veredicto(todas, causa=2, veredicto="pendiente")
+check("al deshacer una pasa por revisado parcialmente",
+      _cierre_de(todas)[0] == incidents.REVISADO_PARCIALMENTE, _cierre_de(todas))
+
+print("\n=== 17d bis-2. Un incidente ANTIGUO, sin el campo nuevo, tampoco rejuvenece ===")
+# Los incidentes anteriores al 2026-09-18 -- incluidos los dos reales que hay en
+# produccion -- no tienen 'movimiento_workflow'. El respaldo NO puede ser
+# 'actualizado_en', que lo pisa cada escritura: con el, el primer veredicto lo
+# ponia a "ahora" y el incidente se daba por recien llegado, que es justo el
+# fallo que el anclaje venia a arreglar. Se recurre a 'recibido_en', que se
+# escribe una vez y no se vuelve a tocar.
+#
+# Lo destapo una prueba en vivo contra los fixtures, que tampoco llevan el campo:
+# las pruebas de arriba no lo cogieron porque sembrar() usa mark(), que si lo
+# escribe.
+legado = sembrar()
+_f = TMP / "inc" / f"{legado}.json"
+_d = json.loads(_f.read_text(encoding="utf-8"))
+_viejo = (_dt.datetime.now(_dt.timezone.utc)
+          - _dt.timedelta(hours=incidents.HORAS_EN_ACTIVOS + 6)).strftime("%Y-%m-%dT%H:%M:%SZ")
+_d.pop("movimiento_workflow", None)          # como un incidente de antes
+_d["recibido_en"] = _viejo
+_d["actualizado_en"] = _viejo
+_f.write_text(json.dumps(_d, ensure_ascii=False), encoding="utf-8")
+
+check("sin el campo nuevo, se le da por cerrado igual",
+      _cierre_de(legado) == (incidents.SIN_VEREDICTO, True), _cierre_de(legado))
+veredicto(legado, causa=0, veredicto="confirmada")
+veredicto(legado, causa=0, veredicto="pendiente")
+check("y al confirmar y deshacer NO reaparece en activos",
+      _cierre_de(legado) == (incidents.SIN_VEREDICTO, True), _cierre_de(legado))
+check("el respaldo es 'recibido_en', nunca 'actualizado_en'",
+      'registro.get("movimiento_workflow") or registro.get("recibido_en")'
+      in Path(RAIZ / "incidents.py").read_text(encoding="utf-8"))
+
+print("\n=== 17d ter. El anclaje se CALCULA, no se guarda ===")
+# El bool "ha pasado por sin veredicto" se descarto por dos motivos: nada existe
+# para ponerlo -- no hay barrendero ni temporizador, el cierre se deduce
+# precisamente para que no haya que ejecutar nada -- y seria estado derivado
+# guardado, que es lo que se quito al eliminar 'finalizado_en'.
+reg = incidents.leer_por_id(dos)
+check("no hay un campo de cierre guardado", "cierre" not in reg and "cerrado" not in reg, list(reg))
+check("ni un bool de 'ya estuvo cerrado'",
+      not any("sin_veredicto" in k or "estuvo" in k for k in reg), list(reg))
+# Lo unico que se guarda es un hecho: cuando movio el workflow este incidente.
+check("solo se guarda el movimiento del workflow", "movimiento_workflow" in reg)
+check("y solo lo escribe mark()",
+      'cambios: dict = {\n        "estado": estado,\n        "movimiento_workflow"'
+      in Path(RAIZ / "incidents.py").read_text(encoding="utf-8"))
+
+print("\n=== 17e ter. Dar un veredicto no te quita el incidente de debajo ===")
+# El caso: filtras por "sin veredicto", confirmas una causa y el incidente pasa a
+# "causa confirmada". Deja de cumplir el filtro, la lista lo expulsaba y te metia
+# en el detalle de OTRA bomba. Es castigar al operario por hacer justo lo que se
+# le pedia -- y encima le deja sin poder deshacer un clic mal dado, porque ya no
+# lo tiene delante.
+check("hay un incidente fijado", "let fijado = null" in html)
+check("un veredicto lo fija", "fijado = iid" in html)
+check("y sobrevive aunque no cumpla el filtro",
+      "seleccionado !== fijado" in html and "seleccionado === fijado" in html)
+# La fila se reconstruye del detalle: no viene en /incidentes porque ya no cumple
+# el filtro, pero tiene que seguir viendose.
+check("su fila se construye del detalle", "filaDesdeDetalle" in html)
+check("y se coloca en su sitio por fecha", "insertarPorFecha" in html)
+# Y la pantalla dice POR QUE sigue ahi: una lista que enseña algo que no cumple
+# su propia consulta sin explicarlo es una lista que miente.
+check("la fila explica por que sigue ahi", "Ya no coincide con el filtro" in html)
+
+print("\n=== 17e quater. Tocar un filtro SI lo suelta ===")
+# Tocar cualquiera de los controles que cambian la consulta es decir "enseñame
+# otra cosa". Si alguno se olvidara, el incidente se quedaria pegado a la lista
+# para siempre.
+check("hay una funcion para soltarlo", "function soltarFijado" in html)
+for control, marca in (("pestaña", 'verCerrados = b.dataset.cerrados === "true";\n    soltarFijado();'),
+                       ("periodo", 'if(rango.horas !== "x"){ rango.desde = ""; rango.hasta = ""; }\n    soltarFijado();'),
+                       ("maximo", "e.target.value = rango.limite;\n    soltarFijado();"),
+                       ("fechas", "rango[id] = e.target.value; soltarFijado();"),
+                       ("pastillas", "filtro = b.dataset.estado; soltarFijado();")):
+    check(f"lo suelta al tocar {control}", marca in html)
+
+print("\n=== 17f. 'Listo' pasa a decir a quien le toca ===")
+# "Listo" solo contaba que el analisis habia terminado, y quien lo leia no
+# sacaba de ahi que se esperase algo de el.
+check("dice 'pendiente de revisar'", "pendiente de revisar" in html)
+check("y ya no dice solo 'listo'", 'finalizado:  "listo"' not in html)
+
 print("\n=== 18. Con una causa confirmada, las demas pierden los botones ===")
 # La pregunta esta contestada: juzgar las otras no aporta nada y solo invita a
 # dejar el expediente en un estado raro. La confirmada conserva su "Deshacer",
