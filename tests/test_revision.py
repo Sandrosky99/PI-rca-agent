@@ -447,8 +447,13 @@ check("al deshacer una, SIGUE revisado parcialmente",
 una = sembrar()
 _envejecer_workflow(una, incidents.HORAS_EN_ACTIVOS + 6)
 veredicto(una, causa=0, veredicto="descartada", evidencia="No es esta.")
-check("con una descartada: revisado parcialmente y ACTIVO (hubo trabajo real)",
-      _cierre_de(una) == (incidents.REVISADO_PARCIALMENTE, False), _cierre_de(una))
+# Revisar en frio un incidente YA CERRADO no lo reabre (2026-09-21). Antes si, y
+# el expediente rebotaba entre las dos pestañas mientras se trabajaba en el.
+# Ademas era un contrasentido: la reclasificacion en frio es lo que rescata el
+# dato de acierto, y resucitar el incidente por hacerla convierte una virtud en
+# un castigo.
+check("con una descartada: revisado parcialmente, y SIGUE cerrado",
+      _cierre_de(una) == (incidents.REVISADO_PARCIALMENTE, True), _cierre_de(una))
 veredicto(una, causa=0, veredicto="pendiente")
 check("al deshacerla vuelve a SIN VEREDICTO y cerrado",
       _cierre_de(una) == (incidents.SIN_VEREDICTO, True), _cierre_de(una))
@@ -494,6 +499,69 @@ check("el respaldo es 'recibido_en', nunca 'actualizado_en'",
       'registro.get("movimiento_workflow") or registro.get("recibido_en")'
       in Path(RAIZ / "incidents.py").read_text(encoding="utf-8"))
 
+print("\n=== 17d bis-3. LA SECUENCIA DEL REBOTE: revisar en frio no reabre ===")
+# Reportado sobre PS20102 A03 PS02 Pump 14 (2026-09-21). Un incidente cerrado
+# como 'sin veredicto' rebotaba entre las dos pestañas a cada clic:
+#
+#   sin veredicto -> descarto una  -> ACTIVOS
+#                 -> descarto todas -> CERRADOS
+#                 -> deshago una    -> ACTIVOS
+#                 -> deshago todas  -> CERRADOS
+#
+# Se trabaja en el expediente y no para de moverse de sitio. Ahora un veredicto
+# solo alarga el reloj si se dio mientras el incidente seguia ABIERTO: los que
+# llegan despues cambian la etiqueta y nada mas.
+seq = sembrar()
+_envejecer_workflow(seq, incidents.HORAS_EN_ACTIVOS + 6)
+pasos = []
+pasos.append(("de partida", _cierre_de(seq)))
+veredicto(seq, causa=0, veredicto="descartada", evidencia="La 0 no es.")
+pasos.append(("descarto una", _cierre_de(seq)))
+for n in (1, 2):
+    veredicto(seq, causa=n, veredicto="descartada", evidencia=f"La {n} tampoco.")
+pasos.append(("descarto todas", _cierre_de(seq)))
+veredicto(seq, causa=2, veredicto="pendiente")
+pasos.append(("deshago una", _cierre_de(seq)))
+for n in (0, 1):
+    veredicto(seq, causa=n, veredicto="pendiente")
+pasos.append(("deshago todas", _cierre_de(seq)))
+
+for nombre, (etiqueta, cerrado) in pasos:
+    print(f"      {nombre:16} -> {etiqueta:22} {'CERRADOS' if cerrado else 'activos'}")
+check("no sale de Cerrados en ningun paso", all(c for _, (_, c) in pasos),
+      [(n, c) for n, (_, c) in pasos])
+check("las etiquetas recorren el camino esperado",
+      [e for _, (e, _) in pasos] == [incidents.SIN_VEREDICTO, incidents.REVISADO_PARCIALMENTE,
+                                     incidents.CAUSA_NO_DETERMINADA, incidents.REVISADO_PARCIALMENTE,
+                                     incidents.SIN_VEREDICTO],
+      [e for _, (e, _) in pasos])
+
+print("\n=== 17d bis-4. Pero un incidente ABIERTO si desliza el reloj ===")
+# Lo de arriba no puede cargarse el deslizamiento: el operario que descarta una
+# causa a las 11 h y vuelve a las 13 h tiene que seguir teniendo su ventana. La
+# cadena sigue viva mientras cada veredicto caiga dentro de la que abrio el
+# anterior.
+abierto = sembrar()
+_envejecer_workflow(abierto, incidents.HORAS_EN_ACTIVOS - 1)   # abierto por poco
+check("parte de abierto", _cierre_de(abierto)[1] is False)
+veredicto(abierto, causa=0, veredicto="descartada", evidencia="Dentro de plazo.")
+check("un veredicto a tiempo lo mantiene abierto y alarga el reloj",
+      _cierre_de(abierto) == (incidents.REVISADO_PARCIALMENTE, False), _cierre_de(abierto))
+# Y el anclaje se ha movido al veredicto, no se ha quedado en el analisis.
+_reg = incidents.leer_por_id(abierto)
+check("el anclaje es la fecha del veredicto",
+      incidents._anclaje_reloj(_reg) == _reg["revision"]["veredictos"][-1]["en"],
+      incidents._anclaje_reloj(_reg))
+
+print("\n=== 17d bis-5. La marca no dice 'pendiente de revisar' si ya se reviso ===")
+# El estado del workflow es 'finalizado' tanto si nadie lo ha tocado como si se
+# descarto una causa, asi que por si solo no distingue nada -- y la fila decia
+# "pendiente de revisar" justo despues de revisarla a medias.
+check("manda el cierre tambien con el incidente abierto",
+      "x.cerrado || hayVeredictos" in html)
+check("salvo cuando no hay veredictos, que ahi 'pendiente de revisar' es exacto",
+      'x.cierre !== "sin_veredicto"' in html)
+
 print("\n=== 17d ter. El anclaje se CALCULA, no se guarda ===")
 # El bool "ha pasado por sin veredicto" se descarto por dos motivos: nada existe
 # para ponerlo -- no hay barrendero ni temporizador, el cierre se deduce
@@ -525,7 +593,23 @@ check("su fila se construye del detalle", "filaDesdeDetalle" in html)
 check("y se coloca en su sitio por fecha", "insertarPorFecha" in html)
 # Y la pantalla dice POR QUE sigue ahi: una lista que enseña algo que no cumple
 # su propia consulta sin explicarlo es una lista que miente.
-check("la fila explica por que sigue ahi", "Ya no coincide con el filtro" in html)
+# La fila dice QUE ha cambiado, y distingue los dos motivos por los que se sale
+# de la lista, porque llevan a acciones distintas:
+#
+#   cambio de pestaña -> quitar el filtro no lo trae de vuelta; hay que ir a la
+#                        otra pestaña. Decir "ya no coincide con el filtro" aqui
+#                        seria ademas FALSO: no ha dejado de cumplir nada, se ha
+#                        mudado.
+#   fuera del filtro  -> quitandolo, reaparece.
+check("distingue los dos motivos", "motivoFijado" in html)
+check("si cambio de pestaña, dice a cual", "Ahora está en ${verCerrados" in html)
+check("si solo salio del filtro, lo dice", '"Ya no coincide con el filtro"' in html)
+# Que sigue ahi porque esta seleccionada lo dice el DISEÑO -- fila resaltada y
+# chincheta --, no el texto: escribir con palabras lo que la forma ya dice es lo
+# que alargaba la fila.
+check("una chincheta marca que esta sujeta", "chincheta" in html)
+check("y el texto no habla en segunda persona",
+      "lo tienes abierto" not in html and "porque lo tienes" not in html)
 
 print("\n=== 17e quater. Tocar un filtro SI lo suelta ===")
 # Tocar cualquiera de los controles que cambian la consulta es decir "enseñame

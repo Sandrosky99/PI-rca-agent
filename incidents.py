@@ -760,6 +760,17 @@ def cierre(registro: dict) -> tuple[str | None, bool]:
     return SIN_VEREDICTO, False
 
 
+def _mas_horas(marca: str, horas: int) -> str:
+    """La marca ISO desplazada N horas, en el mismo formato para comparar."""
+    if not marca:
+        return ""
+    try:
+        base = datetime.strptime(marca, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return ""
+    return (base + timedelta(hours=horas)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _anclaje_reloj(registro: dict) -> str:
     """Desde cuándo cuentan las 12 h: el último TRABAJO que sigue en pie.
 
@@ -796,9 +807,31 @@ def _anclaje_reloj(registro: dict) -> str:
     for v in (registro.get("revision") or {}).get("veredictos", []):
         if isinstance(v.get("causa"), int):
             ultimo_por_causa[v["causa"]] = v
-    for v in ultimo_por_causa.values():
-        if v.get("veredicto") != PENDIENTE:
-            anclaje = max(anclaje, v.get("en") or "")
+
+    # Un veredicto alarga el reloj SOLO si se dio mientras el incidente seguía
+    # abierto. Los que llegan después no lo reabren.
+    #
+    # Sin esta condición pasaba esto: un incidente cerrado hacía tres días,
+    # alguien lo revisaba en frío desde la pestaña de cerrados, y cada clic lo
+    # devolvía a Activos. El expediente rebotaba entre las dos pestañas mientras
+    # se trabajaba en él, que es lo contrario de lo que hace falta.
+    #
+    # Y hay un motivo de fondo: dar un veredicto tarde es justo lo que
+    # queríamos que la gente hiciera -- la reclasificación en frío es lo que
+    # rescata el dato de acierto (§3 del documento de diseño). Resucitar el
+    # incidente por hacerlo convierte una virtud en un castigo.
+    #
+    # Se recorren en orden: mientras cada uno caiga dentro de la ventana que
+    # abre el anterior, la cadena sigue viva y el reloj se desliza. El primero
+    # que llegue fuera la corta, y los posteriores tampoco cuentan.
+    vigentes = sorted(
+        (v for v in ultimo_por_causa.values() if v.get("veredicto") != PENDIENTE),
+        key=lambda v: v.get("en") or "",
+    )
+    for v in vigentes:
+        dado_en = v.get("en") or ""
+        if dado_en and dado_en <= _mas_horas(anclaje, HORAS_EN_ACTIVOS):
+            anclaje = max(anclaje, dado_en)
     return anclaje
 
 

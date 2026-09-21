@@ -154,13 +154,14 @@
   .fila .act{font-weight:600; font-size:15px}
   .fila .sub{font-size:13px; color:var(--texto-2); margin-top:2px}
   .fila .pie{display:flex; gap:10px; align-items:center; margin-top:7px}
-  /* La fila esta ahi porque la tienes abierta, no porque cumpla el filtro, y la
-     pantalla lo dice: una lista que enseña algo que no cumple su propia consulta
-     sin explicarlo es una lista que miente. */
-  .fila .fuera-filtro{
+  /* La fila sigue en la lista porque esta seleccionada, no porque cumpla la
+     consulta. La chincheta lo dice de un vistazo y sin gastar palabras; el
+     texto queda libre para decir solo QUE ha cambiado. */
+  .fila .fijada{
     margin-top:7px; font-size:11.5px; line-height:1.35; color:var(--acento);
-    border-left:2px solid var(--acento); padding-left:8px;
+    display:flex; gap:6px; align-items:baseline;
   }
+  .fila .chincheta{font-size:10.5px; flex:0 0 auto}
 
   /* ---- detalle ---- */
   .detalle{padding:22px 28px; overflow-y:auto; min-height:0}
@@ -527,7 +528,19 @@ function chip(estado){
 // provisional -- puede cambiar en cuanto alguien toque algo -- y presentarlo
 // como si fuera un hecho seria adelantar una conclusion que no esta tomada.
 function chipEstado(x){
-  return x.cerrado && x.cierre
+  // Manda el CIERRE en dos casos: cuando el incidente esta cerrado, y cuando
+  // sigue abierto pero YA HAY VEREDICTOS.
+  //
+  // Lo segundo se olvido al principio y producia una marca falsa: en cuanto
+  // alguien descartaba una causa, la fila seguia diciendo "pendiente de
+  // revisar" -- que afirma que nadie lo ha tocado, cuando acababan de
+  // revisarlo a medias. El estado del workflow es 'finalizado' en los dos
+  // casos, asi que por si solo no distingue nada.
+  //
+  // Sin veredictos si manda el estado: ahi "pendiente de revisar" es exacto, y
+  // el cierre que se deduciria seria una conclusion que nadie ha tomado.
+  const hayVeredictos = x.cierre && x.cierre !== "sin_veredicto";
+  return (x.cerrado || hayVeredictos) && x.cierre
     ? `<span class="chip c-${esc(x.cierre)}">${esc(CIERRES[x.cierre] || x.cierre)}</span>`
     : chip(x.estado);
 }
@@ -669,7 +682,18 @@ function filaDesdeDetalle(d){
     id: d.id, asset: d.asset, kpiName: d.kpi_name,
     startTime: d.start_time, recibidoEn: d.recibido_en,
     estado: d.estado, cierre: d.cierre, cerrado: d.cerrado,
-    fueraDelFiltro: true,
+    // POR QUE se ha salido de la lista, que son dos cosas distintas y llevan a
+    // acciones distintas:
+    //
+    //   "pestana" -- ha cambiado de sitio en la aplicacion. Quitar el filtro no
+    //                lo trae de vuelta: hay que ir a la otra pestaña.
+    //   "filtro"  -- sigue en esta pestaña pero ya no cumple el filtro de
+    //                estado o de cierre. Quitandolo, reaparece.
+    //
+    // Un texto unico para las dos obligaria a adivinar en cual estas, y en el
+    // primer caso seria ademas falso: no ha dejado de cumplir un filtro, se ha
+    // mudado.
+    motivoFijado: d.cerrado !== verCerrados ? "pestana" : "filtro",
   };
 }
 
@@ -695,8 +719,14 @@ function pintarLista(incidentes){
       <div class="sub">${esc(i.kpiName)}</div>
       <div class="sub" style="color:var(--tenue)">${esc(desde(i.startTime) || hora(i.startTime))}</div>
       <div class="pie">${chipEstado(i)}</div>
-      ${i.fueraDelFiltro ? `<div class="fuera-filtro">Ya no coincide con el filtro;
-        sigue aquí porque lo tienes abierto</div>` : ""}
+      ${i.motivoFijado ? `<div class="fijada"><span class="chincheta">📌</span>${
+        // Que sigue ahi porque esta seleccionado lo dice el DISEÑO -- la fila
+        // resaltada y la chincheta --, no el texto. Escribir con palabras lo
+        // que la forma ya dice es lo que alargaba la fila.
+        i.motivoFijado === "pestana"
+          ? `Ahora está en ${verCerrados ? "Activos" : "Cerrados"}`
+          : "Ya no coincide con el filtro"
+      }</div>` : ""}
     </button>`).join("");
   cont.querySelectorAll(".fila").forEach(b =>
     b.onclick = () => {
