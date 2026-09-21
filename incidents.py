@@ -738,6 +738,17 @@ def cierre(registro: dict) -> tuple[str | None, bool]:
     están en el fichero; la etiqueta es su consecuencia, y un segundo sitio del
     que fiarse es un sitio que puede discrepar del primero.
     """
+    # La reclasificación manda sobre todo lo demás, incluso sobre un análisis
+    # fallido: si la alerta no debió existir, da igual cómo fuera el análisis de
+    # un problema que no había. Es lo único que dice algo sobre la ALERTA y no
+    # sobre el diagnóstico, y por eso sustituye a la etiqueta en vez de
+    # convivir con ella.
+    #
+    # Terminal: la pregunta está contestada de la forma más definitiva posible
+    # -- no había nada que diagnosticar -- así que no hay nada que esperar.
+    if (registro.get("revision") or {}).get("reclasificacion") == ALERTA_NO_VALIDA:
+        return ALERTA_NO_VALIDA, True
+
     estado = registro.get("estado")
     if estado in _EN_CURSO:
         return None, False                       # está en marcha; no ha terminado

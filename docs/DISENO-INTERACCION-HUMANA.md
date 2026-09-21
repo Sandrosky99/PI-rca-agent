@@ -174,8 +174,18 @@ Así que no se detecta presencia, y la etiqueta se llama *sin veredicto* y no
 *desatendido*, porque lo segundo afirmaría algo que no nos consta.
 
 > Y si el problema es que la gente no vuelve a dar el veredicto, lo que lo arregla no
-> es medirlo mejor: es **pedirlo**. La pestaña de cerrados puede encabezarse con «3
-> casos esperan veredicto», con esos tres arriba.
+> es medirlo mejor: es **pedirlo**. Se probó así: la pestaña de cerrados se encabezaba
+> con «3 casos esperan veredicto», y pulsarlo dejaba esos tres arriba y solos.
+>
+> **Retirado el 2026-09-21, al verlo en uso.** No añadía nada que no estuviera ya
+> delante: la botonera de filtros de esa misma pestaña lleva la pastilla *sin
+> veredicto* con su cuenta al lado, en la línea inmediatamente superior. Eran dos
+> mandos para lo mismo, uno encima del otro.
+>
+> Queda anotado para que no se reinvente. El hueco que pretendía tapar es real —el
+> acierto silencioso no deja rastro—, pero quien lo tapa es la botonera. Si algún día
+> hiciera falta insistir más, el sitio es esa pastilla —destacarla cuando su cuenta
+> suba—, no un segundo aviso que pueda discrepar de ella.
 
 ---
 
@@ -297,15 +307,32 @@ la pantalla en caliente no puede capturar bien:
   información que el equipo de PI necesita, y meterla dentro de «incorrecto»
   ensuciaría las métricas.
 
-> **Por qué la alerta falsa no es un botón en caliente.** Todos los demás botones
-> actúan sobre *una causa*; ese actuaría sobre *el incidente entero*. Mezclar dos
-> alcances en la misma pantalla es lo que hace que alguien con prisa pulse el que no
-> era — y confundirlos cuesta caro: pierdes el bucle de feedback y además avisas de un
-> umbral defectuoso que estaba bien.
+> **El riesgo de la alerta falsa es de ALCANCE, no de momento** (corregido el
+> 2026-09-21). Todos los demás botones actúan sobre *una causa*; ese actúa sobre *el
+> incidente entero*. Mezclar dos alcances en la misma zona es lo que hace que alguien
+> con prisa pulse el que no era — y confundirlos cuesta caro: pierdes el bucle de
+> feedback y además avisas de un umbral defectuoso que estaba bien.
 >
-> Además, juzgar que un umbral está mal configurado no es una llamada del operario a
-> las tres de la mañana. Es de quien anota después, que suele estar mejor situado para
-> hacerla.
+> Una versión anterior lo resolvía limitándolo a la pestaña de cerrados, con el
+> argumento de que juzgar un umbral mal configurado «no es una llamada del operario a
+> las tres de la mañana». **Se retira.** Quien recibe la alerta y reconoce que salta
+> siempre al arrancar la bomba de al lado es justo quien más contexto tiene sobre *ese*
+> disparo; hacerle esperar doce horas significa que no lo marcará nunca, y que mientras
+> tanto una alerta que no debió existir ocupa sitio en la pantalla de «lo que pide
+> atención».
+>
+> El riesgo real lo resuelve **el sitio y no el momento**: bloque propio, al final del
+> detalle, con su encabezado. Eso vale igual en las dos pestañas.
+
+**Marcarla sustituye a la etiqueta de cierre** y es terminal. Manda sobre todo lo demás
+—incluso sobre una causa confirmada o un análisis fallido—: si la alerta no debió
+existir, da igual cómo fuera el análisis de un problema que no había.
+
+**Y se puede quitar**, sin pedir motivo. Es el único cierre que se apoya en una
+*opinión* y no en un hecho: los otros se deducen de si hay veredicto o de si venció el
+reloj. Lo que descansa en una creencia es lo que más tiene que poder revisarse. Al
+quitarla, el incidente vuelve exactamente a donde estaba —incluido volver a Activos si
+allí estaba— porque la reclasificación no toca el reloj.
 
 Las métricas usan siempre el valor anotado cuando existe.
 
@@ -367,10 +394,18 @@ pendiente, descartada o confirmada. Es el contenido central de la pantalla.
 Al volver de planta, la persona tiene que ver lo que ella misma escribió antes. Sin
 esto, el caso *b* —descartar una y volver luego— no funciona.
 
-**Datos que sustentan cada causa** · [recomendado]
-Qué variables miró el modelo y en qué ventana. Sin esto la persona tiene que creerse
-el diagnóstico a ciegas, y es justo lo que le permite detectar que se apoyó en un
-sensor que ella sabe que está mal.
+**Datos que sustentan cada causa** · ~~[recomendado]~~ **descartado el 2026-09-21**
+La idea era enseñar qué variables miró el modelo y en qué ventana, para que quien
+conoce la planta pudiera detectar que se apoyó en un sensor que sabe que está mal.
+
+Se descarta por un motivo de PI, no de interfaz: **un mismo valor puede estar
+referenciado desde varios elementos del AF que comparten PI Point**, y no hay forma de
+obligar al modelo a citar «el original» en vez de una de las referencias. Lo que
+enseñaría la pantalla no sería determinista y podría señalar un elemento que no es
+donde el ingeniero espera mirar — con lo que la ayuda se convierte en confusión.
+
+Para que esto valga la pena haría falta antes resolver la identidad de un valor en el
+AF, que es un problema de modelado de PI y no de este workflow.
 
 ### Zona de veredicto
 

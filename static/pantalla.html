@@ -314,6 +314,9 @@
   .c-revisado_parcialmente{background:var(--acento-fondo); color:var(--acento)}
   .c-sin_veredicto{background:var(--neutro-fondo); color:var(--neutro)}
   .c-fallo_del_analisis{background:var(--malo-fondo); color:var(--malo)}
+  /* En gris y no en rojo: el sistema no se equivoco. La alerta no debio existir,
+     que es un problema de configuracion de PI y no de este workflow. */
+  .c-alerta_no_valida{background:var(--neutro-fondo); color:var(--neutro)}
 
   /* Aviso de que el interruptor esta bajado. Sustituye a listar los incidentes
      en 'pausado': eso no es informacion de un incidente sino del sistema
@@ -324,6 +327,18 @@
     flex:0 0 auto;
   }
 
+  /* Separado de las causas y con su propio encabezado: lo de aqui actua sobre
+     el incidente entero. */
+  .zona-alerta{
+    margin-top:26px; padding:15px 18px; border-radius:8px;
+    background:var(--panel); border:1px solid var(--borde);
+  }
+  .zona-alerta > b{
+    color:var(--tenue); font-size:10.5px; letter-spacing:.12em;
+    text-transform:uppercase; display:block; margin-bottom:8px;
+  }
+  .zona-alerta p{margin:0 0 11px; font-size:14.5px; color:var(--texto-2); max-width:72ch}
+  .zona-alerta strong{color:var(--texto)}
   .aviso-ia{
     margin-top:26px; padding:12px 16px; border-radius:8px;
     background:var(--panel); border:1px solid var(--borde);
@@ -403,6 +418,10 @@ const CIERRES = {
   revisado_parcialmente: "Revisado parcialmente",
   sin_veredicto:         "Sin veredicto",
   fallo_del_analisis:    "Fallo del análisis",
+  // No es un juicio sobre el diagnostico sino sobre la ALERTA: el modelo no se
+  // equivoco, le dieron un problema que no existia. Por eso sustituye a la
+  // etiqueta en vez de convivir con ella.
+  alerta_no_valida:      "Alerta no válida",
 };
 
 const PERIODOS = [
@@ -848,6 +867,25 @@ function conectarVeredictos(iid){
     refrescar();
   });
 
+  cont.querySelectorAll("[data-alerta]").forEach(b => b.onclick = async () => {
+    // Quitarla no pide motivo, igual que deshacer un veredicto: es el unico
+    // cierre que se apoya en una opinion y no en un hecho, asi que tiene que
+    // poder revisarse sin friccion.
+    const valor = b.dataset.alerta === "marcar" ? "alerta_no_valida" : null;
+    try{
+      const r = await fetch(`/incidentes/${encodeURIComponent(iid)}/reclasificacion`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({reclasificacion: valor}),
+      });
+      if(!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "No se pudo guardar.");
+      // Cambia el cierre, asi que el incidente puede salirse del filtro: se
+      // fija, igual que con un veredicto.
+      fijado = iid;
+      pintarDetalle(await r.json());
+    }catch(e){ errorForm = e.message; refrescar(); }
+  });
+
   cont.querySelectorAll("[data-deshacer]").forEach(b => b.onclick = async () => {
     // Deshacer no borra: anota "pendiente" encima y el expediente conserva los
     // dos apuntes. Sin pedir motivo -- casi siempre sera un clic mal dado, y
@@ -882,6 +920,36 @@ function conectarVeredictos(iid){
     };
     form.querySelector("textarea").focus();
   }
+}
+
+// Marcar que la alerta no debio existir. Actua sobre el INCIDENTE ENTERO, no
+// sobre una causa, asi que va separado y al final: mezclar dos alcances en la
+// misma zona es lo que hace que alguien con prisa pulse el que no era.
+//
+// En las DOS pestañas (2026-09-21). El diseño lo limitaba a cerrados con este
+// argumento: "juzgar que un umbral de PI esta mal configurado no es una llamada
+// del operario a las tres de la mañana". Pero quien recibe la alerta y reconoce
+// que salta siempre al arrancar la bomba de al lado es justo quien mas contexto
+// tiene sobre ESE disparo -- y obligarle a esperar doce horas significa que no
+// lo marcara nunca, y que mientras tanto una alerta que no debio existir ocupa
+// sitio en la pantalla de "lo que pide atencion".
+//
+// El riesgo que motivaba la restriccion -- mezclar el alcance de incidente con
+// el de causa y que alguien con prisa pulse el que no era -- ya lo resuelve el
+// SITIO: bloque propio, al final, con su encabezado. Eso vale en las dos.
+function zonaAlerta(d){
+  const marcada = (d.revision || {}).reclasificacion === "alerta_no_valida";
+  return `<div class="zona-alerta">
+    <b>Sobre la alerta</b>
+    ${marcada
+      ? `<p>Marcada como <strong>no válida</strong>: el problema no existía. El modelo
+         no se equivocó — le dieron un problema inventado.</p>
+         <button class="btn btn-sec" data-alerta="quitar">Quitar la marca</button>`
+      : `<p>Si esta alerta no debió dispararse — el problema no existía y el umbral de
+         PI está mal — márcalo aquí. No cuenta como fallo del diagnóstico, y es lo que
+         permite avisar de un umbral que hay que corregir.</p>
+         <button class="btn btn-sec" data-alerta="marcar">Marcar alerta no válida</button>`}
+    </div>`;
 }
 
 function pintarDetalle(d){
@@ -985,6 +1053,7 @@ function pintarDetalle(d){
       <p class="contexto">${contexto.join('<span class="sep">·</span>')}</p>
     </div>
     ${cuerpo}
+    ${zonaAlerta(d)}
     ${ia ? `<p class="aviso-ia"><b>Generado por IA.</b> ${esc(ia.notice)}
             <br><span style="color:var(--tenue)">Modelo: ${esc(ia.model)}</span></p>`
          : `<p class="aviso-ia"><b>Aviso.</b> Los diagnósticos de esta pantalla
