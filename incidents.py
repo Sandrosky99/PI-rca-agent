@@ -196,6 +196,7 @@ def _resumen(registro: dict) -> dict:
     qué estado están. El detalle se pide por separado.
     """
     diagnostico = registro.get("diagnostico") or {}
+    etiqueta, _ = cierre(registro)
     return {
         "id": registro.get("id"),
         "asset": registro.get("asset"),
@@ -207,25 +208,14 @@ def _resumen(registro: dict) -> dict:
         "estado": registro.get("estado"),
         "numCausas": len(diagnostico.get("root_causes", [])),
         "intentos": registro.get("intentos", 1),
+        "cierre": etiqueta,
+        "cerrado": esta_cerrado(registro),
     }
 
 
-# Cuánto tiempo sigue apareciendo un incidente FALLIDO en la vista por defecto.
-#
-# Fijo a propósito, sin variable de entorno. Un fallo técnico interesa mientras
-# alguien pueda hacer algo con él -- mirarlo, reintentarlo cuando lo haya --, y
-# pasado ese rato solo estorba: se acumula en la lista de un monitor donde lo
-# que importa son las alertas vivas. Sigue estando, y se ve pidiendo el estado
-# 'fallido' expresamente o ampliando el rango de fechas; lo que deja de hacer es
-# competir por la atención.
-#
-# 12 h y no 6: un turno completo. Con 6 h, un fallo de la madrugada ya no estaba
-# cuando entraba el turno de mañana, que es justo quien podía hacer algo.
-_HORAS_FALLIDO_EN_VISTA = 12
-
-
 def listar(desde: str | None = None, hasta: str | None = None,
-           limite: int | None = None, estado: str | None = None) -> dict:
+           limite: int | None = None, estado: str | None = None,
+           cerrados: bool | None = None, cierre_filtro: str | None = None) -> dict:
     """Resumen de incidentes, del más reciente al más antiguo, acotado.
 
     Sin acotar esto no sirve: no se borra ningún incidente nunca, así que con
@@ -254,36 +244,46 @@ def listar(desde: str | None = None, hasta: str | None = None,
     if hasta:
         resumenes = [r for r in resumenes if (r.get("recibidoEn") or "") <= hasta]
 
-    # Recuento por estado ANTES de filtrar y de recortar. Es lo que alimenta las
-    # pastillas de la pantalla, y cada una dice exactamente lo que saldría al
-    # pulsarla: por eso se cuenta sin aplicar el envejecimiento de los fallidos,
-    # que solo rige en la vista por defecto.
+    # La pestaña primero: activos y cerrados son dos mundos, y el resto de
+    # filtros y contadores operan dentro del que se esté mirando.
+    #
+    # PAUSADO no sale en ninguno de los dos. No es información de un incidente
+    # sino del sistema entero -- que alguien bajó el interruptor --, y eso va en
+    # un aviso arriba de la pantalla en vez de llenar la lista de ruido.
+    resumenes = [r for r in resumenes if r.get("estado") != PAUSADO]
+
+    # Cuántos hay en CADA pestaña, dentro del periodo pedido. Las dos cuentas se
+    # calculan aquí y viajan juntas: la pantalla tiene que rotular las dos
+    # pestañas, y pedirlas en dos peticiones seria el doble de trabajo para el
+    # mismo recorrido de disco.
+    cuentas_pestanas = {
+        "activos": sum(1 for r in resumenes if not r.get("cerrado")),
+        "cerrados": sum(1 for r in resumenes if r.get("cerrado")),
+    }
+    if cerrados is not None:
+        resumenes = [r for r in resumenes if bool(r.get("cerrado")) == cerrados]
+
+    # Los dos recuentos, ANTES de filtrar y de recortar, para que cada pastilla
+    # diga exactamente lo que saldría al pulsarla.
+    #
+    # Se cuentan las dos dimensiones porque las pestañas no filtran por lo
+    # mismo: en activos importa el estado del workflow -- en cola, procesando,
+    # listo -- y en cerrados importa CÓMO acabó, que es otra cosa. Filtrar un
+    # cerrado por 'finalizado' no distinguiría nada: lo son casi todos.
     recuento: dict[str, int] = {}
+    recuento_cierre: dict[str, int] = {}
     for r in resumenes:
         e = r.get("estado", "desconocido")
         recuento[e] = recuento.get(e, 0) + 1
-
-    # Cuántos saldrían sin filtrar por estado -- o sea, con el envejecimiento de
-    # los fallidos aplicado. Es lo que debe decir la pastilla "Todos", y no
-    # coincide con sumar el resto: los fallidos viejos cuentan en su pastilla
-    # pero no aquí, que es justo lo que pasaría al pulsar una u otra.
-    _corte = (datetime.now(timezone.utc)
-              - timedelta(hours=_HORAS_FALLIDO_EN_VISTA)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    recuento_sin_filtro = sum(
-        1 for r in resumenes
-        if r.get("estado") != FALLIDO or (r.get("recibidoEn") or "") >= _corte
-    )
+        c = r.get("cierre")
+        if c:
+            recuento_cierre[c] = recuento_cierre.get(c, 0) + 1
+    recuento_sin_filtro = len(resumenes)
 
     if estado:
         resumenes = [r for r in resumenes if r.get("estado") == estado]
-    else:
-        # Los fallidos viejos salen de la vista por defecto. Solo cuando NO se
-        # ha pedido un estado concreto: si alguien filtra por 'fallido' es que
-        # los está buscando, y esconderlos entonces sería absurdo.
-        corte = (datetime.now(timezone.utc)
-                 - timedelta(hours=_HORAS_FALLIDO_EN_VISTA)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        resumenes = [r for r in resumenes
-                     if r.get("estado") != FALLIDO or (r.get("recibidoEn") or "") >= corte]
+    if cierre_filtro:
+        resumenes = [r for r in resumenes if r.get("cierre") == cierre_filtro]
 
     resumenes.sort(key=lambda r: r.get("recibidoEn") or "", reverse=True)
 
@@ -301,7 +301,9 @@ def listar(desde: str | None = None, hasta: str | None = None,
         "coincidentes": coincidentes,
         "truncado": coincidentes > len(resumenes),
         "recuento": recuento,
+        "recuentoCierre": recuento_cierre,
         "recuentoSinFiltro": recuento_sin_filtro,
+        "pestanas": cuentas_pestanas,
     }
 
 
@@ -458,6 +460,18 @@ def claim(payload: dict) -> dict | None:
         estado_previo = (previo or {}).get("estado")
         if previo is not None and estado_previo in _RECLAMABLES:
             registro["intentos"] = previo.get("intentos", 1) + 1
+            # Se conserva lo que NO es del workflow. Esta rama reconstruye el
+            # registro desde el payload, así que sin esto se llevaría por delante
+            # el bloque de la revisión humana -- el mismo fallo que se arregló
+            # en _actualizar(), en el único sitio donde todavía se escribe un
+            # documento construido de cero.
+            #
+            # Hoy no puede pasar: solo se re-reserva desde INTERRUMPIDO y
+            # PAUSADO, y ninguno de los dos llegó a producir causas que juzgar.
+            # Se hace igualmente porque el día que eso cambie, el fallo sería
+            # silencioso y la pérdida irrecuperable.
+            if "revision" in previo:
+                registro["revision"] = previo["revision"]
             _escribir(ruta, registro)
             observability.audit(
                 "incident.claim", {"incidentId": ruta.stem, "intento": registro["intentos"]},
@@ -486,10 +500,65 @@ def claim(payload: dict) -> dict | None:
     return registro
 
 
-def mark(registro: dict, estado: str, diagnostico: dict | None = None,
-         trace: dict | None = None, motivo: str | None = None) -> None:
+def _actualizar(incidente_id: str, cambios: dict) -> dict | None:
+    """Cambia SOLO los campos indicados de un incidente, releyendo el disco.
+
+    Esta es la única forma de escribir un incidente ya existente, y la firma es
+    deliberada: recibe los campos a cambiar, nunca el documento entero.
+
+    El motivo (2026-09-15). Hasta hoy, mark() recibía el incidente tal como el
+    workflow lo tenía cargado en memoria y escribía ese objeto COMPLETO encima
+    del fichero. Como editar un documento compartido bajándotelo, cambiando tu
+    copia y subiéndola encima: lo que otro tocara mientras tanto desaparecía sin
+    dejar rastro.
+
+    Daba igual mientras el workflow fuese el único escritor. Deja de darlo con
+    la pantalla (docs/DISENO-INTERACCION-HUMANA.md, Fase 2):
+
+        15:00  el operario descarta las causas y pide reanalizar
+        15:00  el workflow arranca y carga el incidente en memoria
+        15:02  el operario añade otra evidencia; la pantalla la escribe
+        15:04  el workflow termina y escribe SU copia, la de las 15:00
+               -> la evidencia de las 15:02 ha desaparecido
+
+    Y no es un caso raro: en la Fase 3 el análisis lo dispara una persona que
+    está delante de la pantalla en ese momento.
+
+    Releer antes de escribir hace que lo que añadió el otro sobreviva, porque
+    nunca estuvo en manos de quien escribe. Cada escritor es dueño de sus
+    campos -- el workflow de 'estado', 'diagnostico', 'trace' y 'motivo'; la
+    pantalla de 'revision' -- y no puede pisar los del otro AUNQUE QUIERA, que
+    es mejor que confiar en que se acuerde.
+
+    Queda una carrera teórica entre releer y escribir. Con un puesto y un
+    workflow es despreciable, y lo peor que produce es perder una escritura, no
+    corromper el fichero: _escribir() es atómico. Si algún día hace falta
+    certeza, un contador de versión cuesta poco.
+
+    Devuelve el registro tal como quedó, o None si no se pudo.
+    """
+    ruta = _directorio() / f"{incidente_id}.json"
+    registro = _leer(ruta)
+    if registro is None:
+        log.error("No se pudo actualizar el incidente %s: no se pudo leer.", incidente_id)
+        return None
+    registro.update(cambios)
+    registro["actualizado_en"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        _escribir(ruta, registro)
+    except OSError as exc:
+        log.error("No se pudo actualizar el incidente %s: %s", incidente_id, exc)
+        return None
+    return registro
+
+
+def mark(incidente_id: str, estado: str, diagnostico: dict | None = None,
+         trace: dict | None = None, motivo: str | None = None) -> dict | None:
     """Actualiza el estado del incidente en disco. Nunca propaga excepciones:
     un fallo escribiendo el registro no debe tumbar el análisis en curso.
+
+    Recibe el ID y no el registro: ver _actualizar() para el porqué. Si tienes
+    el registro a mano, pasa registro["id"].
 
     'motivo' explica en una frase por qué el incidente acabó así. Se añadió el
     2026-09-14 porque un incidente en FALLIDO no decía en ninguna parte qué
@@ -500,25 +569,317 @@ def mark(registro: dict, estado: str, diagnostico: dict | None = None,
     Va en un campo propio y no dentro del trace a propósito: el trace se poda a
     los 90 días (podar_traces) y el motivo del fallo forma parte del caso.
     """
-    ruta = _directorio() / f"{registro['id']}.json"
     observability.audit(
-        "incident.mark", {"incidentId": registro["id"], "estado": estado},
+        "incident.mark", {"incidentId": incidente_id, "estado": estado},
     )
-    registro["estado"] = estado
-    registro["actualizado_en"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Marca de tiempo propia del workflow, separada de 'actualizado_en' -- que
+    # es "última modificación de cualquiera" y la pisan los dos escritores.
+    #
+    # Hace falta para el reloj de las 12 h: sin ella no se puede distinguir un
+    # movimiento del sistema de un clic de una persona, y cualquier veredicto
+    # rejuvenecía un incidente de hace tres días. Ver _anclaje_reloj().
+    cambios: dict = {
+        "estado": estado,
+        "movimiento_workflow": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
     if motivo:
-        registro["motivo"] = motivo
+        cambios["motivo"] = motivo
     if diagnostico is not None:
-        registro["diagnostico"] = diagnostico
+        cambios["diagnostico"] = diagnostico
     if trace:
         # Prompts y respuestas del modelo. Aquí y no en el log: con el logging
         # estructurado se truncarían a 200 caracteres, y este fichero es el
         # registro del caso -- base/software-spec §1.5 (procedencia del prompt).
-        registro["trace"] = trace
+        cambios["trace"] = trace
+    return _actualizar(incidente_id, cambios)
+
+
+# =============================================================================
+# La revisión humana (Fase 2 de docs/DISENO-INTERACCION-HUMANA.md)
+# =============================================================================
+# El bloque 'revision' es HERMANO de 'diagnostico' y no va dentro, a propósito:
+# 'diagnostico' es la salida del modelo y lleva su etiqueta '_ai_generated'.
+# Todo el proyecto cuida esa frontera -- las causas son del modelo y se
+# etiquetan; los motivos de fallo son del código y no --, y este es el sitio
+# donde emborronarla saldría más caro.
+
+CONFIRMADA = "confirmada"
+DESCARTADA = "descartada"
+PENDIENTE = "pendiente"
+_VEREDICTOS = (CONFIRMADA, DESCARTADA, PENDIENTE)
+
+# La única reclasificación que hace falta. El diseño preveía también
+# "causa_confirmada", para quien vuelve en frío y dice "la primera era la
+# buena"; sobra, porque el veredicto no caduca nunca y el cierre se deduce, así
+# que eso es un veredicto normal dado más tarde. Lo que NO se puede expresar
+# como veredicto sobre una causa es que la alerta no debió existir: el modelo no
+# se equivocó, le dieron un problema inventado, y eso es información para quien
+# mantiene los umbrales de PI.
+ALERTA_NO_VALIDA = "alerta_no_valida"
+_RECLASIFICACIONES = (ALERTA_NO_VALIDA,)
+
+
+class RevisionError(ValueError):
+    """Un veredicto que no se puede registrar. El mensaje va dirigido a quien
+    está delante de la pantalla, así que se muestra tal cual."""
+
+
+def _causas_de(registro: dict) -> list[dict]:
+    return ((registro.get("diagnostico") or {}).get("root_causes") or [])
+
+
+def estado_de_causas(registro: dict) -> list[str]:
+    """Estado actual de cada causa: pendiente, confirmada o descartada.
+
+    Los veredictos son una lista de SOLO AÑADIR -- corregir es anotar encima --,
+    así que el estado de una causa es el de su último apunte. Se calcula, no se
+    guarda: guardarlo sería un segundo sitio del que fiarse, que puede
+    desincronizarse del primero.
+    """
+    estados = [PENDIENTE] * len(_causas_de(registro))
+    for v in (registro.get("revision") or {}).get("veredictos", []):
+        i = v.get("causa")
+        if isinstance(i, int) and 0 <= i < len(estados):
+            estados[i] = v.get("veredicto", PENDIENTE)
+    return estados
+
+
+def registrar_veredicto(incidente_id: str, causa: int, veredicto: str,
+                        evidencia: str = "", sospecha: str = "",
+                        iteracion: int = 1) -> dict:
+    """Anota lo que una persona ha concluido sobre UNA causa concreta.
+
+    Por causa y no en bloque: el modelo propone dos o tres, y descartar una no
+    es rechazar el análisis -- es reducirlo. Ver el §2 del documento de diseño.
+
+    Levanta RevisionError si el veredicto no se puede registrar, con un mensaje
+    que se le puede enseñar tal cual a quien está delante de la pantalla.
+    """
+    registro = leer_por_id(incidente_id)
+    if registro is None:
+        raise RevisionError("El incidente no existe.")
+
+    causas = _causas_de(registro)
+    if not causas:
+        # Un 'fallido' o un 'pausado' no llegaron a producir causas. No es que
+        # falte el dato: es que no hay nada que juzgar.
+        raise RevisionError("Este incidente no tiene causas propuestas que juzgar.")
+    if not isinstance(causa, int) or not 0 <= causa < len(causas):
+        raise RevisionError(f"La causa {causa} no existe: hay {len(causas)}.")
+    if veredicto not in _VEREDICTOS:
+        raise RevisionError(f"Veredicto no válido: {veredicto!r}.")
+
+    evidencia = (evidencia or "").strip()
+    sospecha = (sospecha or "").strip()
+    if veredicto == DESCARTADA and not evidencia:
+        # La evidencia es obligatoria al descartar, y no por burocracia: es lo
+        # ÚNICO que hace que un reanálisis valga para algo. Sin ella, la segunda
+        # pasada sería el segundo clasificado ascendido sobre los mismos datos.
+        raise RevisionError("Hace falta decir por qué no es esta causa.")
+
+    apunte = {
+        "en": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "iteracion": iteracion,
+        "causa": causa,
+        "veredicto": veredicto,
+    }
+    if evidencia:
+        apunte["evidencia"] = evidencia
+    if sospecha:
+        # Entra marcada como lo que es: una pista a contrastar, nunca una
+        # conclusión. La distinción la impone la estructura y no el prompt.
+        apunte["sospecha"] = sospecha
+
+    revision = dict(registro.get("revision") or {})
+    revision["veredictos"] = list(revision.get("veredictos", [])) + [apunte]
+
+    observability.audit(
+        "incident.veredicto",
+        {"incidentId": incidente_id, "causa": causa, "veredicto": veredicto},
+    )
+    actualizado = _actualizar(incidente_id, {"revision": revision})
+    if actualizado is None:
+        raise RevisionError("No se pudo guardar el veredicto.")
+    log.info("Veredicto humano sobre una causa.",
+             extra={"incidentId": incidente_id, "causa": causa, "veredicto": veredicto})
+    return actualizado
+
+
+# Cuánto sigue un incidente en la pestaña de activos desde el último movimiento
+# -- lo que ocurra más tarde entre que el sistema terminó algo y que una persona
+# hizo algo. Cualquier acción lo reinicia, porque lo que el reloj persigue es si
+# la persona que puede aportar evidencia sigue por ahí.
+#
+# Doce y no ocho: si un número tiene que servir para las dos cosas que gobierna
+# -- qué se ve y, en la Fase 3, hasta cuándo se puede reanalizar --, conviene el
+# que no pierde nada. Quedarse corto hace desaparecer del monitor algo sobre lo
+# que aún se podía actuar; quedarse largo solo ensucia la lista, y para eso está
+# el filtro. Además, si el turno dura ocho horas y el incidente puede caer en
+# cualquier momento de él, solo doce garantizan que lo vea el turno siguiente.
+HORAS_EN_ACTIVOS = 12
+
+# Las cinco etiquetas de cierre. Ver §3 del documento de diseño.
+CAUSA_CONFIRMADA = "causa_confirmada"
+CAUSA_NO_DETERMINADA = "causa_no_determinada"
+REVISADO_PARCIALMENTE = "revisado_parcialmente"
+SIN_VEREDICTO = "sin_veredicto"
+FALLO_DEL_ANALISIS = "fallo_del_analisis"
+
+
+def cierre(registro: dict) -> tuple[str | None, bool]:
+    """Cómo termina un incidente y si ya ha terminado.
+
+    Devuelve (etiqueta, terminal). 'terminal' significa que la pregunta está
+    contestada y no hay nada que esperar, así que el incidente se cierra EN ESE
+    MOMENTO sin aguardar al reloj: tener en la pantalla de «lo que pide
+    atención» algo que no pide nada es lo contrario de para lo que sirve.
+
+    Se deduce, no se guarda. Los hechos -- los veredictos y sus fechas -- sí
+    están en el fichero; la etiqueta es su consecuencia, y un segundo sitio del
+    que fiarse es un sitio que puede discrepar del primero.
+    """
+    estado = registro.get("estado")
+    if estado in _EN_CURSO:
+        return None, False                       # está en marcha; no ha terminado
+    if estado == FALLIDO:
+        return FALLO_DEL_ANALISIS, False         # se ve 12 h y luego cierra
+    if estado != FINALIZADO:
+        # PAUSADO e INTERRUMPIDO se recogen solos cuando PI vuelve a notificar.
+        return None, False
+
+    estados = estado_de_causas(registro)
+    if CONFIRMADA in estados:
+        return CAUSA_CONFIRMADA, True
+    if estados and all(e == DESCARTADA for e in estados):
+        # En la Fase 2 esto es terminal. En la Fase 3 dejará de serlo: se
+        # intercalará el relanzado, y solo al agotarse el presupuesto de
+        # reanálisis se concluirá que la causa no se determinó.
+        return CAUSA_NO_DETERMINADA, True
+    if DESCARTADA in estados:
+        return REVISADO_PARCIALMENTE, False
+    return SIN_VEREDICTO, False
+
+
+def _mas_horas(marca: str, horas: int) -> str:
+    """La marca ISO desplazada N horas, en el mismo formato para comparar."""
+    if not marca:
+        return ""
     try:
-        _escribir(ruta, registro)
-    except OSError as exc:
-        log.error("No se pudo actualizar el incidente %s a '%s': %s", registro["id"], estado, exc)
+        base = datetime.strptime(marca, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return ""
+    return (base + timedelta(hours=horas)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _anclaje_reloj(registro: dict) -> str:
+    """Desde cuándo cuentan las 12 h: el último TRABAJO que sigue en pie.
+
+    No es "la última vez que se tocó el fichero", que era lo que se miraba antes
+    y producía esto: un incidente cerrado hace tres días, alguien confirmaba una
+    causa por error, la deshacía, y el incidente reaparecía en Activos como
+    recién llegado. Deshacer no es trabajo -- es una corrección --, así que no
+    debe rejuvenecer nada.
+
+    Se toma el más tardío entre:
+
+      - el último movimiento del WORKFLOW (analizar, fallar, pausar), y
+      - la fecha del último veredicto de cada causa que NO sea 'pendiente'.
+
+    Un apunte 'pendiente' es un deshacer: no aporta fecha, así que al deshacer
+    el reloj RETROCEDE solo hasta el último trabajo real que quede vigente. Si
+    no queda ninguno, hasta el movimiento del workflow.
+
+    Se calcula y no se guarda: los hechos ya están en la lista de veredictos, y
+    un segundo sitio del que fiarse es un sitio que puede discrepar del primero.
+    """
+    # Para los incidentes anteriores al 2026-09-18, que no tienen el campo
+    # propio del workflow, se recurre a 'recibido_en' y NUNCA a
+    # 'actualizado_en'.
+    #
+    # Parece el respaldo natural y es justo el equivocado: 'actualizado_en' lo
+    # pisa cada escritura, así que en un incidente antiguo el primer veredicto
+    # lo ponía a "ahora" y el fallback lo daba por recién llegado -- exactamente
+    # el fallo que este anclaje venía a arreglar, colado por la puerta de atrás.
+    # 'recibido_en' se escribe una vez y no se vuelve a tocar.
+    anclaje = registro.get("movimiento_workflow") or registro.get("recibido_en") or ""
+
+    ultimo_por_causa: dict[int, dict] = {}
+    for v in (registro.get("revision") or {}).get("veredictos", []):
+        if isinstance(v.get("causa"), int):
+            ultimo_por_causa[v["causa"]] = v
+
+    # Un veredicto alarga el reloj SOLO si se dio mientras el incidente seguía
+    # abierto. Los que llegan después no lo reabren.
+    #
+    # Sin esta condición pasaba esto: un incidente cerrado hacía tres días,
+    # alguien lo revisaba en frío desde la pestaña de cerrados, y cada clic lo
+    # devolvía a Activos. El expediente rebotaba entre las dos pestañas mientras
+    # se trabajaba en él, que es lo contrario de lo que hace falta.
+    #
+    # Y hay un motivo de fondo: dar un veredicto tarde es justo lo que
+    # queríamos que la gente hiciera -- la reclasificación en frío es lo que
+    # rescata el dato de acierto (§3 del documento de diseño). Resucitar el
+    # incidente por hacerlo convierte una virtud en un castigo.
+    #
+    # Se recorren en orden: mientras cada uno caiga dentro de la ventana que
+    # abre el anterior, la cadena sigue viva y el reloj se desliza. El primero
+    # que llegue fuera la corta, y los posteriores tampoco cuentan.
+    vigentes = sorted(
+        (v for v in ultimo_por_causa.values() if v.get("veredicto") != PENDIENTE),
+        key=lambda v: v.get("en") or "",
+    )
+    for v in vigentes:
+        dado_en = v.get("en") or ""
+        if dado_en and dado_en <= _mas_horas(anclaje, HORAS_EN_ACTIVOS):
+            anclaje = max(anclaje, dado_en)
+    return anclaje
+
+
+def esta_cerrado(registro: dict, ahora: datetime | None = None) -> bool:
+    """Si el incidente ya no pide atención: por respuesta terminal o por reloj."""
+    etiqueta, terminal = cierre(registro)
+    if terminal:
+        return True
+    if registro.get("estado") in _EN_CURSO:
+        return False
+    if etiqueta is None:
+        # PAUSADO no aparece en ninguna de las dos pestañas: no es información
+        # de un incidente sino del sistema entero -- que alguien bajó el
+        # interruptor --, y eso va en un aviso arriba de la pantalla.
+        return registro.get("estado") == PAUSADO
+    ahora = ahora or datetime.now(timezone.utc)
+    limite = (ahora - timedelta(hours=HORAS_EN_ACTIVOS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return _anclaje_reloj(registro) < limite
+
+
+def registrar_reclasificacion(incidente_id: str, reclasificacion: str | None) -> dict:
+    """Marca que la alerta no debió existir, o retira esa marca (con None).
+
+    No es un juicio sobre el diagnóstico sino sobre la alerta: el modelo no se
+    equivocó, le dieron un problema que no existía. Por eso no va en la pantalla
+    en caliente -- ahí todos los botones actúan sobre UNA causa y este actuaría
+    sobre el incidente entero, que es la mezcla de alcances que hace que alguien
+    con prisa pulse el que no era.
+    """
+    if reclasificacion is not None and reclasificacion not in _RECLASIFICACIONES:
+        raise RevisionError(f"Reclasificación no válida: {reclasificacion!r}.")
+    registro = leer_por_id(incidente_id)
+    if registro is None:
+        raise RevisionError("El incidente no existe.")
+
+    revision = dict(registro.get("revision") or {})
+    revision["reclasificacion"] = reclasificacion
+
+    observability.audit(
+        "incident.reclasificacion",
+        {"incidentId": incidente_id, "reclasificacion": reclasificacion},
+    )
+    actualizado = _actualizar(incidente_id, {"revision": revision})
+    if actualizado is None:
+        raise RevisionError("No se pudo guardar la reclasificación.")
+    log.info("Reclasificación humana de un incidente.",
+             extra={"incidentId": incidente_id, "reclasificacion": reclasificacion})
+    return actualizado
 
 
 def podar_traces() -> tuple[int, int]:

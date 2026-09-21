@@ -30,6 +30,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse, HTMLResponse
+from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 
 import config
@@ -94,7 +95,7 @@ async def _analizar_incidente(payload: dict, registro: dict) -> None:
 
 async def _ejecutar_analisis(payload: dict, registro: dict) -> None:
     """El análisis propiamente dicho, ya con turno concedido."""
-    incidents.mark(registro, incidents.ANALIZANDO)
+    incidents.mark(registro["id"], incidents.ANALIZANDO)
     trace: dict = {}
     try:
         # Tope duro. Es la única garantía que cubre TODO el análisis, incluidas
@@ -116,13 +117,13 @@ async def _ejecutar_analisis(payload: dict, registro: dict) -> None:
         log.error("Analisis abortado por exceder el tiempo maximo.",
                   extra={"incidentId": registro["id"],
                          "limiteSegundos": config.ANALYSIS_TIMEOUT_SECONDS})
-        incidents.mark(registro, incidents.FALLIDO, trace=trace,
+        incidents.mark(registro["id"], incidents.FALLIDO, trace=trace,
                        motivo="El análisis superó el tiempo máximo.")
         return
     except Exception:
         log.exception("Analisis abortado por un error no controlado.",
                       extra={"incidentId": registro["id"]})
-        incidents.mark(registro, incidents.FALLIDO, trace=trace,
+        incidents.mark(registro["id"], incidents.FALLIDO, trace=trace,
                        motivo="El análisis se detuvo por un error inesperado. "
                               "El detalle técnico está en el log del servicio.")
         return
@@ -131,7 +132,7 @@ async def _ejecutar_analisis(payload: dict, registro: dict) -> None:
         # en el trace por qué. Si no lo dejó -- no debería pasar --, se guarda
         # algo antes que nada: un incidente que solo dice "fallido" no le sirve
         # a quien está mirando la pantalla.
-        incidents.mark(registro, incidents.FALLIDO, trace=trace,
+        incidents.mark(registro["id"], incidents.FALLIDO, trace=trace,
                        motivo=trace.get("motivo_fallo")
                        or "El análisis no llegó a completarse. El detalle está "
                           "en el log del servicio.")
@@ -146,7 +147,7 @@ async def _ejecutar_analisis(payload: dict, registro: dict) -> None:
                        "NO es una causa raiz confirmada: requiere verificacion por un ingeniero "
                        "de procesos antes de actuar."),
         }
-        incidents.mark(registro, incidents.FINALIZADO, diagnostico=diagnostico, trace=trace)
+        incidents.mark(registro["id"], incidents.FINALIZADO, diagnostico=diagnostico, trace=trace)
 
 
 class Expect100ContinueMiddleware(BaseHTTPMiddleware):
@@ -476,7 +477,7 @@ async def receive_notification(
             "run_rca_analysis", {"incidentId": registro["id"], "asset": registro["asset"]},
             status="BLOCKED", detail="WORKFLOW_ENABLED=false (parada en caliente)",
         )
-        incidents.mark(registro, incidents.PAUSADO)
+        incidents.mark(registro["id"], incidents.PAUSADO)
         log.warning(
             "Analisis NO lanzado: el workflow esta deshabilitado por configuracion.",
             extra={"incidentId": registro["id"]},
@@ -572,6 +573,8 @@ async def listar_incidentes(
     limite: int | None = None,
     estado: str | None = None,
     horas: int | None = None,
+    cerrados: bool | None = None,
+    cierre: str | None = None,
 ) -> dict:
     """Alimenta la lista de la pantalla.
 
@@ -598,12 +601,30 @@ async def listar_incidentes(
         limite = config.SCREEN_DEFAULT_LIMIT
     limite = max(1, min(int(limite), _LIMITE_MAXIMO))
 
-    resultado = incidents.listar(desde=desde, hasta=hasta, limite=limite, estado=estado)
-    resultado["filtro"] = {"desde": desde, "hasta": hasta, "limite": limite, "estado": estado}
+    resultado = incidents.listar(desde=desde, hasta=hasta, limite=limite,
+                                 estado=estado, cerrados=cerrados,
+                                 cierre_filtro=cierre)
+    resultado["filtro"] = {"desde": desde, "hasta": hasta, "limite": limite,
+                           "estado": estado, "cerrados": cerrados, "cierre": cierre}
     # 'total' se conserva por compatibilidad con lo que ya consumía este
     # endpoint; es el número de los que se devuelven.
     resultado["total"] = resultado["mostrados"]
     return resultado
+
+
+def _con_estado_de_causas(registro: dict) -> dict:
+    """Añade lo que se calcula y no se guarda: el estado de cada causa y el cierre.
+
+    Va aquí y no en el fichero porque los veredictos son una lista de solo
+    añadir: el estado de una causa es el de su último apunte, y el cierre es su
+    consecuencia. Guardarlos sería un segundo sitio del que fiarse, y los dos
+    pueden desincronizarse.
+    """
+    etiqueta, _ = incidents.cierre(registro)
+    return dict(registro,
+                estadoCausas=incidents.estado_de_causas(registro),
+                cierre=etiqueta,
+                cerrado=incidents.esta_cerrado(registro))
 
 
 @app.get(
@@ -625,7 +646,71 @@ async def detalle_incidente(incidente_id: str) -> dict:
     registro = incidents.leer_por_id(incidente_id)
     if registro is None:
         raise HTTPException(status_code=404, detail="Incidente no encontrado")
-    return registro
+    return _con_estado_de_causas(registro)
+
+
+class _Veredicto(BaseModel):
+    """Lo que una persona concluye sobre UNA causa concreta."""
+    causa: int
+    veredicto: str
+    evidencia: str = ""
+    sospecha: str = ""
+    iteracion: int = 1
+
+
+class _Reclasificacion(BaseModel):
+    """`null` retira la marca; hoy el único valor es "alerta_no_valida"."""
+    reclasificacion: str | None = None
+
+
+@app.post(
+    "/incidentes/{incidente_id}/veredicto",
+    summary="Registra lo que una persona concluye sobre una causa",
+    description=(
+        "Confirma, descarta o devuelve a pendiente UNA causa del diagnóstico. "
+        "Al descartar hace falta la evidencia; la sospecha es opcional y entra "
+        "marcada como pista a contrastar, nunca como conclusión.\n\n"
+        "No caduca: se puede dar en caliente o días después, desde la pestaña "
+        "de cerrados."
+    ),
+)
+async def registrar_veredicto(incidente_id: str, cuerpo: _Veredicto) -> dict:
+    """Escribe en el expediente desde la pantalla.
+
+    Es el primer endpoint del sistema que MODIFICA el registro de un caso, y no
+    lleva autenticación: autentica la cerradura de la sala de control, porque la
+    pantalla solo se alcanza desde su HMI. Ver el punto 6 de DECISIONES DE
+    SEGURIDAD más abajo, y el aviso de que esa premisa y esta decisión se
+    sostienen mutuamente desde ficheros distintos.
+    """
+    try:
+        registro = incidents.registrar_veredicto(
+            incidente_id, cuerpo.causa, cuerpo.veredicto,
+            evidencia=cuerpo.evidencia, sospecha=cuerpo.sospecha,
+            iteracion=cuerpo.iteracion,
+        )
+    except incidents.RevisionError as exc:
+        # 400 con el mensaje tal cual: está escrito para que lo lea quien está
+        # delante de la pantalla, no para depurar.
+        raise HTTPException(status_code=400, detail=str(exc))
+    return _con_estado_de_causas(registro)
+
+
+@app.post(
+    "/incidentes/{incidente_id}/reclasificacion",
+    summary="Marca que la alerta no debió existir",
+    description=(
+        "Para el falso positivo: el modelo no se equivocó, le dieron un "
+        "problema que no existía. Es información para quien mantiene los "
+        "umbrales de PI. Enviar `null` retira la marca."
+    ),
+)
+async def registrar_reclasificacion(incidente_id: str, cuerpo: _Reclasificacion) -> dict:
+    try:
+        registro = incidents.registrar_reclasificacion(incidente_id, cuerpo.reclasificacion)
+    except incidents.RevisionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return _con_estado_de_causas(registro)
 
 
 @app.get(

@@ -181,8 +181,7 @@ Así que no se detecta presencia, y la etiqueta se llama *sin veredicto* y no
 
 ## 3 bis. El reloj
 
-**Un solo reloj: 12 horas desde el último movimiento** — lo que ocurra más tarde entre
-que el sistema terminó algo y que una persona hizo algo. Cualquier acción lo reinicia.
+**Un solo reloj: 12 horas desde el último trabajo que sigue en pie.**
 
 Mientras corre, el incidente está en **activos** y se puede reanalizar. Cuando vence,
 las dos cosas se acaban **a la vez**: el botón se apaga y el incidente pasa a cerrados.
@@ -193,6 +192,33 @@ pantalla de «lo que pide atención» algo que no pide nada es lo contrario de p
 sirve esa pantalla.
 
 El **veredicto** y la **reclasificación** no caducan nunca.
+
+### Qué cuenta como «trabajo que sigue en pie» (afinado el 2026-09-21)
+
+Una versión anterior decía «desde el último movimiento — cualquier acción lo reinicia».
+Es lo que se implementó primero y produjo dos fallos que solo se ven usándolo:
+
+**Deshacer rejuvenecía el incidente.** Un expediente cerrado hacía tres días, alguien
+confirmaba una causa por error y la deshacía, y reaparecía en activos como recién
+llegado. Deshacer es una corrección, no trabajo: un apunte `pendiente` no aporta fecha,
+así que el reloj **retrocede** hasta el último veredicto real que quede vigente.
+
+**Revisar en frío reabría el incidente**, y el expediente rebotaba entre las dos
+pestañas a cada clic mientras se trabajaba en él. Peor que incómodo: la reclasificación
+en frío es justamente lo que rescata el dato de acierto (§3), así que resucitar el
+incidente por hacerla convierte una virtud en un castigo. Ahora un veredicto alarga el
+reloj **solo si se dio mientras el incidente seguía abierto**; los posteriores cambian
+la etiqueta y nada más.
+
+Lo que no se pierde: el operario que descarta una causa en la hora 11 y vuelve en la 13
+sigue teniendo su ventana. La cadena se mantiene viva mientras cada veredicto caiga
+dentro de la que abrió el anterior; el primero que llegue fuera de plazo la corta.
+
+> **Un incidente cerrado no se reabre nunca por acción humana** — decisión del
+> propietario, 2026-09-21. En la Fase 3 eso significa que **no se podrá pedir un
+> reanálisis sobre un expediente cerrado, ni aunque se le acabe de aportar evidencia
+> nueva**. Es coherente con que el botón viva donde vive la pestaña: si el reanálisis
+> pudiera dispararse desde cerrados, volveríamos a tener dos relojes.
 
 ### Por qué un solo número
 
@@ -397,8 +423,22 @@ Lo que la Fase 2 añade es **un bloque y nada más**:
 ```
 revision:
   veredictos:      [ {en, iteracion, causa, veredicto, evidencia, sospecha} ]
-  reclasificacion: null | "causa_confirmada" | "alerta_no_valida"
+  reclasificacion: null | "alerta_no_valida"
 ```
+
+`veredicto` es `confirmada`, `descartada` o `pendiente` — este último para
+corregir un clic mal dado.
+
+> **`reclasificacion` tiene un solo valor, no dos** (corregido al implementar,
+> 2026-09-15). El diseño preveía también `causa_confirmada`, para quien vuelve en
+> frío y dice «la primera era la buena». Sobra: como el veredicto no caduca y el
+> cierre se deduce, eso es **un veredicto normal dado más tarde**, y la etiqueta
+> pasa a *causa confirmada* sola. Tener dos caminos para lo mismo es tener dos
+> sitios que pueden discrepar.
+>
+> Lo que sí necesita campo propio es *alerta no válida*, porque no se puede
+> expresar como veredicto sobre una causa: no dice que el modelo se equivocara,
+> dice que le dieron un problema que no existía.
 
 Cuatro decisiones dentro, todas con motivo:
 
@@ -515,6 +555,11 @@ que conviene tener presentes al implementar:
 > terminal y pasará a ofrecer el relanzado, y solo al agotarse el presupuesto de
 > reanálisis se concluirá *causa no determinada*. Es decir, se **intercala** un paso
 > antes de la conclusión actual. No olvidarlo al empezar la Fase 3.
+>
+> Y lo contrario también está decidido: **sobre un expediente cerrado no se ofrece
+> reanálisis**, ni aunque se le aporte evidencia nueva en frío. El razonamiento está en
+> §3 bis; la tentación de «ya que hay evidencia, deja reanalizar» reintroduciría el
+> segundo reloj que se descartó.
 
 La pestaña de **cerrados es una pestaña aparte**, no el mismo listado con el filtro de
 periodo corrido hacia atrás.

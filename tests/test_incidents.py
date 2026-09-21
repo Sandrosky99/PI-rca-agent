@@ -96,12 +96,12 @@ check("pasada la ventana, se acepta de nuevo",
 print("\n=== 8. Ciclo de estados y diagnostico ===")
 limpiar()
 r = incidents.claim(payload())
-incidents.mark(r, incidents.ANALIZANDO)
+incidents.mark(r["id"], incidents.ANALIZANDO)
 guardado = json.loads((TMP / f"{r['id']}.json").read_text(encoding="utf-8"))
 check("persiste 'analizando'", guardado["estado"] == incidents.ANALIZANDO)
 
 diag = {"root_causes": [{"cause": "Desgaste", "explanation": "e", "recommended_action": "a"}]}
-incidents.mark(r, incidents.FINALIZADO, diagnostico=diag)
+incidents.mark(r["id"], incidents.FINALIZADO, diagnostico=diag)
 guardado = json.loads((TMP / f"{r['id']}.json").read_text(encoding="utf-8"))
 check("persiste 'finalizado'", guardado["estado"] == incidents.FINALIZADO)
 check("guarda el diagnostico en el fichero", guardado["diagnostico"] == diag)
@@ -112,8 +112,8 @@ limpiar()
 a = incidents.claim(payload(start="2026-08-19T01:00:00Z"))
 b = incidents.claim(payload(asset="Bomba B", start="2026-08-19T02:00:00Z"))
 c = incidents.claim(payload(asset="Bomba C", start="2026-08-19T03:00:00Z"))
-incidents.mark(a, incidents.ANALIZANDO)
-incidents.mark(c, incidents.FINALIZADO, diagnostico=diag)
+incidents.mark(a["id"], incidents.ANALIZANDO)
+incidents.mark(c["id"], incidents.FINALIZADO, diagnostico=diag)
 # b se queda en 'recibido'
 n = incidents.sweep_interrupted()
 check("marca 2 (uno analizando, uno recibido)", n == 2, f"{n}")
@@ -175,7 +175,7 @@ check("un solo incidente", len(list(TMP.glob("*.json"))) == 1, f"{len(list(TMP.g
 print("\n=== 14. Un incidente INTERRUMPIDO se puede re-lanzar ===")
 limpiar()
 r = incidents.claim(payload())
-incidents.mark(r, incidents.ANALIZANDO)
+incidents.mark(r["id"], incidents.ANALIZANDO)
 incidents.sweep_interrupted()          # muere el proceso y se rearranca
 ruta = TMP / (r["id"] + ".json")
 check("queda interrumpido", json.loads(ruta.read_text(encoding="utf-8"))["estado"] == incidents.INTERRUMPIDO)
@@ -189,13 +189,13 @@ check("cuenta el intento", r2 and r2.get("intentos") == 2, r2 and r2.get("intent
 print("\n=== 15. Un incidente FALLIDO sigue bloqueado ===")
 limpiar()
 r = incidents.claim(payload())
-incidents.mark(r, incidents.FALLIDO)
+incidents.mark(r["id"], incidents.FALLIDO)
 check("reenviar no lo relanza", incidents.claim(payload()) is None)
 
 print("\n=== 16. El enfriamiento no bloquea a un interrumpido ===")
 limpiar()
 r = incidents.claim(payload())
-incidents.mark(r, incidents.ANALIZANDO)
+incidents.mark(r["id"], incidents.ANALIZANDO)
 incidents.sweep_interrupted()
 # Otro StartTime dentro de la ventana: antes lo paraba el enfriamiento
 r2 = incidents.claim(payload(start="2026-08-19T22:12:00Z"))
@@ -208,7 +208,7 @@ print("\n=== 16b. Un incidente PAUSADO se puede re-lanzar ===")
 # relanzarlo -- ni reenviando la notificacion ni esperando al enfriamiento.
 limpiar()
 r = incidents.claim(payload())
-incidents.mark(r, incidents.PAUSADO)   # llego con el interruptor echado
+incidents.mark(r["id"], incidents.PAUSADO)   # llego con el interruptor echado
 ruta = TMP / (r["id"] + ".json")
 check("queda pausado", json.loads(ruta.read_text(encoding="utf-8"))["estado"] == incidents.PAUSADO)
 
@@ -221,7 +221,7 @@ check("cuenta el intento", r2 and r2.get("intentos") == 2, r2 and r2.get("intent
 print("\n=== 16c. El enfriamiento no bloquea a un pausado ===")
 limpiar()
 r = incidents.claim(payload())
-incidents.mark(r, incidents.PAUSADO)
+incidents.mark(r["id"], incidents.PAUSADO)
 # Durante una parada en caliente la alarma sigue activa y PI reenvia con otro
 # StartTime. Si el enfriamiento lo parase, toda alerta recibida mientras el
 # interruptor estaba echado quedaria perdida -- lo contrario de para lo que se
@@ -235,7 +235,7 @@ print("\n=== 16d. Los demas estados siguen bloqueados ===")
 for estado in (incidents.RECIBIDO, incidents.ANALIZANDO, incidents.FINALIZADO):
     limpiar()
     r = incidents.claim(payload())
-    incidents.mark(r, estado)
+    incidents.mark(r["id"], estado)
     check(f"'{estado}' no se re-reserva", incidents.claim(payload()) is None)
 
 print("\n=== 17. Recuento por estado (para /health) ===")
@@ -243,8 +243,8 @@ limpiar()
 a = incidents.claim(payload(asset="Bomba A"))
 b = incidents.claim(payload(asset="Bomba B"))
 c = incidents.claim(payload(asset="Bomba C"))
-incidents.mark(a, incidents.FINALIZADO, diagnostico={"root_causes": []})
-incidents.mark(b, incidents.ANALIZANDO)
+incidents.mark(a["id"], incidents.FINALIZADO, diagnostico={"root_causes": []})
+incidents.mark(b["id"], incidents.ANALIZANDO)
 incidents.sweep_interrupted()
 rec = incidents.contar_por_estado()
 check("cuenta el finalizado", rec.get(incidents.FINALIZADO) == 1, rec)
@@ -259,7 +259,7 @@ config.INCIDENT_TRACE_RETENTION_DAYS = 90
 
 # Incidente ANTIGUO, con trace
 viejo = incidents.claim(payload(asset="Bomba Vieja"))
-incidents.mark(viejo, incidents.FINALIZADO, diagnostico={"root_causes": [{"cause": "x"}]},
+incidents.mark(viejo["id"], incidents.FINALIZADO, diagnostico={"root_causes": [{"cause": "x"}]},
                trace={"step3_prompt": "P" * 60000, "step6_prompts": ["Q" * 40000]})
 rv = TMP / (viejo["id"] + ".json")
 reg = json.loads(rv.read_text(encoding="utf-8"))
@@ -269,7 +269,7 @@ tam_antes = rv.stat().st_size
 
 # Incidente RECIENTE, tambien con trace
 nuevo_i = incidents.claim(payload(asset="Bomba Nueva"))
-incidents.mark(nuevo_i, incidents.FINALIZADO, diagnostico={"root_causes": []},
+incidents.mark(nuevo_i["id"], incidents.FINALIZADO, diagnostico={"root_causes": []},
                trace={"step3_prompt": "R" * 50000})
 rn = TMP / (nuevo_i["id"] + ".json")
 
@@ -299,7 +299,7 @@ print("\n=== 20. Retencion a 0 desactiva la poda ===")
 config.INCIDENT_TRACE_RETENTION_DAYS = 0
 limpiar()
 x = incidents.claim(payload())
-incidents.mark(x, incidents.FINALIZADO, trace={"step3_prompt": "Z" * 10000})
+incidents.mark(x["id"], incidents.FINALIZADO, trace={"step3_prompt": "Z" * 10000})
 rx = TMP / (x["id"] + ".json")
 reg = json.loads(rx.read_text(encoding="utf-8"))
 reg["actualizado_en"] = "2020-01-01T00:00:00Z"
@@ -311,8 +311,67 @@ config.INCIDENT_TRACE_RETENTION_DAYS = orig_ret
 print("\n=== 21. Escritura atomica: no quedan .tmp ===")
 limpiar()
 r = incidents.claim(payload())
-incidents.mark(r, incidents.FINALIZADO, diagnostico=diag)
+incidents.mark(r["id"], incidents.FINALIZADO, diagnostico=diag)
 check("sin ficheros .tmp residuales", list(TMP.glob("*.tmp")) == [], f"{list(TMP.glob('*.tmp'))}")
+
+print("\n=== 22. EL CASO DE LA FASE 2: un escritor no pisa lo del otro ===")
+# Hasta el 2026-09-15 mark() recibia el incidente cargado en memoria y escribia
+# ese objeto COMPLETO encima del fichero. Con un solo escritor daba igual; con la
+# pantalla escribiendo tambien, cualquier cosa anadida mientras el workflow tenia
+# su copia desaparecia sin dejar rastro.
+limpiar()
+r = incidents.claim(payload())
+incidents.mark(r["id"], incidents.ANALIZANDO)
+
+# El workflow arranca y se queda con SU copia (aqui, 'r'), que no volvera a leer.
+copia_del_workflow = dict(r)
+
+# Mientras tanto, otro escritor -- la pantalla -- anade su bloque en disco.
+incidents._actualizar(r["id"], {"revision": {"veredictos": [
+    {"en": "2026-09-15T15:02:00Z", "iteracion": 1, "causa": 0,
+     "veredicto": "descartada", "evidencia": "No hay obstruccion."}]}})
+
+# Y ahora el workflow termina y marca el incidente.
+incidents.mark(r["id"], incidents.FINALIZADO, diagnostico=diag)
+
+final = json.loads((TMP / (r["id"] + ".json")).read_text(encoding="utf-8"))
+check("el bloque del otro escritor SIGUE AHI", "revision" in final, list(final))
+check("y con su contenido intacto",
+      final.get("revision", {}).get("veredictos", [{}])[0].get("evidencia") == "No hay obstruccion.",
+      final.get("revision"))
+check("el workflow escribio lo suyo igualmente", final["estado"] == incidents.FINALIZADO)
+check("y su diagnostico", final["diagnostico"] == diag)
+# La copia en memoria del workflow nunca tuvo 'revision': si mark() la hubiera
+# volcado, el bloque habria desaparecido. Esto es lo que lo demuestra.
+check("la copia del workflow no conocia 'revision'", "revision" not in copia_del_workflow)
+
+print("\n=== 23. mark() no acepta el documento entero ===")
+# La firma es la salvaguarda: si aceptara el registro, volveria a ser posible
+# volcarlo. Que reciba el id lo hace imposible por construccion.
+import inspect
+primer_parametro = list(inspect.signature(incidents.mark).parameters)[0]
+check("recibe un id, no un registro", primer_parametro == "incidente_id", primer_parametro)
+check("mark() devuelve el registro tal como quedo",
+      isinstance(incidents.mark(r["id"], incidents.FINALIZADO), dict))
+
+print("\n=== 23b. Re-reservar tampoco se lleva por delante la revision ===")
+# claim() es el unico sitio que todavia escribe un registro construido de cero,
+# en la rama de re-reserva. Hoy no puede perder nada -- solo se re-reserva desde
+# INTERRUMPIDO y PAUSADO, que nunca produjeron causas que juzgar --, pero el dia
+# que eso cambie el fallo seria silencioso y la perdida irrecuperable.
+limpiar()
+r = incidents.claim(payload())
+incidents._actualizar(r["id"], {"revision": {"reclasificacion": "alerta_no_valida"}})
+incidents.mark(r["id"], incidents.PAUSADO)
+r2 = incidents.claim(payload())          # se reactiva y PI reenvia
+check("la re-reserva funciona", r2 is not None)
+tras = json.loads((TMP / (r["id"] + ".json")).read_text(encoding="utf-8"))
+check("y conserva la revision", tras.get("revision", {}).get("reclasificacion") == "alerta_no_valida",
+      tras.get("revision"))
+check("sin dejar de contar el intento", tras.get("intentos") == 2, tras.get("intentos"))
+
+print("\n=== 24. Actualizar un incidente que no existe no revienta ===")
+check("devuelve None sin excepcion", incidents.mark("noexiste__20260101T000000Z", incidents.FINALIZADO) is None)
 
 shutil.rmtree(TMP, ignore_errors=True)
 print("\n" + "=" * 62)
