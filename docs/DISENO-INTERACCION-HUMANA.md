@@ -5,8 +5,8 @@
 
 | | |
 |---|---|
-| **Fecha** | 10 de septiembre de 2026 · revisado el 15 |
-| **Estado** | Fase 1 entregada · Fases 2 y 3 con el diseño cerrado |
+| **Fecha** | 10 de septiembre de 2026 · revisado el 22 |
+| **Estado** | Fases 1 y 2 entregadas · Fase 3 con el diseño cerrado, sin empezar |
 | **Alcance** | Fases 1 a 3 |
 
 ---
@@ -432,9 +432,15 @@ datos.
 **Contador de reanálisis** · [añadido]
 «Te queda 1 de 2». Un presupuesto que se ve se gasta mejor que uno que no se ve.
 
-**Tiempo restante de la ventana** · [recomendado]
-Que se sepa cuánto queda antes de que cierre solo, para no volver de planta y
-encontrárselo cerrado sin aviso.
+**Tiempo restante de la ventana** · [recomendado] — **aplazado a la Fase 3** (2026-09-22)
+Que se sepa cuánto queda antes de que cierre solo, para no volver de planta y encontrárselo
+cerrado sin aviso.
+
+En la Fase 2 no se pone, y no es por coste: es que **al cerrarse todavía no se pierde nada**.
+El veredicto no caduca y se puede dar igual desde cerrados, así que el reloj solo mueve de
+pestaña. Una cuenta atrás hacia una consecuencia que no existe mete prisa sin motivo, que es
+peor que no tenerla. En la Fase 3 vencer apaga el botón de reanalizar; entonces sí hay algo
+que perder, y entonces se pone.
 
 ### Fuera de la pantalla en caliente
 
@@ -492,10 +498,24 @@ nuevas**, y si los veredictos apuntasen solo al índice, los de la primera tanda
 a señalar causas que no son. Ponerlo ahora cuesta nada; añadirlo con expedientes
 cerrados es una migración.
 
-**No hay campo de anclaje para el reloj.** Se planteó un `finalizado_en` sellado una sola
-vez, por miedo a que `actualizado_en` se moviera con cada escritura y extendiera la
-ventana. Con el reloj deslizante eso es justo lo que se quiere: cualquier movimiento lo
-reinicia. `actualizado_en` **es** el anclaje, siempre que los dos escritores lo toquen.
+**El anclaje del reloj es un campo propio** (corregido el 2026-09-18). Se planteó un
+`finalizado_en` sellado una sola vez, por miedo a que `actualizado_en` se moviera con cada
+escritura y extendiera la ventana. Se descartó por lo contrario —con un reloj deslizante,
+que cualquier movimiento lo reinicie es justo lo que se quiere— y se dejó `actualizado_en`
+de anclaje.
+
+**Estaba mal, y solo se vio usándolo.** `actualizado_en` lo pisa *cada* escritura, así que
+el primer veredicto sobre un incidente antiguo lo ponía a «ahora» y lo devolvía a activos
+como recién llegado — el mismo fallo que el anclaje venía a evitar, colado por la puerta
+de atrás.
+
+El anclaje es hoy `movimiento_workflow`, que escribe únicamente `mark()`: solo el workflow,
+y solo cuando hace trabajo de verdad. Para los expedientes anteriores al campo el respaldo
+es `recibido_en`, que se escribe una vez y no se vuelve a tocar. Sobre ese ancla se
+recorren después los veredictos vigentes, con la regla del §3 bis.
+
+No es estado derivado guardado —que es lo que se quitó al eliminar `finalizado_en`—: es el
+hecho de cuándo trabajó el workflow por última vez, y no se deduce de ningún otro sitio.
 
 Y lo que **no** lleva: ni disposición, ni nº de OT, ni autor, ni estado de cierre —que se
 deduce—, ni lista de interacciones, que se cayó con la decisión de no detectar presencia.
@@ -542,8 +562,11 @@ dentro de tres meses.
   evidencia sobre una causa concreta. No es una puerta para conversar, y acotarlo así
   acota el coste, el alcance y la superficie de «la IA decide cosas».
 
-- **Un botón de «alerta falsa» en la pantalla en caliente.** Alcance distinto al de
-  los demás botones y riesgo alto de confusión. Se hace en frío, reclasificando.
+- **Un botón de «alerta falsa» con el alcance mezclado.** El riesgo es *dónde* está, no
+  *cuándo* se ofrece: actúa sobre el incidente entero mientras los demás actúan sobre una
+  causa, y juntarlos es lo que hace que alguien con prisa pulse el que no era. Por eso
+  vive en un bloque propio al final del detalle, con su encabezado. Limitarlo **además**
+  a la pestaña de cerrados se probó y se retiró el 2026-09-21; el porqué está en §4.
 
 - **Nada sobre órdenes de trabajo**: ni el número, ni su contenido, ni su estado, ni
   avisos de seguimiento. Todo eso vive en el GMAO, que lo guarda mejor. Ver §4.
@@ -566,15 +589,17 @@ dentro de tres meses.
 |---|---|---|---|
 | 1 | **Esquema del fichero** — ver §5 bis | Fase 2 | ✅ cerrado el 2026-09-15 |
 | 2 | **Transporte de la pantalla** (sondeo), endpoints en la app FastAPI | Fase 1 | ✅ hecho el 2026-09-14 |
-| 3 | **El segundo escritor** — ver §5 bis | Fase 2 | ⬜ por implementar |
+| 3 | **El segundo escritor** — ver §5 bis | Fase 2 | ✅ hecho el 2026-09-15 |
 | 4 | **Re-entrada en `run_rca_analysis`** — hoy solo acepta el payload; hay que sacar el Step 4 a un punto re-entrable | Fase 3 | ⬜ |
 | 5 | **Arreglo de `pausado`** | — | ✅ hecho el 2026-09-11 |
 
 Fases, donde cada una sirve por sí sola:
 
 1. **Pantalla de solo lectura.** ✅ Entregada el 2026-09-14.
-2. **Captura del feedback**, guardado sin bucle. Permite ver qué escribe la gente de
-   verdad antes de construir encima.
+2. **Captura del feedback**, guardado sin bucle. ✅ Entregada el 2026-09-22. Permite ver
+   qué escribe la gente de verdad antes de construir encima. Queda fuera a propósito el
+   **tiempo restante de la ventana** (§5): con el reloj moviendo solo de pestaña sería una
+   cuenta atrás hacia nada. Entra con la Fase 3, que es cuando vencer apaga el reanálisis.
 3. **La vuelta al modelo**, con las dos reglas: verificar en vez de razonar, y «no lo
    sé» como resultado de primera clase.
 
