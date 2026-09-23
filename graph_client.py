@@ -60,6 +60,20 @@ _METADATA_ATTRS = {
 # activos de este dominio no bajan de 3-4 niveles (asset > Indicators > KPI > Level Alert).
 _MAX_DEPTH = 8
 
+# De todo lo que _METADATA_ATTRS descarta, estos son los que SI dicen algo al
+# diagnosticar: que maquina es. No entran en la seleccion de variables del
+# Step 4 -- ahi solo estorbarian, no son magnitudes de proceso -- pero se
+# consultan aparte y entran en el contexto del Step 3 como ficha del equipo.
+#
+# El motivo (2026-09-23). El Step 6 conocia el equipo solo por AssetType y
+# AssetModel del payload, y PI no siempre los manda: el payload real del
+# 2026-09-08 no los traia, y el resumen se quedaba en "una desviacion en el KPI
+# Hydraulic Efficiency de PS20102 A03 PS02 Pump 02", sin decir que era una bomba
+# centrifuga monocanal -- que es justo lo que hace plausible un atascamiento por
+# trapos. El AF si lo sabe.
+_IDENTIDAD_ATTRS = ("Asset Type", "Asset Model", "Manufacturer",
+                    "Equipment Model", "Serial Number", "Tag Name")
+
 
 def _filter_attributes(raw_attrs: list[dict]) -> list[dict]:
     """Descarta atributos de metadatos y normaliza los campos que ve el modelo.
@@ -234,6 +248,87 @@ async def _resolver_cadena(session: ClientSession, asset_name: str,
     return path_activo, path_subsistema
 
 
+async def _contexto_de_planta(session: ClientSession) -> list[dict]:
+    """Elementos que se anaden al contexto de TODA alerta de la planta.
+
+    El Step 2 recorre el subarbol del activo y el de su subsistema, asi que solo
+    ve lo que cuelga de ahi. Una alerta del biologico no alcanza los solidos en
+    suspension de la entrada -- que viven en
+    WWTP\Operational - Intake\SS101 Intake Inlet Suspended Solids, otra rama --
+    aunque sean justo lo que la explica.
+
+    Que va en la lista lo decide quien conoce la planta, no el codigo: ver
+    config.AF_PLANT_CONTEXT_ELEMENTS.
+
+    Formato de cada entrada: el path del elemento, entero o desde cualquier
+    punto. El ultimo segmento es el nombre y el resto acota, porque los nombres
+    se repiten ("1 - Intake" esta dos veces dentro del WWTP). Con el sufijo
+    "\*" entra ademas su subarbol; sin el, solo sus atributos propios -- que es
+    lo normal, porque estos sensores tienen un unico atributo 'Value' y sus
+    hijos son totalizadores y configuracion, puro ruido para el modelo.
+
+    Una entrada que no resuelve NO corta el analisis: queda un WARNING y se
+    sigue. Es configuracion escrita a mano contra un grafo que cambia, asi que
+    lo raro no es que se equivoque, es que no se entere nadie.
+    """
+    entradas = config.AF_PLANT_CONTEXT_ELEMENTS
+    if not entradas:
+        return []
+
+    planta = (config.AF_PLANT_ROOT + SEPARADOR_AF) if config.AF_PLANT_ROOT else None
+    grupos: list[dict] = []
+    atributos = 0
+
+    for entrada in entradas:
+        con_descendientes = entrada.endswith(SEPARADOR_AF + "*")
+        limpia = entrada[:-2] if con_descendientes else entrada
+        seg = _segmentos(limpia)
+        if not seg:
+            continue
+        nombre = seg[-1]
+        # El resto del path acota; si solo dieron el nombre, acota la planta.
+        filtro = SEPARADOR_AF.join(seg[:-1]) if len(seg) > 1 else planta
+
+        if con_descendientes:
+            nuevos = await _walk_subtree(
+                session, nombre, filtro, [nombre], skip_names=set(),
+            )
+        else:
+            # Un solo elemento. No se usa _walk_subtree con depth=1 porque su
+            # guarda de profundidad avisa por cada hijo que no visita, y ese
+            # WARNING esta ahi para detectar jerarquias anomalas: llenarlo de
+            # avisos esperados lo convertiria en ruido.
+            nuevos = []
+            datos = await _call_graph_neighborhood(session, nombre, filtro)
+            if "error" not in datos:
+                attrs = _filter_attributes(
+                    datos.get("relationships", {}).get("HAS_ATTRIBUTE", []))
+                if attrs:
+                    nuevos = [{
+                        "element": nombre,
+                        "description": (datos.get("element") or {}).get("description", ""),
+                        "attributes": attrs,
+                    }]
+        if not nuevos:
+            log.warning("Contexto de planta: '%s' no aporta nada (no existe, o "
+                        "no tiene atributos utiles). Revisa AF_PLANT_CONTEXT_ELEMENTS.",
+                        entrada)
+            continue
+
+        for g in nuevos:
+            if atributos >= config.MAX_PLANT_CONTEXT_ATTRIBUTES:
+                log.warning("Contexto de planta: se alcanzo el tope de %d atributos; "
+                            "el resto de la lista no entra.",
+                            config.MAX_PLANT_CONTEXT_ATTRIBUTES)
+                return grupos
+            grupos.append(g)
+            atributos += len(g.get("attributes") or [])
+
+    log.info("Contexto de planta: %d grupo(s), %d atributo(s), de %d entrada(s).",
+             len(grupos), atributos, len(entradas))
+    return grupos
+
+
 async def build_af_context(asset_name: str, subsystem_name: str,
                            system_name: str = "") -> dict:
     """Step 2: construye main_asset_context / nearby_elements_context desde el AF.
@@ -285,6 +380,22 @@ async def build_af_context(asset_name: str, subsystem_name: str,
                 [asset_name], skip_names=set(),
             )
 
+            # Se anade a TODA alerta de la planta, este donde este en la
+            # jerarquia. Va en su propio bloque y no mezclado con los otros dos
+            # porque su prioridad es distinta: puede influir o no, y el prompt
+            # lo dice.
+            # Ficha del equipo: no entra en el menu del Step 4, va directa
+            # al Step 6. Ver _IDENTIDAD_ATTRS.
+            identidad = []
+            if path_activo:
+                datos = await _call_graph_neighborhood(session, asset_name, path_activo)
+                if "error" not in datos:
+                    for a in datos.get("relationships", {}).get("HAS_ATTRIBUTE", []):
+                        if a.get("name") in _IDENTIDAD_ATTRS and a.get("piApiPath"):
+                            identidad.append({"name": a["name"], "piApiPath": a["piApiPath"]})
+
+            plant_context = await _contexto_de_planta(session)
+
             nearby_elements_context = []
             if subsystem_name and subsystem_name != asset_name:
                 nearby_elements_context = await _walk_subtree(
@@ -295,4 +406,8 @@ async def build_af_context(asset_name: str, subsystem_name: str,
     return {
         "main_asset_context": main_asset_context,
         "nearby_elements_context": nearby_elements_context,
+        "plant_context": plant_context,
+        # Aparte de los tres bloques: no se le ofrece al modelo para elegir, se
+        # consulta siempre y se le entrega hecha en el Step 6.
+        "asset_identity": identidad,
     }

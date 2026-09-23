@@ -449,6 +449,15 @@ AF_PLANT_ROOT: str = (os.environ.get("AF_PLANT_ROOT") or "WWTP").strip()
 # código. Un elemento por línea o separados por "|", con el nombre tal como
 # aparece en el AF. Entran en el prompt como la prioridad MÁS BAJA de todas:
 # pueden influir o no, y se miran solo si lo cercano no explica la desviación.
+# Tope de atributos que puede aportar el bloque de planta entero.
+#
+# Con la lista escrita a mano no hace falta -- diez sensores de un atributo cada
+# uno son diez variables --, pero una entrada con el sufijo "\*" arrastra su
+# subarbol, y ahi si: "Operational\*" serian cientos, en el prompt de CADA
+# alerta. Es un guardarrail de coste, no un limite del dominio, y cuando recorta
+# lo dice en el log.
+MAX_PLANT_CONTEXT_ATTRIBUTES: int = _entero("MAX_PLANT_CONTEXT_ATTRIBUTES", 60)
+
 AF_PLANT_CONTEXT_ELEMENTS: list[str] = [
     e.strip() for e in (os.environ.get("AF_PLANT_CONTEXT_ELEMENTS") or "").split("|")
     if e.strip()

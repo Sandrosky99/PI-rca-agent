@@ -80,6 +80,9 @@ GRAFO = [
     ruta("WWTP", "Consumers", "3 - Secondary", "Biological"),
     ruta("WWTP", "Meters", "Electrical Energy", "iCGBT", "iMCC2", "Biological"),
     ruta("zzz_$NBHOME$_", "01. Water Treatment Plant", "Operation", "Biological"),
+    # Sensores de calidad en OTRA rama: el bloque fijo de contexto de planta.
+    ruta("WWTP", "Operational", "1 - Intake", "SS101 Intake Inlet Suspended Solids"),
+    ruta("WWTP", "Operational", "7 - Discharge Water", "PH705 Discharge Water pH"),
     # Mismo nombre de activo bajo dos subsistemas del MISMO System: solo la
     # cadena entera lo resuelve.
     ruta("WWTP", "Operational", "3 - Secondary", "Reactor A", "Blower 01"),
@@ -190,8 +193,15 @@ print("\n=== 9. El techo de planta es configurable ===")
 check("existe AF_PLANT_ROOT", hasattr(config, "AF_PLANT_ROOT"))
 check("por defecto es WWTP", config.AF_PLANT_ROOT == "WWTP", config.AF_PLANT_ROOT)
 check("existe la lista de contexto de planta", hasattr(config, "AF_PLANT_CONTEXT_ELEMENTS"))
-check("y esta vacia mientras nadie la rellene",
-      config.AF_PLANT_CONTEXT_ELEMENTS == [], config.AF_PLANT_CONTEXT_ELEMENTS)
+# Se comprueba el PARSEO, no el contenido: lo que haya en la lista depende del
+# .env de cada maquina, y una prueba que dependa de eso esta verde en CI y roja
+# en el equipo de despliegue. Ya paso una vez con WORKFLOW_ENABLED.
+check("es una lista de cadenas",
+      isinstance(config.AF_PLANT_CONTEXT_ELEMENTS, list)
+      and all(isinstance(e, str) for e in config.AF_PLANT_CONTEXT_ELEMENTS))
+check("sin entradas vacias ni espacios sueltos",
+      all(e and e == e.strip() for e in config.AF_PLANT_CONTEXT_ELEMENTS),
+      config.AF_PLANT_CONTEXT_ELEMENTS)
 
 print("\n=== 10. El codigo real construye el filtro ANCLADO ===")
 # Si alguien quitara el separador, todo lo demas seguiria en verde y el espejo
@@ -210,6 +220,50 @@ firma = inspect.signature(graph_client.build_af_context).parameters
 check("la firma lo lleva", "system_name" in firma, list(firma))
 check("y es opcional, para no romper a quien no lo pase",
       firma["system_name"].default == "", firma["system_name"].default)
+
+RUTA_PRUEBA = SEP * 2 + "SRV" + SEP + "DB" + SEP + "WWTP|SS101"
+
+print("\n=== 12. El bloque fijo de contexto de planta ===")
+# El Step 2 solo ve lo que cuelga del activo y de su subsistema. Una alerta del
+# biologico no alcanza los solidos en suspension de la entrada -- que viven en
+# WWTP\Operational\1 - Intake, otra rama -- aunque sean justo lo que la explica.
+check("hay un tope de atributos para el bloque",
+      hasattr(config, "MAX_PLANT_CONTEXT_ATTRIBUTES"))
+import workflow
+
+check("el bloque entra en la lista blanca del Step 4",
+      "plant_context" in workflow._BLOQUES_PARA_EL_MODELO,
+      workflow._BLOQUES_PARA_EL_MODELO)
+# Es LA comprobacion critica: si el bloque no estuviera en _collect_authorized_paths,
+# la puerta del Step 5 descartaria como "inventada" una variable que el propio
+# prompt le acaba de ofrecer, y el sintoma seria un WARNING confuso.
+import workflow
+
+ctx = {"main_asset_context": [], "nearby_elements_context": [],
+       "plant_context": [{"element": "SS101", "description": "",
+                          "attributes": [{"name": "Value",
+                                          "piApiPath": RUTA_PRUEBA}]}]}
+check("una variable de planta pasa la puerta",
+      workflow._normalize_pi_path(RUTA_PRUEBA)
+      in workflow._collect_authorized_paths(ctx))
+
+print("\n=== 13. El prompt lo explica y le da la ultima prioridad ===")
+check("el modelo de datos habla de tres bloques",
+      "tres bloques" in workflow._DATA_MODEL_SECTION)
+check("y describe que es plant_context", "plant_context" in workflow._DATA_MODEL_SECTION)
+# La regla estricta decia "estos dos bloques" y se quedo atras al anadir el
+# tercero: le ofrecia plant_context por un lado y por otro le decia que solo
+# valen dos. Lo destapo leer el mensaje construido entero, no una prueba.
+check("la regla estricta cuenta los TRES bloques",
+      "los TRES bloques" in workflow._DATA_MODEL_SECTION
+      and "estos dos bloques" not in workflow._DATA_MODEL_SECTION)
+check("dice que NO cuelgan del activo ni del subsistema",
+      "otra rama de la jerarquia" in workflow._DATA_MODEL_SECTION)
+# Prioridad 5 y no 1: puede influir o no. Si se le diera el mismo peso que a lo
+# cercano, el modelo pediria calidad de agua para una alerta de vibracion.
+check("es la prioridad 5 del objetivo", "5. Por ultimo" in workflow._OBJECTIVE_SECTION)
+check("y solo si lo cercano no lo explica",
+      "solo si lo anterior no explica" in workflow._OBJECTIVE_SECTION)
 
 print("\n" + "=" * 62)
 if fallos:
