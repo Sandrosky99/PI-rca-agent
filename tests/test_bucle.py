@@ -57,7 +57,15 @@ def check(nombre, cond, detalle=""):
         fallos.append(nombre)
 
 
-async def fake_af(asset, subsystem):
+# Recoge la jerarquia con la que el workflow pide el AF. El 'system' no es
+# decorativo: es lo que desambigua cuando un nombre de elemento se repite en el
+# grafo, y si el workflow dejara de pasarlo el fallo seria silencioso -- un
+# af_context bien formado con las variables de otro sitio.
+llamadas_af = []
+
+
+async def fake_af(asset, subsystem, system=""):
+    llamadas_af.append((asset, subsystem, system))
     return AF
 
 

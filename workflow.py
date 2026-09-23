@@ -1176,8 +1176,12 @@ async def run_rca_analysis(notification_payload: dict, trace: dict | None = None
     # -------------------------------------------------------------------------
     asset = _valid_field(notification_payload, "Asset", str)
     subsystem = _valid_field(notification_payload, "Subsystem", str) or ""
+    # 'System' se pasa para DESAMBIGUAR, no para adornar: los nombres de elemento
+    # se repiten en el grafo y sin él se puede recorrer el subárbol equivocado.
+    # Ver graph_client._resolver_path().
+    system = _valid_field(notification_payload, "System", str) or ""
     if asset:
-        af_context = await graph_client.build_af_context(asset, subsystem)
+        af_context = await graph_client.build_af_context(asset, subsystem, system)
     else:
         log.warning("Payload sin 'Asset' valido; se omite la consulta al AF (Step 2).")
         af_context = {"main_asset_context": [], "nearby_elements_context": []}

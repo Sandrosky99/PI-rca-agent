@@ -35,6 +35,7 @@ SUITES = [
     ("Pantalla de la sala de control", "test_pantalla.py"),
     ("Revision humana: veredictos", "test_revision.py"),
     ("Pasadas del analisis (iteraciones)", "test_iteraciones.py"),
+    ("Alcance del Step 2 en el AF", "test_af_alcance.py"),
 ]
 
 

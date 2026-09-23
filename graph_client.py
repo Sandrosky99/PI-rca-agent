@@ -32,6 +32,10 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 
 import config
 
+# Separador de rutas del AF. Se escribe asi para que no se confunda con una
+# secuencia de escape al leer el fichero.
+SEPARADOR_AF = chr(92)
+
 log = logging.getLogger(__name__)
 
 _SERVER_PARAMS = StdioServerParameters(
@@ -138,33 +142,154 @@ async def _walk_subtree(
     return groups
 
 
-async def build_af_context(asset_name: str, subsystem_name: str) -> dict:
+async def _call_graph_search(session: ClientSession, nombre: str,
+                             path_contains: str | None) -> list[dict]:
+    """Todos los elementos cuyo nombre contiene 'nombre' dentro de ese path.
+
+    graph_search y no graph_neighborhood porque devuelve TODOS los candidatos y
+    su numero. graph_neighborhood devuelve uno, y no dice si habia mas -- que es
+    justo el dato que hace falta para saber si la pregunta estaba bien hecha.
+    """
+    _TOPE = 200
+    result = await session.call_tool(
+        "graph_search",
+        {"node_type": "Element", "name_contains": nombre,
+         "path_contains": path_contains, "limit": _TOPE},
+    )
+    texto = "".join(getattr(c, "text", "") for c in result.content)
+    i, j = texto.find("{"), texto.rfind("}")
+    if i < 0:
+        return []
+    datos = json.loads(texto[i:j + 1])
+    if datos.get("count", 0) >= _TOPE:
+        # graph_search devuelve EXACTAMENTE el limite pedido sin avisar de que
+        # hay mas. Visto el 2026-09-22 dando por bueno un recuento truncado.
+        log.warning("AF: la busqueda de '%s' toco el tope de %d; puede haber mas.", nombre, _TOPE)
+    return datos.get("results", [])
+
+
+def _segmentos(path: str) -> list[str]:
+    return [t for t in (path or "").split(SEPARADOR_AF) if t]
+
+
+async def _resolver_cadena(session: ClientSession, asset_name: str,
+                           subsystem_name: str, system_name: str) -> tuple[str | None, str | None]:
+    """El path del activo y el de su subsistema, usando la CADENA entera.
+
+    Lo que identifica un elemento en el AF no es su nombre: es la cadena
+    System + Subsystem + Asset. Cualquiera de los tres por separado se repite
+    -- medido el 2026-09-22 sobre el grafo entero: 47 nombres del WWTP existen
+    tambien en otra raiz y 45 se repiten dentro del propio WWTP, y PI puede
+    mandar perfectamente dos alertas con Subsystem="Biological" bajo Systems
+    distintos --, pero los tres juntos no.
+
+    Por eso NO se resuelve el subsistema primero por su nombre, que fue el
+    primer intento (2026-09-22) y estaba mal por este mismo motivo: apoyaba toda
+    la desambiguacion en dos de los tres eslabones.
+
+    Se busca el ACTIVO, se exige que su path contenga los otros dos como
+    SEGMENTOS -- no como subcadena: "WWTP" es subcadena de "WWTP_Demo", que es
+    un modelo espejo de esta misma planta -- y el subsistema sale de ese mismo
+    path, asi que no hace falta buscarlo y no puede salir otro.
+
+    Si sobra mas de un candidato se dice en el log en vez de callarlo: significa
+    que la cadena no basto, y eso es informacion sobre el modelo de PI.
+    """
+    planta = (config.AF_PLANT_ROOT + SEPARADOR_AF) if config.AF_PLANT_ROOT else None
+    candidatos = [c for c in await _call_graph_search(session, asset_name, planta)
+                  if c.get("name") == asset_name]
+    if not candidatos:
+        log.warning("AF: no hay ningun elemento llamado '%s' dentro de %s.",
+                    asset_name, config.AF_PLANT_ROOT or "el grafo")
+        return None, None
+
+    # Se estrecha con los dos eslabones restantes, y se afloja en orden inverso
+    # si la cadena no casa: un System mal configurado en PI no puede costar el
+    # analisis entero -- quedarse sin contexto es peor que la ambiguedad.
+    for exigidos in ((subsystem_name, system_name), (subsystem_name,), (system_name,), ()):
+        pedidos = [e for e in exigidos if e]
+        quedan = [c for c in candidatos
+                  if all(e in _segmentos(c.get("path", "")) for e in pedidos)]
+        if quedan:
+            break
+    else:
+        quedan = candidatos
+
+    if len(quedan) > 1:
+        log.warning("AF: '%s' sigue siendo ambiguo con System='%s' y Subsystem='%s': "
+                    "%d candidatos. Se usa el primero: %s",
+                    asset_name, system_name, subsystem_name, len(quedan),
+                    quedan[0].get("path"))
+
+    path_activo = quedan[0].get("path")
+    # El subsistema NO se busca: se recorta del path del activo, asi que es por
+    # construccion el que contiene a ese activo y no otro con el mismo nombre.
+    path_subsistema = None
+    seg = _segmentos(path_activo)
+    if subsystem_name in seg:
+        corte = len(seg) - 1 - seg[::-1].index(subsystem_name)
+        path_subsistema = SEPARADOR_AF.join(seg[:corte + 1])
+
+    log.info("AF: cadena resuelta | activo=%s | subsistema=%s", path_activo, path_subsistema)
+    return path_activo, path_subsistema
+
+
+async def build_af_context(asset_name: str, subsystem_name: str,
+                           system_name: str = "") -> dict:
     """Step 2: construye main_asset_context / nearby_elements_context desde el AF.
 
     Args:
         asset_name: valor "Asset" del payload de PI -- el activo directamente
-                    afectado por la alerta. Se usa como raíz de main_asset_context.
+                    afectado por la alerta. Se usa como raiz de main_asset_context.
         subsystem_name: valor "Subsystem" del payload -- el elemento que agrupa
-                         al activo principal. Se usa como raíz de
+                         al activo principal. Se usa como raiz de
                          nearby_elements_context; su rama correspondiente al
-                         propio asset_name se omite (ya está en main_asset_context).
+                         propio asset_name se omite (ya esta en main_asset_context).
+        system_name: valor "System" del payload. NO es decorativo: es lo que
+                     desambigua cuando el nombre del subsistema se repite.
 
     Returns:
         {"main_asset_context": [...], "nearby_elements_context": [...]}
         Listo para incluirse en el mensaje del Step 3 (build_analysis_context).
     """
+    # Techo de planta, anclado con el separador: path_contains es una
+    # SUBCADENA, y "WWTP" a secas casa tambien con "WWTP_Demo" -- un modelo
+    # espejo de esta misma planta que entra por el conector de Wonderware, con
+    # los mismos nombres de equipo y atributos distintos. Ver config.AF_PLANT_ROOT.
+    planta = (config.AF_PLANT_ROOT + SEPARADOR_AF) if config.AF_PLANT_ROOT else None
+
     async with stdio_client(_SERVER_PARAMS) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
 
+            # La jerarquia del payload de PI se usa ENTERA, y hasta el
+            # 2026-09-22 se tiraba. Lo que identifica un elemento no es su
+            # nombre sino la cadena System + Subsystem + Asset:
+            #
+            #   payload:   System=External Pumping  Subsystem=Pumping Station 01
+            #              Asset=PS20102 A03 PS02 Pump 02
+            #   path real: WWTP\Operational\External Pumping\Area C\Pumping
+            #              Station 01\PS20102 A03 PS02 Pump 02
+            #
+            # Hay segmentos intercalados (Operational, Area C), asi que la
+            # cadena no reconstruye el path -- pero si lo identifica.
+            path_activo, path_subsistema = await _resolver_cadena(
+                session, asset_name, subsystem_name, system_name,
+            )
+
+            # El recorrido arranca del path exacto que salio de la cadena. Si
+            # no se encontro, se cae al techo de planta: quedarse sin contexto
+            # es peor que la ambiguedad.
             main_asset_context = await _walk_subtree(
-                session, asset_name, None, [asset_name], skip_names=set(),
+                session, asset_name, path_activo or planta,
+                [asset_name], skip_names=set(),
             )
 
             nearby_elements_context = []
             if subsystem_name and subsystem_name != asset_name:
                 nearby_elements_context = await _walk_subtree(
-                    session, subsystem_name, None, [subsystem_name], skip_names={asset_name},
+                    session, subsystem_name, path_subsistema or planta,
+                    [subsystem_name], skip_names={asset_name},
                 )
 
     return {
