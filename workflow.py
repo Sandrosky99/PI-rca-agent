@@ -115,6 +115,12 @@ _OBJECTIVE_SECTION = (
     "4. Contexto del nivel superior (el elemento que agrupa al activo) solo "
     "si aporta una causa compartida plausible (p. ej. una condición aguas "
     "arriba) o permite comparar con un activo equivalente.\n"
+    "5. Por ultimo, y solo si lo anterior no explica la desviacion, las "
+    "variables de `plant_context`. Son de otras zonas de la planta y pueden "
+    "influir o no: pidelas unicamente cuando exista una via fisica concreta "
+    "por la que lo que pasa alli llegue hasta este activo (p. ej. una carga "
+    "de entrada anomala que recorre el tratamiento). No las pidas por "
+    "completar el cuadro.\n"
     "No selecciones una variable solo porque aparece en los datos: cada una "
     "debe tener una razón de causalidad o comparación plausible con la "
     "desviación concreta, para no acumular variables irrelevantes."
@@ -125,7 +131,7 @@ _DATA_MODEL_SECTION = (
     "(AF) de PI relevante para esta alerta, extraída directamente del grafo "
     "de conocimiento — no debes asumir ni inventar variables que no aparezcan "
     "aquí.\n\n"
-    "Los datos están organizados en dos bloques:\n"
+    "Los datos están organizados en tres bloques:\n"
     "- `main_asset_context`: el árbol completo del activo directamente "
     "afectado por la alerta (el valor Asset del payload) y todos sus "
     "sub-elementos — sensores, transmisores, indicadores/KPIs calculados, "
@@ -134,7 +140,14 @@ _DATA_MODEL_SECTION = (
     "principal (el valor Subsystem del payload) y sus otros elementos "
     "hermanos — útil para comparar contra activos similares o para "
     "descartar/confirmar causas fuera del activo principal (p.ej. un "
-    "problema aguas arriba que afecta a ambas bombas de la estación).\n\n"
+    "problema aguas arriba que afecta a ambas bombas de la estación).\n"
+    "- `plant_context`: variables de otras zonas de la planta, seleccionadas "
+    "de antemano por los ingenieros de la instalacion porque pueden "
+    "condicionar a cualquier activo aguas abajo (p. ej. la calidad del agua "
+    "de entrada o la del vertido). NO cuelgan del activo de la alerta ni de "
+    "su subsistema: estan en otra rama de la jerarquia, y por eso no "
+    "apareceran en los dos bloques anteriores. Pueden influir o no; ver la "
+    "prioridad 5 del objetivo.\n\n"
     "La estructura de los assets se divide en meters (incluye todos los "
     "medidores del asset y dispositivos que porten medidas de este, como un "
     "power meter o un variador de velocidad) y en indicadores, que calculan "
@@ -163,7 +176,7 @@ _DATA_MODEL_SECTION = (
     "elemento principal, que es el asset. La estructura confiere "
     "significado.\n\n"
     "Regla estricta: elige exclusivamente entre los piApiPath listados en "
-    "estos dos bloques. Si para tu diagnóstico necesitarías una variable que "
+    "los TRES bloques. Si para tu diagnóstico necesitarías una variable que "
     "no aparece aquí, indícalo explícitamente en tu respuesta en vez de "
     "inventar un nombre de atributo o una ruta que no existe."
 )
@@ -495,11 +508,25 @@ def _normalize_pi_path(path: str) -> str:
     return " ".join(path.split()).casefold()
 
 
+# Los bloques del af_context entre los que el modelo PUEDE elegir. Es la unica
+# fuente: de aqui sale tanto el JSON que se le enseña en el Step 3 como la
+# lista blanca contra la que se valida su respuesta, asi que no pueden
+# discrepar.
+#
+# La lista es EXPLICITA y no 'todo el af_context', y eso tiene fecha: el
+# 2026-09-23 se añadio 'asset_identity' al af_context y, como el prompt volcaba
+# el diccionario entero, aparecio en el mensaje del Step 3 con sus piApiPath a
+# la vista -- pero fuera de la lista blanca. Se le ofrecian tres rutas que la
+# puerta del Step 5 rechazaba despues como inventadas.
+_BLOQUES_PARA_EL_MODELO = ("main_asset_context", "nearby_elements_context",
+                           "plant_context")
+
+
 def _collect_authorized_paths(af_context: dict) -> dict[str, str]:
     """Índice {clave normalizada: piApiPath canónico} con todos los atributos
     que el Step 2 puso delante del modelo. Es la lista blanca del Step 5."""
     index: dict[str, str] = {}
-    for block in ("main_asset_context", "nearby_elements_context"):
+    for block in _BLOQUES_PARA_EL_MODELO:
         for group in af_context.get(block) or []:
             for attr in group.get("attributes") or []:
                 path = attr.get("piApiPath") or ""
@@ -664,7 +691,66 @@ def _parse_detection_time(payload: dict) -> tuple[datetime, datetime]:
     return detected_at_local.astimezone(pytz.utc), detected_at_local
 
 
-def build_analysis_context(payload: dict, af_context: dict) -> dict:
+async def ficha_del_equipo(payload: dict, af_context: dict) -> dict:
+    """Que maquina es: {"Asset Model": "single-channel centrifugal pump", ...}.
+
+    NO es un paso del workflow: es parte de la PREPARACION DEL CONTEXTO del
+    Step 3, igual que la consulta al AF. Se numeran los steps porque son las
+    fases del analisis, y esto no es una fase -- es un dato mas que entra en el
+    mensaje. Meterle un numero (se llamo 'Step 2 bis' un rato) obliga a
+    explicarlo cada vez, y este proyecto ya arrastra bastante con tener que
+    aclarar que es un workflow y no un agente.
+
+    Se resuelve ANTES de construir el mensaje del Step 3, y ese es el punto: el
+    modelo tiene que saber ante que equipo esta CUANDO ELIGE las variables, no
+    solo al diagnosticar. No es lo mismo elegir para una bomba centrifuga
+    monocanal -- donde el atascamiento por trapos es plausible y conviene mirar
+    la aspiracion -- que para una de varios canales.
+
+    Por que hay que preguntarselo a PI: el AF guarda el piApiPath de estos
+    atributos, no su valor. Vuelven con el timestamp de la epoca, uno repetido
+    por cada punto de la ventana, y aqui se queda solo el valor.
+
+    NO puede tumbar el analisis. Es contexto que mejora la seleccion, no un
+    requisito: si PI no responde se sigue sin ficha, como se venia haciendo
+    hasta el 2026-09-23.
+    """
+    identidad = af_context.get("asset_identity") or []
+    if not identidad:
+        return {}
+    variables = [{"element": "ficha", "piApiPath": a["piApiPath"]} for a in identidad]
+    por_ruta = {a["piApiPath"]: a["name"] for a in identidad}
+    try:
+        detected_at_utc, _ = _parse_detection_time(payload)
+        datos = await pi_client.fetch_historical_data(
+            variables, detected_at_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            config.PI_LOOKBACK_HOURS,
+            (config.PI_QUERY_INTERVAL_VALUE, config.PI_QUERY_INTERVAL_UNIT),
+        )
+    except Exception as exc:                       # noqa: BLE001 -- ver docstring
+        log.warning("No se pudo leer la ficha del equipo (%s); se sigue sin ella.", exc)
+        return {}
+
+    ficha = {}
+    for ruta, contenido in (datos.get("data") or {}).items():
+        items = (contenido.get("Content") or {}).get("Items") or []
+        valores = []
+        for it in items:
+            v = it.get("Value")
+            if isinstance(v, dict):
+                v = v.get("Name", str(v))
+            if v not in valores:
+                valores.append(v)
+        if len(valores) == 1 and str(valores[0]).strip():
+            ficha[por_ruta.get(ruta, ruta)] = valores[0]
+    if ficha:
+        log.info("Ficha del equipo: %s",
+                 "; ".join(f"{k}={v}" for k, v in ficha.items()))
+    return ficha
+
+
+def build_analysis_context(payload: dict, af_context: dict,
+                           ficha_equipo: dict | None = None) -> dict:
     """Step 3: construye el mensaje de 4 secciones que se enviará al modelo en el Step 4.
 
     Toma el payload real que envía PI System (ver CLAUDE.md → "Payload real de
@@ -742,12 +828,36 @@ def build_analysis_context(payload: dict, af_context: dict) -> dict:
         f"({detected_at_utc.strftime('%Y-%m-%dT%H:%M:%SZ')} UTC)."
     )
 
-    af_context_json = json.dumps(af_context, ensure_ascii=False, indent=2)
+    # Solo los bloques entre los que puede elegir. 'asset_identity' NO entra:
+    # son las rutas de la ficha del equipo, que el codigo ya ha resuelto antes
+    # de llegar aqui. Enseñarselas seria ofrecerle rutas que luego se le
+    # rechazan -- la ficha se le da como TEXTO, unas lineas mas abajo.
+    # Que equipo es, en la seccion 3 y NO como variables elegibles. El modelo
+    # tiene que saber ante que maquina esta cuando elige: no se eligen las
+    # mismas variables para una bomba centrifuga monocanal -- donde el
+    # atascamiento por trapos es plausible -- que para una de varios canales.
+    #
+    # Se dice explicitamente que NO estan en las listas, porque si no el modelo
+    # las buscaria entre los piApiPath y no las encontraria.
+    ficha_texto = ""
+    if ficha_equipo:
+        detalle = "; ".join(f"{k}: {v}" for k, v in ficha_equipo.items())
+        ficha_texto = (
+            "\n\nFicha del equipo afectado (leida del AF): " + detalle + ".\n"
+            "Estos datos describen QUE MAQUINA es y estan aqui para que orientes "
+            "tu seleccion -- el modo de fallo plausible depende del tipo de "
+            "equipo. NO son variables de proceso y NO aparecen en las listas de "
+            "abajo: no los busques ahi ni los incluyas en tu respuesta. Se te "
+            "entregaran igualmente junto con los datos historicos."
+        )
+
+    para_el_modelo = {b: af_context.get(b) or [] for b in _BLOQUES_PARA_EL_MODELO}
+    af_context_json = json.dumps(para_el_modelo, ensure_ascii=False, indent=2)
 
     claude_prompt = (
         f"1. Objetivo de la interacción\n\n{_OBJECTIVE_SECTION}\n\n"
         f"2. Payload de la notificación\n\n{summary}\n\n"
-        f"3. Explicación del modelo de datos\n\n{_DATA_MODEL_SECTION}\n\n"
+        f"3. Explicación del modelo de datos\n\n{_DATA_MODEL_SECTION}{ficha_texto}\n\n"
         f"4. Datos del grafo de AF\n\n{af_context_json}\n\n"
         f"{_FINAL_INSTRUCTION}"
     )
@@ -768,6 +878,7 @@ def build_analysis_context(payload: dict, af_context: dict) -> dict:
         "summary": summary,
         "system_prompt": SYSTEM_PROMPT,
         "claude_prompt": claude_prompt,
+        "ficha_equipo": ficha_equipo or {},
     }
 
 
@@ -797,11 +908,39 @@ def _label_historical_data(variables: list[dict], raw_data) -> list[dict]:
         items = content.get("Items", [])
 
         if items and all(it.get("Timestamp") == _EPOCH_MARKER for it in items):
-            labeled.append({
+            # Atributo sin historizacion: PI devuelve la serie entera con el
+            # timestamp de la epoca. Lo que importa aqui es que se ENSEÑE su
+            # valor, no solo que se diga que es estatico.
+            #
+            # Hasta el 2026-09-23 se descartaba, y costaba caro: el atributo
+            # "Reference" de un indicador es el baseline del activo, y el
+            # propio _OBJECTIVE_SECTION le pide al modelo que lo consulte como
+            # PRIORIDAD 1 -- "para saber si la desviacion es real frente a su
+            # comportamiento habitual". Medido sobre la bomba de la alerta real:
+            # PI devolvia 49.8 y el Step 6 recibia "sin historizacion real".
+            # Se le pedia el dato, se pagaba la consulta y se borraba antes de
+            # enseñarselo.
+            distintos = []
+            for it in items:
+                v = it.get("Value")
+                if isinstance(v, dict):
+                    v = v.get("Name", str(v))
+                if v not in distintos:
+                    distintos.append(v)
+            unidad = next((it.get("UnitsAbbreviation") for it in items
+                           if it.get("UnitsAbbreviation")), "")
+            etiqueta = {
                 "element": var.get("element"),
                 "piApiPath": pi_path,
-                "values": "sin historización real (atributo estático/de configuración, no una medición)",
-            })
+                "nota": ("atributo estatico o de configuracion: es un valor fijo, "
+                         "no una serie temporal"),
+                # Deberia haber uno solo. Si hubiera varios se enseñan todos:
+                # que un "valor fijo" cambie es informacion, no ruido.
+                "valor": distintos[0] if len(distintos) == 1 else distintos,
+            }
+            if unidad:
+                etiqueta["uom"] = unidad
+            labeled.append(etiqueta)
             continue
 
         uom = ""
@@ -875,6 +1014,15 @@ def build_diagnosis_context(
         f"{_describe_interval(int_value, int_unit)}."
     )
 
+    # La ficha tambien aqui, y no solo al elegir variables: el modo de
+    # fallo plausible depende de que maquina sea. Una bomba centrifuga
+    # MONOCANAL admite atascamiento por trapos; una multicanal, mucho menos.
+    ficha = context.get("ficha_equipo") or {}
+    ficha_note = ""
+    if ficha:
+        ficha_note = ("\n\nFicha del equipo: "
+                      + "; ".join(f"{k}: {v}" for k, v in ficha.items()) + ".")
+
     demo_note = _DEMO_MODE_NOTE if config.DEMO_MODE else ""
     final_instruction = _DIAGNOSIS_FINAL_INSTRUCTION.replace(
         "{window_menu}", _format_window_menu(_available_window_options(hours), hours),
@@ -882,7 +1030,7 @@ def build_diagnosis_context(
 
     return (
         f"1. Objetivo de la interacción\n\n{_DIAGNOSIS_OBJECTIVE_SECTION}{demo_note}\n\n"
-        f"2. Resumen de la alerta\n\n{context['summary']}{limitations_note}\n\n"
+        f"2. Resumen de la alerta\n\n{context['summary']}{ficha_note}{limitations_note}\n\n"
         f"3. Datos históricos\n\n{window_note}\n\n{_DIAGNOSIS_DATA_SECTION_INTRO}\n\n"
         f"{data_json}\n\n"
         f"{final_instruction}"
@@ -1193,7 +1341,11 @@ async def run_rca_analysis(notification_payload: dict, trace: dict | None = None
     # -------------------------------------------------------------------------
     # Step 3: Preparar el contexto estructurado para el modelo
     # -------------------------------------------------------------------------
-    context = build_analysis_context(notification_payload, af_context)
+    # La ficha del equipo entra en el contexto del Step 3, no en el Step 5:
+    # tiene que saber ante que maquina esta CUANDO ELIGE las variables. Su
+    # valor vive en PI, no en el grafo. Si PI no responde se sigue sin ella.
+    ficha = await ficha_del_equipo(notification_payload, af_context)
+    context = build_analysis_context(notification_payload, af_context, ficha)
     if trace is not None:
         trace["step3_prompt"] = context["claude_prompt"]
         trace["system_prompt"] = SYSTEM_PROMPT

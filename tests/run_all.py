@@ -36,6 +36,7 @@ SUITES = [
     ("Revision humana: veredictos", "test_revision.py"),
     ("Pasadas del analisis (iteraciones)", "test_iteraciones.py"),
     ("Alcance del Step 2 en el AF", "test_af_alcance.py"),
+    ("Ficha del equipo en el Step 6", "test_ficha_equipo.py"),
 ]
 
 
