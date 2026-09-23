@@ -40,7 +40,7 @@ que no existe:
 | | Este sistema | Lo que haría un agente |
 |---|---|---|
 | Quién decide el siguiente paso | `run_rca_analysis()`: los 6 steps están escritos en orden en el cuerpo de la función | El modelo, en cada vuelta de un bucle |
-| Llamadas al LLM | Exactamente 2, en posiciones fijas (Step 4 y Step 6) | Un número indeterminado |
+| Llamadas al LLM | **Las fija el código**, no el modelo: 2 en posiciones fijas (Steps 4 y 6), más una repetición del Step 6 por cada ampliación de ventana concedida (`MAX_HISTORY_ADJUSTMENTS`, 1 por defecto) | Un número indeterminado |
 | Acceso a herramientas | **Ninguno.** `llm_client.generate()` nunca pasa el parámetro `tools` | El modelo recibe las tools y decide cuál invocar |
 | Quién llama a los MCP servers | El código Python (`graph_client.py`, `pi_client.py`) | El modelo, vía tool use |
 | Reintentos y recuperación | Código determinista (`tenacity`, `_query_with_retry()`) | El modelo observa el error y decide |
@@ -69,8 +69,9 @@ alerta y un flujo mucho más difícil de auditar.
 | Step | Descripción | Estado |
 |---|---|---|
 | 1 | Recibir notificación HTTP POST de PI System | ✅ Completado |
-| 2 | Consultar la estructura del AF (afkg-graph-mcp) para el `Asset`/`Subsystem` de la alerta → `main_asset_context`/`nearby_elements_context` con atributos reales (`piApiPath`) | ✅ Completado (`graph_client.py`) |
-| 3 | Preparar el mensaje de 4 secciones (objetivo, payload, modelo de datos, JSON del AF) para el modelo | ✅ Completado (`build_analysis_context()`) |
+| 2 | Consultar el AF (afkg-graph-mcp) identificando el activo por la cadena `System + Subsystem + Asset` → `main_asset_context` / `nearby_elements_context` / `plant_context` | ✅ Completado (`graph_client.py`) |
+| ↳ | **Ficha del equipo** — qué máquina es, leída de PI. Sin número: no es una fase, alimenta el mensaje del Step 3 | ✅ Completado (`workflow.ficha_del_equipo()`) |
+| 3 | Preparar el mensaje de 4 secciones (objetivo con 5 prioridades, payload, modelo de datos con 3 bloques + ficha, JSON del AF) | ✅ Completado (`build_analysis_context()`) |
 | 4 | El modelo identifica, de esas variables reales, cuáles necesita analizar | ✅ Completado (parseado y usado en el Step 5) |
 | 5 | Obtener datos históricos de PI vía MCP Server (aveva-pi-mcp) | ✅ Completado (`pi_client.py`) |
 | 6 | El modelo produce diagnóstico y recomendaciones | ✅ Completado (`build_diagnosis_context()`) |
@@ -84,6 +85,25 @@ de la bomba (impulsor y anillos de desgaste). Validación real pero no exhaustiv
 con otros KPIs y otros tipos de activo.
 
 ### Próximo paso
+
+**La Fase 3 está empezada** (2026-09-23). Lo hecho hasta ahora:
+
+- **El expediente guarda las pasadas del análisis**, no una sola: el campo
+  `diagnostico` pasa a `diagnosticos`, una lista con su `iteracion`. Un veredicto
+  apunta a `(iteracion, causa)`, y sobre una lista plana ese par no tendría a
+  dónde apuntar cuando llegue la segunda tanda de causas.
+- **El Step 2 identifica el activo por la cadena** `System + Subsystem + Asset`,
+  con el alcance acotado a `AF_PLANT_ROOT`.
+- **Tercer bloque `plant_context`** y **ficha del equipo**, que salieron de
+  diseñar el reanálisis: el operario puede aportar evidencia sobre variables que
+  el Step 2 no alcanza.
+
+Lo que falta de la Fase 3: la re-entrada en `run_rca_analysis()` con el feedback,
+el manejo de estados (un reanálisis fallido **no puede destruir** la iteración 1),
+el cambio en `cierre()` —descartar todas deja de ser terminal— y la pantalla
+(botón, contador y estado «recalculando»). Sigue pendiente cerrar el **texto del
+feedback** que se le entrega al modelo.
+
 
 **Decidir el canal de salida del diagnóstico.** Desde el 2026-09-03 el diagnóstico se guarda en el
 fichero del incidente (`incidents/<id>.json`), junto al payload que lo originó, así que ya no se
@@ -209,6 +229,8 @@ webhook.py  (FastAPI :8090)          Step 1 ✅
     ▼
 workflow.py  (run_rca_analysis)      ← el control de flujo vive aquí, de principio a fin
     ├── Step 2 ✅ graph_client.py  → afkg-graph-mcp  → estructura real del AF
+    │     └ ficha del equipo ✅ pi_client.py → aveva-pi-mcp → qué máquina es
+    │       no lleva número: es un dato más del mensaje del Step 3, como el AF
     ├── Step 3 ✅ build_analysis_context()           → mensaje de 4 secciones
     ├── Step 4 ✅ llm_client.generate()              → qué atributos reales necesita
     ├── Step 5 ✅ pi_client.py     → aveva-pi-mcp    → datos históricos de PI
@@ -402,6 +424,88 @@ devuelve el vecindario directo, no el árbol completo, y los activos tienen vari
 Probado end-to-end contra el servidor y Neo4j reales el 2026-07-13 con `PS20102 A03 PS02 Pump 02` /
 `Pumping Station 01` (15 grupos en `main_asset_context`, 5 en `nearby_elements_context`).
 
+#### El activo se identifica por la CADENA, no por su nombre (2026-09-23)
+
+`graph_neighborhood` empareja **por nombre exacto**, y hasta esta fecha se le
+pasaba el `Asset` y el `Subsystem` a secas (`path_contains=None`). La jerarquía
+que PI manda en cada notificación —`Plant`, `System`, `Subsystem`— se tiraba.
+
+Eso importa porque los nombres se repiten. Medido contra el grafo real: **8.404
+elementos en 26 raíces**, de las que WWTP es una con 357. De los nombres del
+WWTP, **47 existen también en otra raíz y 45 se repiten dentro del propio WWTP**.
+
+El choque peligroso no es entre plantas distintas sino un **espejo de esta**:
+
+```
+WWTP\Operational\1 - Intake\Line 1\PS01102                  <- el modelo del AF
+WonderwareHistorian Connector\...\WWTP_Demo\...\PS01102   <- la misma bomba
+```
+
+Mismos nombres de equipo, atributos distintos. Un recorrido que empareje por
+nombre devuelve un `af_context` **perfectamente formado con las variables del
+modelo equivocado**, y el diagnóstico sale plausible. No falla nada visible.
+
+Ahora, en `_resolver_cadena()`:
+
+1. Busca el **activo** por su nombre, dentro de la planta.
+2. Exige que su path lleve `System` y `Subsystem` como **segmentos** — no como
+   subcadena: `Line 1` casaría con `Line 10`.
+3. El **subsistema se recorta del path del activo**, no se busca. Así es por
+   construcción el que contiene a *ese* activo y no otro que se llame igual.
+
+El paso 3 es el que cierra el caso, y de paso ahorra una consulta al AF.
+
+⚠️ **El techo de planta va ANCLADO** (`WWTP` + separador). `path_contains` es
+una subcadena, y `"WWTP"` a secas también casa con `"WWTP_Demo"` — el filtro
+puesto para evitar el problema lo dejaba pasar justo en el caso peor. Ver
+`config.AF_PLANT_ROOT`.
+
+Si la cadena no casa —un `System` mal configurado en PI, un campo vacío— se
+suelta un eslabón y se reintenta, hasta el techo de planta: quedarse sin
+análisis sería peor que la ambigüedad. Y si aún así sobran candidatos, sale un
+WARNING con cuántos había.
+
+#### Tercer bloque: `plant_context` (2026-09-23)
+
+El Step 2 solo ve lo que cuelga del activo y de su subsistema. Una alerta del
+biológico **no alcanza los sólidos en suspensión de la entrada** —que viven en
+`WWTP\Operational\1 - Intake`, otra rama— aunque sean justo lo que la explica.
+
+`AF_PLANT_CONTEXT_ELEMENTS` lo arregla para las variables que se sepa de antemano
+que importan en toda la planta. Hoy son diez sensores de calidad del influente y
+del vertido, uno por `Value`. Entran en el prompt como **prioridad 5, la última**.
+
+Por defecto solo los atributos propios del elemento; con el sufijo `\*` entra su
+subárbol. Una entrada que no resuelve **no corta el análisis**: deja un WARNING.
+Es configuración escrita a mano contra un grafo que cambia.
+
+#### La ficha del equipo — preparación del contexto del Step 3 (2026-09-23)
+
+**No es un step y no lleva número a propósito.** Los steps son las *fases* del
+análisis; esto es un dato más que entra en el mensaje, igual que el AF.
+
+Qué máquina es: `Asset Type`, `Asset Model`, `Manufacturer`, `Equipment Model`,
+`Serial Number`, `Tag Name` (`_IDENTIDAD_ATTRS`). Siguen **filtrados** del
+contexto que elige el modelo —no son magnitudes que analizar y gastarían plazas
+de `MAX_SELECTED_VARIABLES`— pero se consultan aparte.
+
+**Se resuelve antes de construir el mensaje del Step 3**, y ese es el punto: el
+modelo tiene que saber ante qué equipo está *cuando elige*, no solo al
+diagnosticar. No se eligen las mismas variables para una bomba centrífuga
+**monocanal** —donde el atascamiento por trapos es plausible y conviene mirar la
+aspiración— que para una de varios canales.
+
+Por qué hay que preguntárselo a PI: **el AF guarda el `piApiPath`, no el valor**.
+Vuelven con el timestamp de la época, uno repetido por cada punto de la ventana.
+
+Antes de esto el Step 6 conocía el equipo solo por `AssetType`/`AssetModel` del
+payload, **y PI no siempre los manda**: el payload real del 2026-09-08 no los
+traía y el resumen se quedaba sin decir qué máquina era.
+
+⚠️ **No puede tumbar el análisis.** Si PI no responde devuelve vacío, queda un
+WARNING y se sigue. Es contexto que mejora la selección, no un requisito.
+
+
 ### Step 3 — Construcción del mensaje (`build_analysis_context()`, implementado 2026-07-13)
 
 Construye `claude_prompt` con 4 secciones fijas/dinámicas:
@@ -427,6 +531,27 @@ El rol y dominio del sistema (EDAR + bombeos externos, nunca genérico) están f
 modelo (Steps 4 y 6). Está separado del mensaje dinámico a propósito: la API es *stateless* entre
 llamadas, no hay memoria real entre el Step 4 y el Step 6 salvo lo que se reenvíe en cada request,
 así que el rol se fija como constante en vez de repetirlo a mano en cada prompt.
+
+**Actualizado el 2026-09-23.** El mensaje sigue teniendo cuatro secciones, pero
+dos de ellas cambian:
+
+- La sección 1 gana la **prioridad 5**: las variables de `plant_context`, y solo
+  *«si lo anterior no explica la desviación»*, con una vía física concreta por la
+  que lo de allí llegue hasta este activo. Las cuatro anteriores, intactas.
+- La sección 3 describe **tres** bloques y explica que `plant_context` no cuelga
+  del activo ni de su subsistema, que está en otra rama, y que por eso no
+  aparecería en los dos primeros.
+- La sección 3 lleva además la **ficha del equipo**, diciendo explícitamente que
+  **no son variables elegibles** y que no las busque entre los `piApiPath`.
+
+⚠️ **El JSON que se vuelca NO es el `af_context` entero.** Sale de
+`_BLOQUES_PARA_EL_MODELO`, la misma constante de la que sale la lista blanca del
+Step 4, así que **no pueden discrepar**. Es una lista explícita y no «todo menos
+lo que no quiero» por un motivo con fecha: al añadir `asset_identity` al
+`af_context`, el volcado del diccionario entero lo metió en el prompt con sus
+`piApiPath` a la vista pero **fuera de la lista blanca** — se le ofrecían tres
+rutas que la puerta rechazaba después como inventadas.
+
 
 ### Step 4 — El modelo elige las variables (implementado 2026-07-13, endurecido 2026-07-28)
 
@@ -503,6 +628,12 @@ Todo lo descartado queda en el log con su motivo. Ese log es el que permite dete
 se está degradando: si empiezan a aparecer WARNINGs de rutas inventadas, el problema está en el
 Step 3, no aquí.
 
+**`plant_context` entra en la lista blanca** (2026-09-23). Parece obvio y no lo
+es: si el bloque nuevo no estuviera en `_collect_authorized_paths()`, la puerta
+descartaría como «variable inventada» justo lo que el prompt le acaba de
+ofrecer, y el síntoma sería un WARNING desconcertante en vez de un error.
+
+
 ### Step 5 — Datos históricos de PI (`pi_client.py`, implementado 2026-07-28)
 
 Lanza `aveva-pi-mcp` como subproceso (MCP sobre stdio, igual que `graph_client.py`) y usa
@@ -561,6 +692,31 @@ normaliza dos casos que confundían al modelo:
 `root_causes` (array de 2 o 3 objetos con `cause`, `explanation` y `recommended_action`, ordenado
 por probabilidad) y `history_request` (ver abajo). Se parsea con el mismo `_extract_json_payload()`
 del Step 4.
+
+#### Un atributo estático ENSEÑA su valor (corregido el 2026-09-23)
+
+Cuando una serie venía entera con el timestamp de la época —atributo sin
+historización— `_label_historical_data()` **descartaba su valor** y solo decía
+«sin historización real». Eso se llevaba por delante el atributo `Reference` de
+cada indicador, que es el **baseline del activo** y que `_OBJECTIVE_SECTION` pide
+como **prioridad 1** *«para saber si la desviación es real frente a su
+comportamiento habitual»*.
+
+Medido contra PI sobre la bomba de la alerta real:
+
+```
+PI devuelve    : Reference -> 97 puntos, todos 49.8
+el Step 6 veía : "sin historización real (atributo estático...)"
+```
+
+Se le pedía el dato al modelo, se pagaba la consulta a PI y se borraba antes de
+enseñárselo. Ahora se muestra el valor con su unidad, etiquetado como valor fijo.
+Si hubiera más de un valor distinto se enseñan todos: que un «valor fijo» cambie
+es información, no ruido.
+
+El Step 6 recibe además la **ficha del equipo** en su sección 2, por lo mismo
+que el Step 3: el modo de fallo plausible depende de qué máquina sea.
+
 
 #### Ventana variable: el modelo puede pedir más histórico (añadido 2026-08-31)
 
@@ -781,14 +937,27 @@ asimetría en vez de crearla — pero sin la evaluación del punto 8 no habría 
 
 ```
 rca-agent/
-├── webhook.py           ← FastAPI: recibe POST de PI (Step 1)
-│                          Endpoints: GET /health, POST /notification, GET /notifications/history
-├── workflow.py             ← Orquestación del workflow (run_rca_analysis) + Steps 3, 4 y 6
+├── webhook.py           ← FastAPI: recibe POST de PI (Step 1) y sirve la pantalla
+│                          GET /health · POST /notification · GET /notifications/history
+│                          GET /pantalla · GET /incidentes · GET /incidentes/{id}
+│                          POST /incidentes/{id}/veredicto · .../reclasificacion
+├── workflow.py          ← Orquestación (run_rca_analysis) + Steps 3, 4 y 6 + la ficha
 ├── graph_client.py      ← Cliente MCP para afkg-graph-mcp (Step 2)
-├── pi_client.py         ← Cliente MCP para aveva-pi-mcp (Step 5)
-├── incidents.py         ← Registro de incidentes: deduplicación y persistencia
+├── pi_client.py         ← Cliente MCP para aveva-pi-mcp (Step 5 y la ficha del equipo)
+├── incidents.py         ← Expediente: dedup, persistencia y revisión humana (Fase 2)
 ├── llm_client.py        ← Abstracción sobre el proveedor de LLM (Gemini/Anthropic)
 ├── config.py            ← Carga .env y valida variables obligatorias
+├── serve.py             ← Arranca uvicorn leyendo WEBHOOK_PORT del .env
+├── static/pantalla.html ← La pantalla de la sala de control (una sola página)
+├── docs/
+│   ├── DISENO-INTERACCION-HUMANA.md  ← Por qué la pantalla es como es. LEER ANTES DE TOCARLA
+│   ├── AI-GOVERNANCE.md              ← Clasificación de riesgo y usos restringidos
+│   ├── AI-TRACEABILITY.md            ← Registro de asistencia de IA
+│   └── IZSPECS-CONFORMANCE.md        ← Matriz de conformidad
+├── tests/               ← 14 suites. `python tests/run_all.py`, sin PI ni claves
+├── dev-fixtures/
+│   ├── generar.py       ← 15 incidentes sintéticos que cubren estados y cierres
+│   └── incidents/       ← Donde los escribe. NUNCA en incidents/
 ├── .env.example         ← Plantilla (copiar a .env y rellenar)
 ├── .env                 ← Credenciales reales (NO en git)
 ├── requirements.txt     ← fastapi, uvicorn, google-genai, anthropic, python-dotenv, pytz, mcp, tenacity
@@ -797,7 +966,7 @@ rca-agent/
 ├── install_service.bat  ← Windows Service con NSSM (producción)
 ├── webhook.log          ← Log rotativo (10 MB × 5). En .gitignore
 ├── incidents/           ← Un JSON por incidente. En .gitignore (datos de planta)
-└── CLAUDE.md            ← Este fichero
+└── CLAUDE.md            ← Import de AGENTS.md, para la autocarga de Claude Code
 ```
 
 ---
@@ -832,6 +1001,9 @@ rca-agent/
 | `PI_TARGET_POINTS_PER_VARIABLE` | No | Puntos por variable a los que se ajusta la resolución al ampliar | `120` |
 | `DEMO_MODE` | No | Avisa al modelo de que las desviaciones son sintéticas y periódicas | `false` |
 | `MAX_SELECTED_VARIABLES` | No | Tope de variables aceptadas de la selección del Step 4 | `40` |
+| `AF_PLANT_ROOT` | No | Raíz del AF a la que se restringe TODO lo que se consulte. Se aplica **anclada** con el separador | `WWTP` |
+| `AF_PLANT_CONTEXT_ELEMENTS` | No | Elementos que se añaden al contexto de toda alerta, separados por `\|`. Sufijo `\*` para incluir el subárbol | vacío |
+| `MAX_PLANT_CONTEXT_ATTRIBUTES` | No | Tope de atributos que puede aportar el bloque de planta entero | `60` |
 
 **`PI_LOOKBACK_HOURS` es un punto de partida, no un límite** (cambiado el 2026-08-27; ver «Ventana
 variable» en el Step 6). Hasta esa fecha el valor se justificaba en parte por mantener al modelo

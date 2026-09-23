@@ -28,10 +28,11 @@ Conforme a izSpecs `2026.12-09011521` — ver [`docs/IZSPECS-CONFORMANCE.md`](./
 - [¿Workflow o agente?](#workflow-o-agente)
 - [Arquitectura general](#arquitectura-general)
 - [Flujo de funcionamiento](#flujo-de-funcionamiento)
+- [La pantalla de la sala de control](#la-pantalla-de-la-sala-de-control)
 - [Estructura del proyecto](#estructura-del-proyecto)
 - [Requisitos previos](#requisitos-previos)
 - [Instalación](#instalación)
-- [Configuración](#configuración)
+- [Configuración](#configuración) · [Alcance en el AF](#alcance-dentro-del-asset-framework)
 - [Uso](#uso)
 - [Endpoints de la API](#endpoints-de-la-api)
 - [Integración con PI System](#integración-con-pi-system)
@@ -67,7 +68,7 @@ Merece la pena tener clara la distinción antes de leer el código, porque los n
 | Criterio | Este sistema | Lo que haría un agente |
 |---|---|---|
 | Quién decide el siguiente paso | `run_rca_analysis()`: los 6 steps están escritos en orden en el cuerpo de la función | El modelo, en cada vuelta de un bucle |
-| Llamadas al modelo | Exactamente 2, en posiciones fijas (Steps 4 y 6) | Un número indeterminado |
+| Llamadas al modelo | **Las fija el código**, no el modelo: 2 en posiciones fijas (Steps 4 y 6), más una repetición del Step 6 por cada ampliación de ventana concedida (`MAX_HISTORY_ADJUSTMENTS`, 1 por defecto) | Un número indeterminado |
 | Acceso a herramientas | **Ninguno.** `llm_client.generate()` nunca pasa un parámetro `tools` | El modelo recibe las tools y decide cuál invocar |
 | Quién llama a los MCP servers | El código Python (`graph_client.py`, `pi_client.py`) | El modelo, vía *tool use* |
 | Reintentos y recuperación | Código determinista (`tenacity`, `_query_with_retry()`) | El modelo observa el error y decide qué probar |
@@ -94,6 +95,7 @@ El patrón es **encadenamiento de prompts** (*prompt chaining*), con una puerta 
 │  webhook.py ──▶ workflow.py : run_rca_analysis()                │
 │  FastAPI        ┌─────────────────────────────────────────┐     │
 │  :8090          │ Step 2 · graph_client.py ───────────────┼──┐  │
+│                 │   └ ficha del equipo · pi_client.py     │  │  │
 │  /notification  │ Step 3 · build_analysis_context()       │  │  │
 │                 │ Step 4 · llm_client.generate()  ────────┼──┼──┼──▶ Gemini
 │                 │ Step 5 · pi_client.py ──────────────────┼──┼─▶│    o Claude
@@ -155,20 +157,52 @@ El servidor responde `202 Accepted` inmediatamente y lanza el análisis en segun
 
 ### Step 2 — Consultar la estructura real del Asset Framework ✅
 
-El sistema lanza `afkg-graph-mcp` y recorre recursivamente el árbol del activo afectado y del subsistema que lo agrupa. El resultado son dos listas planas:
+El sistema lanza `afkg-graph-mcp` y recorre recursivamente el árbol del activo afectado y del subsistema que lo agrupa. El resultado son **tres** listas planas:
 
 - `main_asset_context` — el árbol completo del activo de la alerta: sensores, transmisores, indicadores calculados, alarmas.
 - `nearby_elements_context` — el árbol del subsistema y sus otros activos hermanos, para comparar o descartar causas fuera del activo principal.
+- `plant_context` — variables de **otras zonas de la planta**, elegidas de antemano por los ingenieros (`AF_PLANT_CONTEXT_ELEMENTS`). No cuelgan del activo ni de su subsistema, así que el recorrido no llegaría a ellas: una alerta del biológico no alcanzaría los sólidos en suspensión de la entrada, que están en otra rama.
 
 Cada elemento trae sus atributos con nombre, unidad, descripción y el `piApiPath` exacto. Se filtran los atributos de bookkeeping (`Area Code`, `Tag Name`, `Manufacturer`…) que no son variables de proceso.
 
 **Por qué existe este paso:** sin él, el modelo proponía variables «de libro» (`Discharge Flow Rate`) que no existen con ese naming en el AF real, y no había forma de saberlo hasta que la consulta fallaba. Dándole la lista cerrada de lo que existe, elige solo entre variables reales.
 
+**Qué activo es, exactamente.** El grafo no contiene solo esta planta: son 8.404
+elementos en 26 raíces, con un **modelo espejo de este mismo WWTP** entrando por
+un conector de Wonderware, con los mismos nombres de equipo y atributos
+distintos. Por eso el activo se identifica por la **cadena** `System + Subsystem
++ Asset` que manda PI, no por su nombre: se busca el activo, se exige que su
+ruta lleve los otros dos como segmentos, y el subsistema se recorta de esa misma
+ruta. Emparejar por nombre devolvería un contexto bien formado con las variables
+del equipo equivocado, sin que fallara nada visible.
+
+### ↳ La ficha del equipo — entre el Step 2 y el Step 3 ✅
+
+Va **entre medias y sin número propio**, a propósito: los steps son las *fases* del análisis, y esto es un dato más que entra en el mensaje del Step 3, igual que el AF.
+
+El AF sabe el modelo del equipo (`Asset Model`, `Asset Type`, `Manufacturer`…)
+pero **guarda la ruta, no el valor**, así que hay que pedírselo a PI. Se hace
+antes de construir el mensaje, y ese es el punto: el modelo tiene que saber ante
+qué máquina está **cuando elige** las variables, no solo al diagnosticar. No se
+eligen las mismas para una bomba centrífuga *monocanal* —donde el atascamiento
+por trapos es plausible— que para una de varios canales.
+
+Estos atributos **no entran** en la lista que el modelo puede elegir: no son
+magnitudes que analizar. Se le dan como texto, y se le dice explícitamente que
+no los busque entre los `piApiPath`.
+
+Si PI no responde, el análisis sigue sin la ficha. Es contexto, no un requisito.
+
+
 ### Step 3 — Construir el mensaje para el modelo ✅
 
 Se compone un mensaje de cuatro secciones: objetivo de la interacción, resumen de la alerta en lenguaje natural, explicación del modelo de datos, y el JSON del AF. Va acompañado siempre del mismo *system prompt*, que fija el rol y el dominio (depuración de aguas residuales y bombeo) para que el modelo nunca responda como un asistente genérico.
 
-El objetivo incluye una jerarquía de prioridad explícita: primero el KPI en alerta y su baseline, luego otros indicadores del mismo activo, luego los medidores físicos que los alimentan, y solo después el nivel superior.
+El objetivo incluye una jerarquía de prioridad explícita: primero el KPI en alerta y su baseline, luego otros indicadores del mismo activo, luego los medidores físicos que los alimentan, después el nivel superior, y **en último lugar las variables de `plant_context`** — que pueden influir o no, y solo se piden cuando hay una vía física concreta por la que lo de otra zona de la planta llegue hasta este activo.
+
+El JSON que se vuelca es el de esos tres bloques, **no el contexto entero**: sale
+de la misma constante de la que sale la lista blanca del Step 4, para que lo que
+se le ofrece y lo que se le acepta no puedan discrepar.
 
 ### Step 4 — El modelo elige las variables a analizar ✅
 
@@ -224,14 +258,23 @@ Segunda y última llamada al LLM, con las series ya etiquetadas por elemento y u
   "root_causes": [
     {
       "cause": "Desgaste interno de la bomba",
-      "explanation": "La eficiencia hidráulica cae de forma monótona durante las últimas 14 h mientras el caudal se mantiene estable...",
-      "recommended_action": "Programar inspección del impulsor y los anillos de desgaste; medir holguras internas contra las tolerancias del fabricante."
-    }
+      "evidence": ["El caudal cae de 296,5 a 265,9 m3/h mientras la altura sube de 49,9 a 51,0 m: la bomba trabaja contra más resistencia.",
+                   "La eficiencia hidráulica baja de forma monótona durante las últimas 14 h sin que cambie el punto de consigna."],
+      "recommended_action": "Programar inspección del impulsor y los anillos de desgaste; medir holguras contra las tolerancias del fabricante."
   ]
 }
 ```
 
 Entre 2 y 3 causas, ordenadas de mayor a menor probabilidad. El prompt pide explícitamente que no rellene hasta 3 si los datos solo sustentan una o dos con confianza razonable.
+
+Los atributos **sin historización** —un baseline, el modelo del equipo— llegan
+con su valor, etiquetados como valor fijo. Hasta el 2026-09-23 se descartaban: el
+`Reference` de un indicador es el baseline que el propio prompt pide como
+prioridad 1, PI devolvía 49,8 y el modelo recibía «sin historización real». Se le
+pedía el dato, se pagaba la consulta y se borraba antes de enseñárselo.
+
+El Step 6 recibe además la ficha del equipo, por lo mismo que el Step 3: el modo
+de fallo plausible depende de qué máquina sea.
 
 #### Si la ventana no le encaja, puede pedir otra
 
@@ -267,7 +310,108 @@ El código decide qué concede y cuántas veces (`MAX_HISTORY_ADJUSTMENTS`, 1 po
 
 > **Modo demostración.** En este entorno las desviaciones de prueba se generan con un ciclo periódico. Con `DEMO_MODE=true` se avisa al modelo de que un patrón repetitivo puede ser un artefacto del generador, para que no lo proponga como causa. Antes esto se resolvía recortando la ventana para que no llegase a verlo — ocultar evidencia para dirigir el diagnóstico. En producción debe quedarse en `false`.
 
-> ⚠️ **El diagnóstico solo se escribe en el log.** Falta decidir el canal de salida real (correo, interfaz web, o anotación del event frame en PI). Es la decisión pendiente principal del proyecto.
+> **Dónde acaba el diagnóstico.** En `incidents/<id>.json`, junto al payload que lo originó y a la revisión humana cuando la haya. De ahí lo lee la pantalla de la sala de control — ver la sección siguiente.
+
+---
+
+## La pantalla de la sala de control
+
+`GET /pantalla` — una página sin dependencias externas que sondea cada 5 s. Es el
+canal de salida del diagnóstico y, desde la Fase 2, **la vía por la que una
+persona le contesta al workflow**.
+
+Las decisiones de diseño —por qué los estados son los que son, por qué el cierre
+se deduce y no se guarda, y por qué el reloj es uno y no dos— están en
+[`docs/DISENO-INTERACCION-HUMANA.md`](./docs/DISENO-INTERACCION-HUMANA.md). Lo que
+sigue es el resumen; ese documento es la fuente.
+
+### Dos pestañas, y dos vocabularios distintos
+
+```
+ACTIVOS                              CERRADOS
+lo que pide atención ahora           el expediente, para anotar en frío
+
+filtra por ESTADO del workflow       filtra por CIERRE
+  recibido · analizando                causa confirmada · causa no determinada
+  finalizado · fallido                 revisado parcialmente · sin veredicto
+  interrumpido                         fallo del análisis · alerta no válida
+```
+
+Un incidente pasa de una a otra **por un solo reloj: 12 h desde el último trabajo
+que sigue en pie**. Una respuesta terminal —una causa confirmada, o todas
+descartadas— lo cierra en el momento, sin esperar.
+
+**El cierre no se guarda: se deduce** del expediente cada vez que se lee. Los
+veredictos son una lista de solo añadir, así que el estado de una causa es el de
+su último apunte y el cierre es su consecuencia. Guardarlo sería un segundo sitio
+del que fiarse, y los dos pueden desincronizarse.
+
+### Cómo le contesta al workflow
+
+Sobre **cada causa por separado**: confirmar, descartar o no hacer nada. Al
+descartar se abren dos campos que **no son lo mismo**, y la distinción la impone
+la estructura, no el prompt:
+
+| Campo | Qué es | Cómo entra |
+|---|---|---|
+| **Por qué no es** · obligatorio | Lo que se comprobó en planta | Como **hecho** |
+| **Qué sospechas** · opcional | La corazonada de quien bajó | Como **pista a contrastar**, nunca como conclusión |
+
+La evidencia es obligatoria al descartar, y no por burocracia: **es lo único que
+hace que un reanálisis valga para algo**. Sin ella, la segunda pasada sería el
+segundo clasificado ascendido sobre los mismos datos.
+
+### Qué pasará en el reanálisis (Fase 3, en construcción)
+
+```
+  el operario descarta una causa con evidencia
+        │
+        ▼  se habilita el botón de reanalizar (nunca automático)
+  vuelve a entrar por la SELECCIÓN DE VARIABLES, no solo por el diagnóstico
+        │     · la evidencia entra como hecho: esa causa no se vuelve a proponer
+        │     · la sospecha se contrasta contra datos, no se acepta
+        │     · trae datos NUEVOS de PI, no reinterpreta los mismos
+        ▼
+  causas nuevas → se apilan como otra iteración, la anterior NO se pisa
+```
+
+Que vuelva por la selección de variables es deliberado: si solo se repitiera el
+diagnóstico, la segunda respuesta llegaría con el mismo tono de autoridad y menos
+fundamento. Por eso el fichero guarda **una lista de pasadas**
+(`diagnosticos`, cada una con su `iteracion`) y cada veredicto dice a qué
+iteración pertenece — si apuntara solo al índice, los veredictos de la primera
+tanda pasarían a señalar causas que no son.
+
+Y por eso el contexto del Step 2 tuvo que crecer con `plant_context` y la ficha
+del equipo: si el operario aporta evidencia sobre una variable que el Step 2 no
+alcanza, el modelo no podría pedirla por mucho feedback que se le dé.
+
+> **Nunca sobre un expediente cerrado**, ni aunque se le aporte evidencia nueva en
+> frío. Decisión de la propietaria: si el reanálisis pudiera dispararse desde
+> cerrados, volveríamos a tener dos relojes.
+
+### Cómo se abre, y de dónde viene su seguridad
+
+```
+http://<servidor>:8090/pantalla
+```
+
+**No tiene login, y es una decisión, no un descuido**: quien autentica es la
+cerradura de la sala de control. La pantalla debe ser accesible **solo desde el
+HMI de la sala**, y de ahí se sigue que los ficheros de incidente no lleven la
+identidad de quien escribe — añadirla los convertiría en datos personales.
+
+Esa restricción de red es una **dependencia invisible**: si algún día la pantalla
+se publica en otra red, esta decisión deja de sostenerse. Queda anotada también
+en el bloque «DECISIONES DE SEGURIDAD» de `webhook.py`.
+
+Para verla sin PI hay 15 incidentes sintéticos que cubren los seis estados y los
+seis cierres:
+
+```bash
+python dev-fixtures/generar.py        # escribe en dev-fixtures/incidents/, NUNCA en incidents/
+set INCIDENTS_DIR=dev-fixtures/incidents && set WEBHOOK_PORT=8099 && python serve.py
+```
 
 ---
 
@@ -276,17 +420,28 @@ El código decide qué concede y cuántas veces (`MAX_HISTORY_ADJUSTMENTS`, 1 po
 ```
 PI-rca-agent/
 │
-├── webhook.py           ← Servidor HTTP (Step 1): recibe alertas de PI System
-├── workflow.py             ← Orquestación del workflow + Steps 3, 4 y 6
+├── webhook.py           ← Servidor HTTP (Step 1) y endpoints de la pantalla
+├── workflow.py          ← Orquestación del workflow + Steps 3, 4 y 6
 ├── graph_client.py      ← Cliente MCP para afkg-graph-mcp (Step 2)
-├── pi_client.py         ← Cliente MCP para aveva-pi-mcp (Step 5)
-├── incidents.py         ← Registro de incidentes: deduplicación y persistencia
+├── pi_client.py         ← Cliente MCP para aveva-pi-mcp (Step 5 y la ficha)
+├── incidents.py         ← Expediente: deduplicación, persistencia y revisión humana
 ├── llm_client.py        ← Abstracción sobre el proveedor de LLM (Gemini/Anthropic)
 ├── config.py            ← Carga y validación de variables de entorno
+├── serve.py             ← Arranca uvicorn leyendo WEBHOOK_PORT del .env
 │
+├── static/
+│   └── pantalla.html    ← La pantalla de la sala de control (una sola página)
+├── docs/
+│   └── DISENO-INTERACCION-HUMANA.md   ← Por qué la pantalla es como es
+├── tests/               ← 14 suites. No necesitan PI ni claves de API
+├── dev-fixtures/
+│   ├── generar.py       ← 15 incidentes sintéticos para ver la pantalla sin PI
+│   └── incidents/       ← Donde los escribe. NUNCA en incidents/
+│
+├── incidents/           ← Un JSON por incidente. En .gitignore (datos de planta)
 ├── .env.example         ← Plantilla de configuración (copia a .env y rellena)
 ├── .env                 ← Configuración real con credenciales (NO en git)
-├── .gitignore           ← Excluye .env, .venv, __pycache__
+├── .gitignore           ← Excluye .env, .venv, incidents/, webhook.log*, __pycache__
 ├── requirements.txt     ← Dependencias Python del proyecto
 │
 ├── setup.bat            ← Instala el entorno virtual (ejecutar solo 1 vez)
@@ -398,6 +553,19 @@ Solo se exige la clave del proveedor realmente seleccionado, no ambas.
 
 > **`PI_LOOKBACK_HOURS` es un punto de partida, no un límite.** Basta para una degradación gradual y mantiene el prompt del Step 6 en un tamaño razonable; si el modelo necesita más, lo pide. Para el problema de la periodicidad sintética del entorno de demo, la solución es `DEMO_MODE`, no recortar la ventana.
 
+### Alcance dentro del Asset Framework
+
+| Variable | Descripción | Por defecto |
+|---|---|---|
+| `AF_PLANT_ROOT` | Raíz del AF a la que se restringe todo lo que se consulte | `WWTP` |
+| `AF_PLANT_CONTEXT_ELEMENTS` | Elementos que se añaden al contexto de toda alerta, separados por `\|` | vacío |
+| `MAX_PLANT_CONTEXT_ATTRIBUTES` | Tope de atributos que puede aportar ese bloque | `60` |
+
+El acotado a la planta **no es cosmético**: el grafo es un entorno compartido con
+otras demos, los nombres de elemento se repiten entre ellas, y hay un modelo
+espejo de este mismo WWTP. Se aplica anclado a la raíz, porque `path_contains` es
+una subcadena y `WWTP` a secas también casaría con `WWTP_Demo`.
+
 ---
 
 ## Uso
@@ -463,6 +631,11 @@ Documentación interactiva completa en `http://localhost:8090/docs` (Swagger UI 
 | `GET` | `/health` | Estado del servidor. Devuelve `200 OK` si está en marcha. |
 | `POST` | `/notification` | Recibe alertas de PI System. Acepta cualquier body (si no es JSON lo guarda como texto para diagnóstico). Devuelve `202 Accepted`. |
 | `GET` | `/notifications/history` | Lista las últimas 50 notificaciones recibidas (en memoria, se pierde al reiniciar). |
+| `GET` | `/pantalla` | La pantalla de la sala de control. HTML sin dependencias externas. |
+| `GET` | `/incidentes` | Lista de incidentes para la pantalla. Acota por periodo, estado o cierre, y por número máximo. |
+| `GET` | `/incidentes/{id}` | El expediente completo **salvo el `trace`**, que es el 98,9 % del fichero y no pinta nada en una pantalla. |
+| `POST` | `/incidentes/{id}/veredicto` | Confirma o descarta una causa, con su evidencia. También la devuelve a `pendiente` para deshacer. |
+| `POST` | `/incidentes/{id}/reclasificacion` | Marca la alerta como no válida, o quita la marca. |
 
 ---
 
@@ -540,20 +713,34 @@ C:\MCPServer\rca-agent\logs\service_error.log
 | Step | Descripción | Estado |
 |---|---|---|
 | 1 | Recibir notificación HTTP POST de PI System | ✅ Completado |
-| 2 | Consultar la estructura real del AF vía `afkg-graph-mcp` | ✅ Completado |
-| 3 | Construir el mensaje de contexto para el modelo | ✅ Completado |
+| 2 | Consultar el AF vía `afkg-graph-mcp`, identificando el activo por la cadena `System + Subsystem + Asset` | ✅ Completado |
+| ↳ | **Ficha del equipo** — qué máquina es, leída de PI. Sin número: alimenta el mensaje del Step 3 | ✅ Completado |
+| 3 | Construir el mensaje: 4 secciones, 3 bloques del AF y la ficha del equipo | ✅ Completado |
 | 4 | El modelo identifica qué variables reales necesita | ✅ Completado |
 | 5 | Obtener datos históricos de PI vía `aveva-pi-mcp` | ✅ Completado |
 | 6 | El modelo produce diagnóstico y recomendaciones | ✅ Completado |
 
-**Validación:** un ciclo completo registrado el 2026-08-20, con una alerta real de `Hydraulic Efficiency` sobre `PS20102 A03 PS02 Pump 02`. El diagnóstico apuntó a desgaste interno de la bomba y recomendó inspeccionar impulsor y anillos de desgaste. Validación real pero no exhaustiva: falta ejercitarlo con otros KPIs y tipos de activo.
+**Validación:** ciclo completo el 2026-08-20 y repetido el 2026-09-23 contra el AF, PI y el modelo reales, con la alerta de `Hydraulic Efficiency` sobre `PS20102 A03 PS02 Pump 02`: 206 s, 3 llamadas al modelo, 159 variables ofrecidas y 24 elegidas. El modelo pidió ampliar la ventana de 24 h a 7 días y se le concedió; volvió a pedir y se le denegó por presupuesto. Validación real pero no exhaustiva: falta ejercitarlo con otros KPIs y tipos de activo.
 
 ### Pendiente
 
-1. **Canal de salida del diagnóstico.** Hoy solo va al log. Opciones a valorar: correo al ingeniero de proceso, interfaz web, o anotación del event frame en PI. Es la decisión principal del proyecto y es de producto, no técnica.
-2. **`webhook.log` no está en `.gitignore`** y contiene los prompts completos con datos de planta. Añadir `webhook.log*` antes del próximo push.
-3. **Igualar el razonamiento entre proveedores.** `gemini-2.5-flash` razona por defecto; la llamada a Anthropic no pasa `thinking`, así que no razona. Activarlo igualaría ambas rutas, pero sin evaluación no hay forma de medir si mejora el diagnóstico.
-4. **Ampliar la validación** a más KPIs y tipos de activo.
+1. **La Fase 3 — reanálisis con el feedback humano.** Empezada: el expediente ya
+   guarda las pasadas del análisis (`diagnosticos`, con su `iteracion`), y el
+   contexto ya alcanza variables de otras zonas de la planta. Falta la re-entrada
+   con el feedback, que un reanálisis fallido no destruya la primera pasada, y la
+   pantalla. Ver [`docs/DISENO-INTERACCION-HUMANA.md`](./docs/DISENO-INTERACCION-HUMANA.md).
+2. **Relanzar un análisis fallido.** Hoy un incidente en `fallido` es un callejón
+   sin salida, y la mitad de los motivos de fallo son cortes externos que un
+   reintento resolvería.
+3. **Igualar el razonamiento entre proveedores.** `gemini-2.5-flash` razona por
+   defecto; la llamada a Anthropic no pasa `thinking`, así que no razona.
+   Activarlo igualaría ambas rutas, pero sin evaluación no hay forma de medir si
+   mejora el diagnóstico.
+4. **Ampliar la validación** a más KPIs y tipos de activo. Y en concreto: el
+   bloque `plant_context` está implementado y **el modelo aún no lo ha usado** —
+   en la ejecución del 2026-09-23 eligió 0 de sus 10 variables, que es lo
+   correcto para una alerta de bomba, pero deja sin comprobar que las pida cuando
+   toque.
 
 ---
 

@@ -44,3 +44,8 @@ __pycache__/
 # Carpetas de distribución (si se empaqueta el proyecto)
 dist/
 *.egg-info/
+
+# Volcados de prompts para revisar a mano (herramienta de desarrollo).
+# Llevan la estructura completa del AF y las rutas de PI de la planta: mismo
+# trato que webhook.log, del que salen los mismos datos.
+prompts-revision/

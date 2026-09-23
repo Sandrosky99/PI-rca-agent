@@ -481,6 +481,54 @@ corregir un clic mal dado.
 > expresar como veredicto sobre una causa: no dice que el modelo se equivocara,
 > dice que le dieron un problema que no existía.
 
+### Y lo que añade la Fase 3: las pasadas del análisis (implementado 2026-09-23)
+
+Un incidente puede analizarse **más de una vez** —el operario descarta causas con
+evidencia y pide un reanálisis, que produce causas **nuevas**—, y el fichero no
+tenía dónde ponerlas. El campo `diagnostico` pasa a ser una lista:
+
+```
+diagnosticos: [ {iteracion, root_causes, _ai_generated}, ... ]
+```
+
+Tres motivos, por orden de peso:
+
+1. **Un veredicto apunta a `(iteracion, causa)`.** El campo `iteracion` está en
+   este esquema desde el 2026-09-15 justamente para esto, y sobre una lista plana
+   de causas ese par no tiene a dónde apuntar: al llegar la segunda tanda, los
+   veredictos de la primera pasarían a señalar causas que no son.
+2. **No se pisa nada.** Es el mismo solo-añadir que ya siguen los veredictos, y
+   por la misma razón.
+3. **La etiqueta de IA es por pasada.** El proveedor o el modelo pueden cambiar
+   entre una y otra, y una sola etiqueta para todo el expediente mentiría sobre
+   la mitad de él (ai-governance §5.4).
+
+**Quién escribe qué no cambia**: `mark()` *añade* una pasada, nunca sustituye la
+anterior, y el bloque `revision` sigue siendo del otro escritor. La API sigue
+ofreciendo un `diagnostico` en singular —la pasada vigente, que es sobre la que
+se opina—, así que **la pantalla no se tocó**.
+
+Los expedientes con la forma antigua **no se migran**: reescribir un registro de
+trazabilidad para adaptarlo a un esquema nuevo es lo que base §1.7 no quiere. Se
+leen y cuentan como la iteración 1.
+
+### Lo que el reanálisis necesitaba del Step 2 (implementado 2026-09-23)
+
+Al diseñar el feedback apareció un hueco que no es de pantalla sino de alcance:
+**el Step 2 solo ve lo que cuelga del activo y de su subsistema**. Si el operario
+escribe como evidencia «los sólidos en suspensión de la entrada», esa variable
+vive en otra rama del AF y el modelo no podría pedirla nunca, por mucho feedback
+que se le dé.
+
+Dos cosas lo tapan, las dos ya en el código:
+
+- **`plant_context`**: un tercer bloque con las variables de otras zonas de la
+  planta que los ingenieros eligen de antemano. Entra en el prompt como la
+  **prioridad más baja**: pueden influir o no.
+- **La ficha del equipo**: qué máquina es, leída del AF y de PI antes de
+  construir el mensaje. Importa para el reanálisis porque el modo de fallo
+  plausible depende del equipo, y la evidencia del operario suele hablar de eso.
+
 Cuatro decisiones dentro, todas con motivo:
 
 **`revision` es hermano de `diagnostico`, no va dentro.** `diagnostico` es la salida del
