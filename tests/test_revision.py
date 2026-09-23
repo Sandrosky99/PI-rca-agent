@@ -167,6 +167,70 @@ check("valor inventado se rechaza",
       CLIENTE.post(f"/incidentes/{iid5}/reclasificacion",
                    json={"reclasificacion": "me_lo_invento"}).status_code == 400)
 
+print("\n=== 9b. Marcar una alerta no valida SUSTITUYE al cierre ===")
+# Hasta el 2026-09-21 el campo se guardaba y cierre() no lo leia: marcar una
+# alerta como no valida no cambiaba nada visible. El endpoint existia desde el
+# viernes y la reclasificacion no reclasificaba.
+nv = sembrar()
+check("de partida, sin veredicto", incidents.cierre(incidents.leer_por_id(nv))[0]
+      == incidents.SIN_VEREDICTO)
+CLIENTE.post(f"/incidentes/{nv}/reclasificacion", json={"reclasificacion": "alerta_no_valida"})
+etiqueta, terminal = incidents.cierre(incidents.leer_por_id(nv))
+check("pasa a 'alerta no valida'", etiqueta == incidents.ALERTA_NO_VALIDA, etiqueta)
+check("y es terminal: no hay nada que esperar", terminal is True)
+check("cerrado", incidents.esta_cerrado(incidents.leer_por_id(nv)))
+
+# Manda sobre todo lo demas, incluso sobre un analisis fallido o una causa
+# confirmada: si la alerta no debio existir, da igual como fuera el analisis de
+# un problema que no habia.
+veredicto(nv, causa=0, veredicto="confirmada")
+check("manda sobre una causa confirmada",
+      incidents.cierre(incidents.leer_por_id(nv))[0] == incidents.ALERTA_NO_VALIDA)
+roto_nv = sembrar(estado=incidents.FALLIDO, diagnostico=None)
+CLIENTE.post(f"/incidentes/{roto_nv}/reclasificacion", json={"reclasificacion": "alerta_no_valida"})
+check("y sobre un analisis fallido",
+      incidents.cierre(incidents.leer_por_id(roto_nv))[0] == incidents.ALERTA_NO_VALIDA)
+
+print("\n=== 9b bis. Sobre un incidente ACTIVO: lo cierra y al quitarla vuelve ===")
+# Quitar la marca tiene que devolverlo a donde estaba, igual que deshacer un
+# veredicto. Funciona porque la reclasificacion no toca el reloj: _anclaje_reloj
+# mira el movimiento del workflow y los veredictos vigentes, no 'actualizado_en'.
+act_nv = sembrar()
+check("parte de activo", incidents.esta_cerrado(incidents.leer_por_id(act_nv)) is False)
+CLIENTE.post(f"/incidentes/{act_nv}/reclasificacion", json={"reclasificacion": "alerta_no_valida"})
+check("marcarla lo cierra", incidents.esta_cerrado(incidents.leer_por_id(act_nv)) is True)
+CLIENTE.post(f"/incidentes/{act_nv}/reclasificacion", json={"reclasificacion": None})
+check("y quitarla lo devuelve a ACTIVOS",
+      incidents.esta_cerrado(incidents.leer_por_id(act_nv)) is False)
+check("con la etiqueta que le tocaba",
+      incidents.cierre(incidents.leer_por_id(act_nv))[0] == incidents.SIN_VEREDICTO)
+
+print("\n=== 9c. Y se puede rescatar de ese estado ===")
+# Es el UNICO cierre que se apoya en una opinion y no en un hecho -- los otros
+# se deducen de si hay veredicto o de si vencio el reloj. Lo que se apoya en una
+# creencia es justo lo que mas tiene que poder revisarse. Y el clic actua sobre
+# el incidente entero, asi que un error cuesta mas que en un veredicto.
+CLIENTE.post(f"/incidentes/{nv}/reclasificacion", json={"reclasificacion": None})
+check("al quitar la marca vuelve a lo que decian los veredictos",
+      incidents.cierre(incidents.leer_por_id(nv))[0] == incidents.CAUSA_CONFIRMADA,
+      incidents.cierre(incidents.leer_por_id(nv)))
+
+print("\n=== 9d. El boton, en las DOS pestañas y separado de las causas ===")
+_html = CLIENTE.get("/pantalla").text
+check("existe la zona de la alerta", "zonaAlerta" in _html)
+# Estuvo limitado a cerrados con el argumento de que juzgar un umbral de PI no
+# es una llamada del operario a las tres de la mañana. Pero quien recibe la
+# alerta y reconoce que salta siempre al arrancar la bomba de al lado es quien
+# mas contexto tiene sobre ESE disparo, y hacerle esperar doce horas significa
+# que no lo marcara nunca -- mientras una alerta que no debio existir ocupa
+# sitio en la pantalla de "lo que pide atencion".
+check("tambien se pinta en activos", "if(!verCerrados) return" not in _html)
+check("alterna marcar y quitar", 'data-alerta="marcar"' in _html and 'data-alerta="quitar"' in _html)
+# Actua sobre el incidente entero, asi que va aparte: mezclar dos alcances en la
+# misma zona es lo que hace que alguien con prisa pulse el que no era.
+check("va en su propio bloque", "zona-alerta" in _html)
+check("y explica cuando usarlo", "no debió dispararse" in _html)
+
 print("\n=== 10. NO existe 'causa_confirmada' como reclasificacion ===")
 # El diseno la preveia, para quien vuelve en frio y dice "la primera era la
 # buena". Sobra: el veredicto no caduca y el cierre se deduce, asi que eso es un

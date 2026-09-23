@@ -621,7 +621,16 @@ def _con_estado_de_causas(registro: dict) -> dict:
     pueden desincronizarse.
     """
     etiqueta, _ = incidents.cierre(registro)
-    return dict(registro,
+    # El fichero guarda la LISTA de pasadas del análisis (ver incidents.py); la
+    # API sigue ofreciendo un 'diagnostico' en singular, que es la pasada
+    # vigente. No es un apaño de compatibilidad: es que quien mira la pantalla
+    # opina sobre UN diagnóstico, el que tiene delante. Cuando la Fase 3 necesite
+    # enseñar el contador de reanálisis, se añadirá exactamente ese dato y no la
+    # lista entera -- que multiplicaría por tres el tamaño de la respuesta con
+    # causas que la pantalla no pinta.
+    sin_lista = {k: v for k, v in registro.items() if k != "diagnosticos"}
+    return dict(sin_lista,
+                diagnostico=incidents.diagnostico_vigente(registro),
                 estadoCausas=incidents.estado_de_causas(registro),
                 cierre=etiqueta,
                 cerrado=incidents.esta_cerrado(registro))

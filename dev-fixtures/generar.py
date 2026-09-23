@@ -161,12 +161,18 @@ def veredicto(minutos_atras, indice, cual, evidencia="", sospecha=""):
 
 def incidente(corr, activo, subsistema, kpi, valor, limite, tipo, estado, hace_min,
               diagnostico=None, veredictos=None, motivo=None, intentos=None,
-              movimiento_min=None):
+              movimiento_min=None, contenedor_viejo=False):
     """Un incidente completo.
 
     'movimiento_min' es cuando fue el ultimo movimiento, que es lo que mira el
     reloj de 12 h para decidir la pestaña. Por defecto, el mismo instante en que
     llego; se da aparte cuando hubo un veredicto despues.
+
+    'contenedor_viejo' escribe el campo 'diagnostico' suelto en vez de la lista
+    'diagnosticos'. Es como estan los DOS incidentes reales que hay en
+    produccion, anteriores al 2026-09-22, y que no se migran. Tiene que haber al
+    menos uno asi entre los fixtures, o la ruta de compatibilidad no se ejercita
+    nunca donde se ve: en la pantalla.
     """
     inicio = sello(hace_min)
     movimiento = sello(movimiento_min if movimiento_min is not None else hace_min)
@@ -191,9 +197,15 @@ def incidente(corr, activo, subsistema, kpi, valor, limite, tipo, estado, hace_m
             "StartTime": inicio, "AssetType": "pump",
             "AssetModel": "single-channel centrifugal pump",
         },
-        "diagnostico": diagnostico,
         "_fixture": AVISO,
     }
+    if contenedor_viejo:
+        registro["diagnostico"] = diagnostico
+    else:
+        # Una pasada por diagnostico: los fixtures no simulan reanalisis todavia.
+        registro["diagnosticos"] = (
+            [dict(diagnostico, iteracion=1)] if diagnostico else []
+        )
     if veredictos:
         registro["revision"] = {"veredictos": veredictos, "reclasificacion": None}
     if motivo:
@@ -306,7 +318,7 @@ FIXTURES = [
     # frecuente en operacion real. Ademas, con el esquema viejo.
     incidente("7b2c3d4e5f0a", "PS20104 B02 PS01 Pump 05", "Pumping Station 03",
               "Hydraulic Efficiency", 44.6, 48.0, "Low", "finalizado", VIEJO + 400,
-              DIAG_VIEJO),
+              DIAG_VIEJO, contenedor_viejo=True),
 
     # Fallo del analisis, ya cerrado por reloj.
     incidente("8c3d4e5f0a1b", "PS20103 A01 PS01 Pump 07", "Pumping Station 02",
@@ -317,7 +329,8 @@ FIXTURES = [
 
 def _resumen(r, corte):
     """Replica la regla de incidents.cierre() para el listado de salida."""
-    causas = (r["diagnostico"] or {}).get("root_causes", [])
+    pasadas = r.get("diagnosticos") or ([r["diagnostico"]] if r.get("diagnostico") else [])
+    causas = (pasadas[-1] if pasadas else {}).get("root_causes", [])
     estados = ["pendiente"] * len(causas)
     for v in (r.get("revision") or {}).get("veredictos", []):
         estados[v["causa"]] = v["veredicto"]

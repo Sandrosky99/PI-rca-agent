@@ -57,7 +57,15 @@ def check(nombre, cond, detalle=""):
         fallos.append(nombre)
 
 
-async def fake_af(asset, subsystem):
+# Recoge la jerarquia con la que el workflow pide el AF. El 'system' no es
+# decorativo: es lo que desambigua cuando un nombre de elemento se repite en el
+# grafo, y si el workflow dejara de pasarlo el fallo seria silencioso -- un
+# af_context bien formado con las variables de otro sitio.
+llamadas_af = []
+
+
+async def fake_af(asset, subsystem, system=""):
+    llamadas_af.append((asset, subsystem, system))
     return AF
 
 
@@ -156,35 +164,65 @@ print("\n=== 9. La llamada al modelo NO congela el bucle de eventos ===")
 # curso se detenia.
 #
 # Se comprueba la propiedad de verdad, no la forma de escribirla: mientras
-# _generar() esta en marcha, otra corrutina tiene que seguir despertandose.
+# _generar() esta en marcha, el bucle tiene que poder ejecutar otra cosa.
+#
+# SIN RELOJ, y ese es el punto (reescrito el 2026-09-22). La version anterior
+# contaba latidos de una corrutina que despertaba cada 20 ms durante una llamada
+# de 0.6 s, y exigia al menos 15 de los 30 teoricos. Hacia la suite inestable en
+# esta maquina, con el peor falso negativo que hay: rojo sin que nada este roto.
+# Medido:
+#
+#     bloqueado (el fallo)        0 latidos
+#     vivo, maquina en reposo     21-23   <- ya no 30: Windows redondea los
+#                                            temporizadores a ~15.6 ms
+#     vivo, maquina ocupada       0-9     <- se solapa con 'bloqueado'
+#
+# La ultima fila es la que mata cualquier umbral, incluido el 1: con la maquina
+# ahogada el bucle sigue VIVO pero puede no coger turno de CPU en 0.6 s. Contar
+# despertares mide el reparto de CPU de la maquina, no si el bucle esta libre.
+#
+# Asi que no se mide: se construye una situacion que SOLO puede resolverse si el
+# bucle esta libre. El modelo falso no termina por su cuenta -- espera a que una
+# corrutina le de permiso. Si el bucle estuviera bloqueado, esa corrutina nunca
+# llegaria a ejecutarse y la llamada no volveria.
+#
+# El plazo de _ESPERA_MAXIMA no es un umbral de rendimiento sino una guarda
+# contra el cuelgue: en reposo esto tarda 1.6 ms, y con seis hilos quemando CPU
+# seguia pasando 8 de 8. Sobran tres ordenes de magnitud.
+import threading
 import time
 
-DURACION = 0.6      # lo que "tarda el modelo"
-LATIDO = 0.02       # cada cuanto deberia despertarse el resto del proceso
+class _BucleBloqueado(Exception):
+    """El modelo nunca recibio permiso: nada corrio en el bucle mientras tanto."""
+
+_PERMISO = threading.Event()
+_ESPERA_MAXIMA = 10
 
 def _generate_bloqueante(system_prompt, user_message):
-    time.sleep(DURACION)            # exactamente lo que hace una peticion HTTP sincrona
+    # Un time.sleep() aqui volveria a medir tiempo. Esto no: no puede terminar
+    # hasta que algo se ejecute en el bucle.
+    if not _PERMISO.wait(timeout=_ESPERA_MAXIMA):
+        raise _BucleBloqueado()
     return "respuesta"
 
 llm_client.generate = _generate_bloqueante
 
 async def _medir():
-    latidos = 0
-    async def _corazon():
-        nonlocal latidos
-        while True:
-            await asyncio.sleep(LATIDO)
-            latidos += 1
-    tarea = asyncio.create_task(_corazon())
-    await workflow._generar("lo que sea")
-    tarea.cancel()
-    return latidos
+    async def _autorizar():
+        _PERMISO.set()          # solo puede correr si el bucle sigue libre
+    tarea = asyncio.create_task(_autorizar())
+    try:
+        return await workflow._generar("lo que sea")
+    finally:
+        tarea.cancel()
 
-latidos = asyncio.run(_medir())
-esperados = int(DURACION / LATIDO * 0.5)     # margen amplio: basta con que siga vivo
-check("el bucle sigue atendiendo durante la llamada al modelo",
-      latidos >= esperados, f"{latidos} latidos, se esperaban >= {esperados}")
-check("y devuelve la respuesta igual", asyncio.run(workflow._generar("x")) == "respuesta")
+try:
+    respuesta = asyncio.run(_medir())
+except _BucleBloqueado:
+    respuesta = None
+check("el bucle sigue atendiendo durante la llamada al modelo", respuesta is not None,
+      f"la llamada no volvio en {_ESPERA_MAXIMA} s: el bucle no ejecuto nada mientras duraba")
+check("y devuelve la respuesta igual", respuesta == "respuesta")
 
 print("\n" + "=" * 60)
 if fallos:

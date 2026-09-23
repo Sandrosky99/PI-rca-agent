@@ -104,11 +104,26 @@ Otros cabos sueltos, por orden de urgencia:
    Ojo: **el servicio en marcha carga el código anterior al 2026-09-11.** Los arreglos del bucle
    de eventos, `pausado` y el límite de simultáneos no están vivos hasta reiniciarlo.
 
-2. **La pantalla de la sala de control.** Diseño cerrado en
-   [`docs/DISENO-INTERACCION-HUMANA.md`](./docs/DISENO-INTERACCION-HUMANA.md), sin implementar.
-   Fase 1 (solo lectura) desbloqueada: los dos impedimentos técnicos —el bucle congelado y la
-   concurrencia sin techo— están resueltos. Hay cuatro incidentes de desarrollo en
-   `dev-fixtures/incidents/` para verla con varios casos abiertos a la vez.
+2. **La pantalla de la sala de control — Fases 1 y 2 entregadas.** Diseño y decisiones en
+   [`docs/DISENO-INTERACCION-HUMANA.md`](./docs/DISENO-INTERACCION-HUMANA.md). Se sirve en
+   `GET /pantalla`, sondea cada 5 s y no tiene dependencias externas.
+
+   Lo que hace hoy: lista activos y cerrados en dos pestañas con sus filtros, enseña el
+   payload y las causas propuestas, y **captura el veredicto** — confirmar o descartar cada
+   causa, con evidencia obligatoria y sospecha opcional, deshacer un clic mal dado, y marcar
+   la alerta como no válida. El cierre (`causa confirmada`, `causa no determinada`, `revisado
+   parcialmente`, `sin veredicto`, `fallo del análisis`, `alerta no válida`) **se deduce** del
+   expediente y del reloj de 12 h; no se guarda.
+
+   Lo que falta es la **Fase 3** (la vuelta al modelo con el feedback), más un elemento de la
+   Fase 2 aplazado a propósito: el **tiempo restante de la ventana**. Hoy el reloj solo mueve
+   de pestaña y el veredicto no caduca, así que sería una cuenta atrás hacia una consecuencia
+   que todavía no existe. En la Fase 3 sí la habrá —al vencer se apaga el reanálisis—, y ese
+   es el momento de ponerlo.
+
+   Para verla sin PI hay 15 incidentes sintéticos: `python dev-fixtures/generar.py` los escribe
+   en `dev-fixtures/incidents/`, **nunca** en `incidents/`. Cubren los seis cierres y los seis
+   estados. Se levanta con `INCIDENTS_DIR=dev-fixtures/incidents WEBHOOK_PORT=8099 python serve.py`.
 
 3. **PENDIENTE (2026-09-14) — Relanzar un análisis fallido.** Hoy un incidente en `fallido` es un
    callejón sin salida: `_RECLAMABLES` es `(interrumpido, pausado)` y `fallido` está excluido con
@@ -126,8 +141,8 @@ Otros cabos sueltos, por orden de urgencia:
    - **Botón «volver a analizar» en la pantalla**, no un planificador. El workflow no sabe cuándo
      ha vuelto PI —solo se entera cuando le toca hablar con él— y montar sondeo y comprobaciones
      de salud en un sistema puramente reactivo es la solución equivocada. Quien sabe es la persona
-     que está delante. **Implica que la pantalla deja de ser de solo lectura**, así que va con el
-     resto de acciones (Fase 2), no antes.
+     que está delante. Ya no lo bloquea nada —la pantalla escribe desde la Fase 2—, así que
+     va con el reanálisis de la Fase 3.
    - **Relanzar siempre desde el principio.** Reanudar a mitad ahorraría una llamada al modelo y
      costaría guardar estado intermedio reutilizable. No compensa — y además, si falló bajando
      datos de PI, volver a bajarlos es lo correcto: los datos pueden haber cambiado, y reutilizar
@@ -145,25 +160,24 @@ Otros cabos sueltos, por orden de urgencia:
    | Salida del modelo mal formada | formato inválido al elegir variables · diagnóstico con formato inválido | Sí; si se repite, el problema es el prompt |
    | Hace falta arreglar algo antes | variables que no existen (configuración) · error inesperado (fallo nuestro) | No sirve hasta arreglarlo; después sí, y recupera la alerta |
 
-4. **PENDIENTE — Separar los cierres del diseño de los estados del código.** La pantalla filtra hoy
-   por los seis estados que existen (`recibido`…`pausado`), pero el documento de diseño define
-   otros seis **cierres** (`causa confirmada`, `revisado parcialmente`, `causa no determinada`,
-   `visto sin veredicto`, `desatendido`, `fallo del análisis`) que **no existen en el código**:
-   todos necesitan el veredicto humano. Hasta que llegue la Fase 2, `finalizado` es precisamente
-   el estado que **sí** requiere atención — tiene un diagnóstico esperando a que alguien lo lea —,
-   así que no se puede archivar por estado. Por eso el acotado de la lista es por tiempo.
-
-5. **Completar la prueba del interruptor.** Probado el 2026-09-08 y **funciona**: la notificación
+4. **Completar la prueba del interruptor.** Probado el 2026-09-08 y **funciona**: la notificación
    se acepta, se registra como `pausado`, queda `BLOCKED` en el audit trail y no se ejecuta
    ningún Step 2-6 — coste cero. Falta el último tramo del procedimiento (reactivar y reenviar
    para procesar la alerta pausada), que ya es posible desde que se arregló el re-lanzado.
-6. **La llamada a Anthropic no usa adaptive thinking**, mientras que Gemini sí razona por defecto
+5. **La llamada a Anthropic no usa adaptive thinking**, mientras que Gemini sí razona por defecto
    (ver «Asimetría de razonamiento» más abajo). Activar `thinking: {type: "adaptive"}` en
    `_generate_anthropic()` igualaría las dos rutas, y `LLM_MAX_TOKENS=16000` ya deja sitio para
    ello. Pendiente de decidir: sin evaluación no habría forma de medir si mejora el diagnóstico.
    Si se activa, hacerlo detrás de un flag y en ambos proveedores.
-7. **Ampliar la validación** a más KPIs y tipos de activo. Las tres ejecuciones reales que hay son
+6. **Ampliar la validación** a más KPIs y tipos de activo. Las tres ejecuciones reales que hay son
    del mismo activo y el mismo indicador, y ninguna causa se ha confirmado.
+7. **Definir un periodo de retención para `incidents/`**: hoy no se purgan nunca.
+
+Resuelto el 2026-09-22 con la Fase 2: **los cierres del diseño ya existen en el código**. La
+pantalla filtra por estado en activos y por cierre en cerrados, que son dos vocabularios
+distintos a propósito. Antes `finalizado` era justo el estado que **sí** pedía atención —tenía
+un diagnóstico esperando a que alguien lo leyera—, así que no se podía archivar por estado y el
+acotado de la lista tenía que ser por tiempo. Ya no.
 
 Resueltos el 2026-09-08: el servicio quedó registrado y en marcha, el gate de CI se ejecuta y
 **bloquea** con protección de rama, y el flujo pasó a rama + PR con revisión humana (PR #1).
@@ -181,7 +195,6 @@ Resueltos el 2026-09-11, los tres que bloqueaban la pantalla:
   semáforo en `webhook._analizar_incidente` y **no** dentro del workflow, a propósito: así el que
   espera turno figura como `recibido` y solo pasa a `analizando` cuando arranca de verdad. Un
   estado que miente sería peor que no tenerlo, y ese estado es justo lo que leerá la pantalla.
-7. **Definir un periodo de retención para `incidents/`**: hoy no se purgan nunca.
 
 ---
 

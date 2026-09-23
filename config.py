@@ -410,6 +410,52 @@ MAX_SELECTED_VARIABLES: int = _entero("MAX_SELECTED_VARIABLES", 40)
 
 
 # =============================================================================
+# Alcance dentro del Asset Framework
+# =============================================================================
+# El grafo del AF NO contiene solo esta planta. Es un entorno compartido de
+# demostración: 8.404 elementos en 26 raíces (una cementera, Green H2, CPG,
+# Pharma Lab, un conector de Wonderware, árboles de navegación...), de las que
+# WWTP es una, con 357 elementos. Medido el 2026-09-22 sobre el grafo entero.
+#
+# Eso importa porque los nombres se repiten: 47 nombres de elemento del WWTP
+# existen también en otra raíz, y 45 se repiten dentro del propio WWTP.
+#
+# El caso que más duele no es un choque entre plantas distintas, sino un ESPEJO
+# de esta misma:
+#
+#     WWTP\Operational\1 - Intake\Line 1\PS01102            <- el modelo del AF
+#     WonderwareHistorian Connector\...\WWTP_Demo\...\PS01102   <- la misma bomba, otro conector
+#
+# Mismos nombres de equipo, atributos distintos. Un recorrido que empareje por
+# nombre y no acote puede devolver un contexto perfectamente formado con las
+# variables del modelo equivocado, sin que nada falle de forma visible.
+#
+# OJO: el filtro se aplica ANCLADO a la raíz (WWTP + separador), porque
+# path_contains es una SUBCADENA y "WWTP" a secas también casa con
+# "WWTP_Demo". Ver graph_client.build_af_context().
+#
+# Este es el techo de todo lo que se consulte en el AF, no solo del Step 2.
+AF_PLANT_ROOT: str = (os.environ.get("AF_PLANT_ROOT") or "WWTP").strip()
+
+# Elementos del AF que se añaden al contexto de TODA alerta de esta planta,
+# estén donde estén en la jerarquía.
+#
+# Para qué: el Step 2 recorre el subárbol del activo y el de su subsistema, así
+# que solo ve lo que cuelga de ahí. Una alerta del biológico no alcanza la
+# turbidez del intake -- que vive en WWTP\Operational - Intake, otra rama --
+# aunque sea justo lo que la explica.
+#
+# **Vacía a propósito**: la lista la decide quien conoce la planta, no el
+# código. Un elemento por línea o separados por "|", con el nombre tal como
+# aparece en el AF. Entran en el prompt como la prioridad MÁS BAJA de todas:
+# pueden influir o no, y se miran solo si lo cercano no explica la desviación.
+AF_PLANT_CONTEXT_ELEMENTS: list[str] = [
+    e.strip() for e in (os.environ.get("AF_PLANT_CONTEXT_ELEMENTS") or "").split("|")
+    if e.strip()
+]
+
+
+# =============================================================================
 # Validación de configuración
 # =============================================================================
 
