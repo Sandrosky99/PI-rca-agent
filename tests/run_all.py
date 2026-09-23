@@ -34,6 +34,7 @@ SUITES = [
     ("Limite de analisis simultaneos", "test_concurrencia.py"),
     ("Pantalla de la sala de control", "test_pantalla.py"),
     ("Revision humana: veredictos", "test_revision.py"),
+    ("Pasadas del analisis (iteraciones)", "test_iteraciones.py"),
 ]
 
 

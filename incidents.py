@@ -188,6 +188,69 @@ def _leer(ruta: Path) -> dict | None:
 _ID_VALIDO = re.compile(r"^[A-Za-z0-9_]{1,120}$")
 
 
+# =============================================================================
+# Las pasadas del análisis (Fase 3 de docs/DISENO-INTERACCION-HUMANA.md)
+# =============================================================================
+# Un incidente puede analizarse más de una vez: el operario descarta causas con
+# evidencia y pide un reanálisis, que produce causas NUEVAS. Por eso el fichero
+# guarda una LISTA de pasadas y no un único diagnóstico:
+#
+#     diagnosticos: [ {iteracion, root_causes, _ai_generated}, ... ]
+#
+# Tres motivos, por orden de peso:
+#
+# 1. Un veredicto apunta a (iteracion, causa) -- el campo 'iteracion' está en el
+#    esquema desde el 2026-09-15 justamente para esto. Sobre una lista plana de
+#    causas ese par no tiene a dónde apuntar: al llegar la segunda tanda, los
+#    veredictos de la primera pasarían a señalar causas que no son.
+# 2. No se pisa nada. Es el mismo principio de solo-añadir que ya siguen los
+#    veredictos, y por la misma razón: es la forma natural de un registro
+#    auditable y la más segura entre dos escritores.
+# 3. La etiqueta de IA es POR PASADA. El proveedor o el modelo pueden cambiar
+#    entre una y otra, y una sola etiqueta para todo el expediente mentiría
+#    sobre la mitad de él (ai-governance §5.4).
+#
+# Compatibilidad: hasta el 2026-09-22 el campo era 'diagnostico', un objeto
+# suelto. Hay expedientes reales con esa forma -- no se migran: reescribir un
+# registro de trazabilidad para adaptarlo a un esquema nuevo es justo lo que
+# base §1.7 no quiere. Se leen, y cuentan como la iteración 1.
+
+
+def iteraciones(registro: dict) -> list[dict]:
+    """Las pasadas del análisis, de la más antigua a la más reciente.
+
+    Es la ÚNICA forma de leer las causas de un incidente: absorbe aquí la forma
+    antigua para que ningún otro sitio tenga que saber que existieron dos.
+    """
+    guardadas = registro.get("diagnosticos")
+    if isinstance(guardadas, list):
+        return [d for d in guardadas if isinstance(d, dict)]
+
+    # Forma anterior al 2026-09-22: un solo objeto, sin número de pasada.
+    antigua = registro.get("diagnostico")
+    if isinstance(antigua, dict):
+        return [dict(antigua, iteracion=antigua.get("iteracion", 1))]
+    return []
+
+
+def diagnostico_vigente(registro: dict) -> dict | None:
+    """La última pasada: lo que se enseña y sobre lo que se opina.
+
+    'La última' y no 'la mejor': un reanálisis se pide precisamente porque la
+    anterior no valía, así que la de después la sustituye a efectos de pantalla.
+    Las anteriores no se borran -- siguen en la lista, con sus veredictos.
+    """
+    pasadas = iteraciones(registro)
+    return pasadas[-1] if pasadas else None
+
+
+def _con_iteracion_nueva(registro: dict, diagnostico: dict) -> list[dict]:
+    """La lista de pasadas con una más al final, numerada sola."""
+    pasadas = iteraciones(registro)
+    return pasadas + [dict(diagnostico, iteracion=len(pasadas) + 1)]
+
+
+
 def _resumen(registro: dict) -> dict:
     """Los campos que necesita la vista de conjunto, y ninguno más.
 
@@ -195,7 +258,7 @@ def _resumen(registro: dict) -> dict:
     puede tener docenas de incidentes y solo necesita identificarlos y decir en
     qué estado están. El detalle se pide por separado.
     """
-    diagnostico = registro.get("diagnostico") or {}
+    vigente = diagnostico_vigente(registro) or {}
     etiqueta, _ = cierre(registro)
     return {
         "id": registro.get("id"),
@@ -206,7 +269,7 @@ def _resumen(registro: dict) -> dict:
         "recibidoEn": registro.get("recibido_en"),
         "actualizadoEn": registro.get("actualizado_en"),
         "estado": registro.get("estado"),
-        "numCausas": len(diagnostico.get("root_causes", [])),
+        "numCausas": len(vigente.get("root_causes", [])),
         "intentos": registro.get("intentos", 1),
         "cierre": etiqueta,
         "cerrado": esta_cerrado(registro),
@@ -416,7 +479,7 @@ def claim(payload: dict) -> dict | None:
         "actualizado_en": ahora.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "estado": RECIBIDO,
         "payload": payload,
-        "diagnostico": None,
+        "diagnosticos": [],
     }
 
     # Auditoría ANTES de crear el registro (spec §2.2): esto persiste estado.
@@ -500,6 +563,14 @@ def claim(payload: dict) -> dict | None:
     return registro
 
 
+# Valor centinela para _actualizar(): "quita este campo", que no se puede
+# expresar con un valor normal porque None es un valor legítimo. Existe por un
+# caso concreto -- migrar 'diagnostico' a 'diagnosticos' -- y el motivo es el de
+# siempre: dejar el campo viejo al lado del nuevo sería un segundo sitio del que
+# fiarse, con los datos de antes dentro.
+_BORRAR = object()
+
+
 def _actualizar(incidente_id: str, cambios: dict) -> dict | None:
     """Cambia SOLO los campos indicados de un incidente, releyendo el disco.
 
@@ -542,7 +613,11 @@ def _actualizar(incidente_id: str, cambios: dict) -> dict | None:
     if registro is None:
         log.error("No se pudo actualizar el incidente %s: no se pudo leer.", incidente_id)
         return None
-    registro.update(cambios)
+    for campo, valor in cambios.items():
+        if valor is _BORRAR:
+            registro.pop(campo, None)
+        else:
+            registro[campo] = valor
     registro["actualizado_en"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
         _escribir(ruta, registro)
@@ -585,7 +660,23 @@ def mark(incidente_id: str, estado: str, diagnostico: dict | None = None,
     if motivo:
         cambios["motivo"] = motivo
     if diagnostico is not None:
-        cambios["diagnostico"] = diagnostico
+        # AÑADE una pasada, no sustituye la anterior. Que la firma siga siendo
+        # "aquí tienes el diagnóstico" y el apilado ocurra aquí dentro es
+        # deliberado: quien llama no tiene que acordarse de nada, y no puede
+        # perder la pasada anterior aunque quiera.
+        #
+        # Relee el disco por lo mismo que _actualizar(): entre el momento en que
+        # arrancó el análisis y este, la pantalla ha podido escribir veredictos.
+        # Queda la misma carrera teórica que con los veredictos, y con la misma
+        # consecuencia: se pierde una escritura, no se corrompe el fichero.
+        previo = leer_por_id(incidente_id) or {}
+        cambios["diagnosticos"] = _con_iteracion_nueva(previo, diagnostico)
+        if "diagnostico" in previo:
+            # Expediente con la forma antigua: su contenido ya está copiado
+            # dentro como iteración 1, así que el campo suelto se va. Dejarlo
+            # sería guardar dos veces lo mismo, y una de las dos copias
+            # quedaría congelada en la pasada de hace tres semanas.
+            cambios["diagnostico"] = _BORRAR
     if trace:
         # Prompts y respuestas del modelo. Aquí y no en el log: con el logging
         # estructurado se truncarían a 200 caracteres, y este fichero es el
@@ -625,7 +716,10 @@ class RevisionError(ValueError):
 
 
 def _causas_de(registro: dict) -> list[dict]:
-    return ((registro.get("diagnostico") or {}).get("root_causes") or [])
+    # Las de la ULTIMA pasada. Los veredictos de las anteriores siguen en el
+    # expediente con su 'iteracion', pero lo que hay delante de quien mira -- y
+    # por tanto lo que puede juzgar -- es el diagnostico vigente.
+    return ((diagnostico_vigente(registro) or {}).get("root_causes") or [])
 
 
 def estado_de_causas(registro: dict) -> list[str]:

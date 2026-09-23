@@ -104,7 +104,11 @@ diag = {"root_causes": [{"cause": "Desgaste", "explanation": "e", "recommended_a
 incidents.mark(r["id"], incidents.FINALIZADO, diagnostico=diag)
 guardado = json.loads((TMP / f"{r['id']}.json").read_text(encoding="utf-8"))
 check("persiste 'finalizado'", guardado["estado"] == incidents.FINALIZADO)
-check("guarda el diagnostico en el fichero", guardado["diagnostico"] == diag)
+# El fichero guarda una LISTA de pasadas desde el 2026-09-22, no un diagnostico
+# suelto: un incidente puede reanalizarse y la pasada anterior no se pisa.
+check("guarda el diagnostico como primera pasada",
+      guardado["diagnosticos"] == [dict(diag, iteracion=1)], guardado.get("diagnosticos"))
+check("y no deja el campo suelto de antes", "diagnostico" not in guardado)
 check("conserva el payload original", guardado["payload"]["KPI"] == 58.4)
 
 print("\n=== 9. Barrido de interrumpidos al arrancar ===")
@@ -279,7 +283,8 @@ check("reporta los bytes liberados", liberados > 90000, f"{liberados}")
 
 v = json.loads(rv.read_text(encoding="utf-8"))
 check("el trace desaparece", "trace" not in v, list(v))
-check("el diagnostico SE CONSERVA", v["diagnostico"]["root_causes"][0]["cause"] == "x")
+check("el diagnostico SE CONSERVA",
+      incidents.diagnostico_vigente(v)["root_causes"][0]["cause"] == "x")
 check("el payload SE CONSERVA", v["payload"]["Asset"] == "Bomba Vieja")
 check("el estado SE CONSERVA", v["estado"] == incidents.FINALIZADO)
 check("queda constancia de la poda", "trace_podado" in v, list(v))
@@ -340,7 +345,8 @@ check("y con su contenido intacto",
       final.get("revision", {}).get("veredictos", [{}])[0].get("evidencia") == "No hay obstruccion.",
       final.get("revision"))
 check("el workflow escribio lo suyo igualmente", final["estado"] == incidents.FINALIZADO)
-check("y su diagnostico", final["diagnostico"] == diag)
+check("y su diagnostico", final["diagnosticos"] == [dict(diag, iteracion=1)],
+      final.get("diagnosticos"))
 # La copia en memoria del workflow nunca tuvo 'revision': si mark() la hubiera
 # volcado, el bloque habria desaparecido. Esto es lo que lo demuestra.
 check("la copia del workflow no conocia 'revision'", "revision" not in copia_del_workflow)

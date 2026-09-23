@@ -109,7 +109,7 @@ print("\n=== 2. Ninguna alerta se queda sin analizar ===")
 finales = [incidents._leer(TMP / "inc" / f"{r['id']}.json") for r in registros]
 estados = {f["estado"] for f in finales if f}
 check("todos acaban en 'finalizado'", estados == {incidents.FINALIZADO}, f"{estados}")
-check("todos tienen diagnostico", all(f and f.get("diagnostico") for f in finales))
+check("todos tienen diagnostico", all(f and f.get("diagnosticos") for f in finales))
 
 print("\n=== 3. Con limite 1 se serializa del todo ===")
 limpiar()
