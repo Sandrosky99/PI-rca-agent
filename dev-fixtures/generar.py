@@ -45,8 +45,14 @@ tenga algo con forma realista que mostrar. Cada fichero lleva un campo
 """
 import json
 import shutil
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+# incidents da las reglas de cierre. Se importa en vez de copiarlas: una
+# copia de una regla es una regla que se queda atras.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import incidents  # noqa: E402
 
 DESTINO = Path(__file__).resolve().parent / "incidents"
 AHORA = datetime.now(timezone.utc)
@@ -150,8 +156,31 @@ DIAG_VIEJO = {"root_causes": [
 ], "_ai_generated": IA}
 
 
-def veredicto(minutos_atras, indice, cual, evidencia="", sospecha=""):
-    ap = {"en": sello(minutos_atras), "iteracion": 1, "causa": indice, "veredicto": cual}
+# --- Diagnosticos de una SEGUNDA pasada -------------------------------------
+# Traen 'que_cambia': lo que distingue verificar de volver a ordenar la lista, y
+# lo que le dice al operario que su comprobacion sirvio para algo.
+DIAG_ASPIRACION = {"root_causes": [
+    {"cause": "Obstruccion parcial en la aspiracion, aguas arriba de la bomba",
+     "evidence": ["La presion de aspiracion cae de 1,8 a 0,9 bar en seis horas.",
+                  "El consumo especifico sube un 14 % a caudal constante."],
+     "recommended_action": "Inspeccionar el filtro de aspiracion y el nivel del pozo."},
+], "_ai_generated": IA,
+   "que_cambia": ("Descartadas la valvula y el aire, la caida de caudal sin aumento de "
+                  "presion de descarga deja de apuntar a una restriccion aguas abajo y "
+                  "pasa a apuntar a la aspiracion.")}
+
+# "No lo se" como respuesta de primera clase: sin causas, pero diciendo que falta.
+DIAG_SIN_CONCLUSION = {"root_causes": [], "_ai_generated": IA,
+   "que_cambia": ("Con lo comprobado en planta, los datos disponibles no sostienen "
+                  "ninguna causa nueva con confianza razonable. Harian falta medidas de "
+                  "vibracion en el cojinete, que no existen en el AF de este activo.")}
+
+
+def veredicto(minutos_atras, indice, cual, evidencia="", sospecha="", iteracion=1):
+    # La 'iteracion' importa desde la Fase 3: un veredicto pertenece a SU pasada.
+    # Emparejar solo por el indice haria que el de la causa 0 de la primera
+    # marcase tambien la causa 0 de la segunda.
+    ap = {"en": sello(minutos_atras), "iteracion": iteracion, "causa": indice, "veredicto": cual}
     if evidencia:
         ap["evidencia"] = evidencia
     if sospecha:
@@ -161,12 +190,20 @@ def veredicto(minutos_atras, indice, cual, evidencia="", sospecha=""):
 
 def incidente(corr, activo, subsistema, kpi, valor, limite, tipo, estado, hace_min,
               diagnostico=None, veredictos=None, motivo=None, intentos=None,
-              movimiento_min=None, contenedor_viejo=False):
+              movimiento_min=None, contenedor_viejo=False, pasadas=None,
+              fallidos=None):
     """Un incidente completo.
 
     'movimiento_min' es cuando fue el ultimo movimiento, que es lo que mira el
     reloj de 12 h para decidir la pestaña. Por defecto, el mismo instante en que
     llego; se da aparte cuando hubo un veredicto despues.
+
+    'pasadas' es una lista de diagnosticos para simular reanalisis: cada uno
+    entra como una iteracion. 'diagnostico' es el atajo para una sola.
+
+    'fallidos' son intentos de reanalisis que no salieron. Se anotan aparte a
+    proposito: un reanalisis que falla NO puede tapar el diagnostico anterior,
+    asi que el incidente sigue en 'finalizado' y el fallo queda aqui.
 
     'contenedor_viejo' escribe el campo 'diagnostico' suelto en vez de la lista
     'diagnosticos'. Es como estan los DOS incidentes reales que hay en
@@ -202,10 +239,12 @@ def incidente(corr, activo, subsistema, kpi, valor, limite, tipo, estado, hace_m
     if contenedor_viejo:
         registro["diagnostico"] = diagnostico
     else:
-        # Una pasada por diagnostico: los fixtures no simulan reanalisis todavia.
-        registro["diagnosticos"] = (
-            [dict(diagnostico, iteracion=1)] if diagnostico else []
-        )
+        lista = pasadas if pasadas else ([diagnostico] if diagnostico else [])
+        registro["diagnosticos"] = [dict(d, iteracion=n) for n, d in enumerate(lista, 1)]
+    if fallidos:
+        registro["intentos_fallidos"] = [
+            {"en": sello(m), "motivo": motivo_f} for m, motivo_f in fallidos
+        ]
     if veredictos:
         registro["revision"] = {"veredictos": veredictos, "reclasificacion": None}
     if motivo:
@@ -284,7 +323,10 @@ FIXTURES = [
               ],
               movimiento_min=180),
 
-    # Causa no determinada: se descartaron todas. Tambien cierra al momento.
+    # Todas descartadas y RECIENTE: desde el 2026-09-23 esto ya no cierra al
+    # momento. Se queda en activos ofreciendo el reanalisis, que es cuando mas
+    # tiene que aportar. El caso cerrado como 'causa no determinada' es ahora
+    # el de la Pump 09, con el presupuesto agotado.
     incidente("4e5f0a1b2c3d", "PS20103 A01 PS01 Pump 12", "Pumping Station 02",
               "Flow Rate", 198.0, 250.0, "Low", "finalizado", 420,
               DIAG_CAUDAL,
@@ -324,30 +366,112 @@ FIXTURES = [
     incidente("8c3d4e5f0a1b", "PS20103 A01 PS01 Pump 07", "Pumping Station 02",
               "Specific Power Consumption", 0.55, 0.45, "High", "fallido", VIEJO + 500,
               motivo="El modelo no respondio con un diagnostico."),
+
+    # ---------------------------------------------------------------- Fase 3
+    # REANALIZADO: dos pasadas. Se ven las cuatro causas juntas -- las dos
+    # descartadas con su evidencia, la que nadie toco, y la nueva del
+    # reanalisis. Si la pantalla pintara solo la pasada vigente, las tres
+    # primeras desapareceran.
+    incidente("9d4e5f0a1b2c", "PS20102 A03 PS02 Pump 22", "Pumping Station 01",
+              "Hydraulic Efficiency", 41.3, 48.0, "Low", "finalizado", RECIENTE + 40,
+              pasadas=[DIAG_OBSTRUCCION, DIAG_ASPIRACION],
+              veredictos=[
+                  veredicto(RECIENTE + 25, 0, "descartada",
+                            "La valvula esta abierta al 100 %, comprobado in situ."),
+                  veredicto(RECIENTE + 20, 1, "descartada",
+                            "Purgada la ventosa y el caudal no cambia.",
+                            "Puede que el problema este en la aspiracion."),
+              ],
+              movimiento_min=RECIENTE + 10),
+
+    # TODAS DESCARTADAS con presupuesto intacto: ya NO cierra. Se queda en
+    # activos ofreciendo el reanalisis, que es cuando mas tiene que aportar --
+    # hay evidencia sobre todas las hipotesis y ninguna en pie.
+    incidente("0e5f0a1b2c3d", "PS20103 A01 PS01 Pump 15", "Pumping Station 02",
+              "Flow Rate", 88.0, 120.0, "Low", "finalizado", RECIENTE + 60,
+              DIAG_CAUDAL,
+              veredictos=[
+                  veredicto(RECIENTE + 30, 0, "descartada",
+                            "Valvula de descarga abierta al 100 %."),
+                  veredicto(RECIENTE + 25, 1, "descartada",
+                            "Purgada la ventosa; sin cambios en el caudal."),
+              ],
+              movimiento_min=RECIENTE + 25),
+
+    # PRESUPUESTO AGOTADO: tres pasadas y todo descartado. Ahora SI cierra, como
+    # 'causa no determinada'. El registro de lo descartado vale mas que una
+    # respuesta equivocada: es por donde empieza el siguiente que coja el caso.
+    incidente("1f0a1b2c3d4e", "PS20104 B02 PS01 Pump 09", "Pumping Station 03",
+              "Specific Power Consumption", 0.61, 0.45, "High", "finalizado", VIEJO + 300,
+              pasadas=[DIAG_CAUDAL, DIAG_ASPIRACION, DIAG_SIN_CONCLUSION],
+              veredictos=[
+                  veredicto(VIEJO + 260, 0, "descartada", "Valvula comprobada, abierta.", iteracion=1),
+                  veredicto(VIEJO + 255, 1, "descartada", "Ventosa purgada, sin cambio.", iteracion=1),
+                  veredicto(VIEJO + 240, 0, "descartada",
+                            "Filtro de aspiracion limpio, inspeccion visual.", iteracion=2),
+              ],
+              movimiento_min=VIEJO + 240),
+
+    # RECALCULANDO: analizando, pero con un diagnostico y veredictos detras. No
+    # es lo mismo esperar el primer resultado que esperar el segundo, y decir
+    # solo "el analisis esta en marcha" haria pensar que se ha perdido lo
+    # anterior.
+    incidente("2a1b2c3d4e5f", "PS20103 A01 PS01 Pump 18", "Pumping Station 02",
+              "Hydraulic Efficiency", 39.8, 48.0, "Low", "analizando", 25,
+              DIAG_OBSTRUCCION,
+              veredictos=[
+                  veredicto(15, 0, "descartada",
+                            "Rodete limpio, sin material fibroso."),
+              ]),
+
+    # REANALISIS FALLIDO: el intento no salio y el diagnostico anterior SIGUE
+    # ENTERO. Antes esto habria marcado el incidente como 'fallido' y tapado un
+    # diagnostico perfectamente bueno.
+    incidente("3b2c3d4e5f0a", "PS20104 B02 PS01 Pump 21", "Pumping Station 03",
+              "Vibration RMS", 7.4, 4.5, "High", "finalizado", RECIENTE + 90,
+              DIAG_VIBRACION,
+              veredictos=[
+                  veredicto(RECIENTE + 50, 0, "descartada",
+                            "Anclajes revisados y apretados; sigue vibrando."),
+              ],
+              fallidos=[(RECIENTE + 20,
+                         "No se pudieron obtener los datos historicos de PI System.")],
+              movimiento_min=RECIENTE + 20),
 ]
 
 
 def _resumen(r, corte):
-    """Replica la regla de incidents.cierre() para el listado de salida."""
-    pasadas = r.get("diagnosticos") or ([r["diagnostico"]] if r.get("diagnostico") else [])
-    causas = (pasadas[-1] if pasadas else {}).get("root_causes", [])
-    estados = ["pendiente"] * len(causas)
-    for v in (r.get("revision") or {}).get("veredictos", []):
-        estados[v["causa"]] = v["veredicto"]
+    """Como se vera el incidente en la pantalla.
 
+    Lo pregunta a incidents en vez de replicar sus reglas. Antes era una copia,
+    y una copia de una regla es una regla que se queda atras: al llegar la Fase
+    3 este resumen seguia emparejando los veredictos por el indice y reventaba
+    con el primer expediente de dos pasadas.
+    """
     if r["estado"] == "pausado":
         return "-", "no sale; hace salir el aviso de parada"
-    if "confirmada" in estados:
-        return "cerrados", "causa confirmada"
-    if estados and all(e == "descartada" for e in estados):
-        return "cerrados", "causa no determinada"
-    if r["actualizado_en"] < corte:
-        if r["estado"] == "fallido":
-            return "cerrados", "fallo del analisis"
-        return "cerrados", "revisado parcialmente" if "descartada" in estados else "sin veredicto"
-    if causas:
-        return "activos", f"{len(causas)} causas" + (" · a medias" if "descartada" in estados else "")
-    return "activos", (r.get("motivo", "")[:38] or r["estado"])
+
+    etiqueta, _ = incidents.cierre(r)
+    causas = incidents.revision_de_causas(r)
+    estados = [c["estado"] for c in causas]
+
+    if incidents.esta_cerrado(r):
+        return "cerrados", (etiqueta or r["estado"]).replace("_", " ")
+
+    if not causas:
+        return "activos", (r.get("motivo", "")[:38] or r["estado"])
+
+    detalle = "%d causa%s" % (len(causas), "" if len(causas) == 1 else "s")
+    pasadas = len(incidents.iteraciones(r))
+    if pasadas > 1:
+        detalle += " en %d pasadas" % pasadas
+    if r.get("intentos_fallidos"):
+        detalle += " · reanalisis fallido"
+    elif estados and all(e == "descartada" for e in estados):
+        detalle += " · todas descartadas, se ofrece reanalisis"
+    elif "descartada" in estados:
+        detalle += " · a medias"
+    return "activos", detalle
 
 
 def main() -> None:
