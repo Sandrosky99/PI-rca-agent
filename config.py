@@ -411,6 +411,18 @@ MAX_SELECTED_VARIABLES: int = _entero("MAX_SELECTED_VARIABLES", 40)
 
 # =============================================================================
 # Alcance dentro del Asset Framework
+# Reanalisis permitidos por incidente (Fase 3). El primer analisis no cuenta:
+# con 2, un expediente puede llegar a tener tres pasadas.
+#
+# Mientras quede presupuesto, descartar TODAS las causas deja de cerrar el
+# incidente: se intercala el relanzado, y solo al agotarlo se concluye que la
+# causa no se determino. Hasta el 2026-09-23 era terminal de inmediato.
+#
+# Se enseña en la pantalla ("te queda 1 de 2"): un presupuesto que se ve se
+# gasta mejor que uno que no se ve.
+MAX_REANALISIS: int = _entero("MAX_REANALISIS", 2)
+
+
 # =============================================================================
 # El grafo del AF NO contiene solo esta planta. Es un entorno compartido de
 # demostración: 8.404 elementos en 26 raíces (una cementera, Green H2, CPG,

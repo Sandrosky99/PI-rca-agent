@@ -722,20 +722,87 @@ def _causas_de(registro: dict) -> list[dict]:
     return ((diagnostico_vigente(registro) or {}).get("root_causes") or [])
 
 
-def estado_de_causas(registro: dict) -> list[str]:
+def _iteracion_de(pasada: dict) -> int:
+    n = pasada.get("iteracion")
+    return n if isinstance(n, int) and n > 0 else 1
+
+
+def estado_de_causas(registro: dict, iteracion: int | None = None) -> list[str]:
     """Estado actual de cada causa: pendiente, confirmada o descartada.
 
     Los veredictos son una lista de SOLO AÑADIR -- corregir es anotar encima --,
     así que el estado de una causa es el de su último apunte. Se calcula, no se
     guarda: guardarlo sería un segundo sitio del que fiarse, que puede
     desincronizarse del primero.
+
+    Se empareja por (iteracion, causa) y no solo por el índice. Con una sola
+    pasada da igual; con dos, no: el veredicto de la causa 0 de la primera
+    marcaría también la causa 0 de la segunda, que no tiene nada que ver con
+    ella. Los veredictos anteriores al 2026-09-23 llevan todos 'iteracion': 1 y
+    los diagnósticos de entonces son la pasada 1, así que siguen cuadrando.
     """
-    estados = [PENDIENTE] * len(_causas_de(registro))
+    pasada = diagnostico_vigente(registro) or {}
+    objetivo = iteracion if iteracion is not None else _iteracion_de(pasada)
+    causas = ((pasada if iteracion is None else
+               next((p for p in iteraciones(registro)
+                     if _iteracion_de(p) == objetivo), {})).get("root_causes") or [])
+
+    estados = [PENDIENTE] * len(causas)
     for v in (registro.get("revision") or {}).get("veredictos", []):
         i = v.get("causa")
-        if isinstance(i, int) and 0 <= i < len(estados):
+        if (v.get("iteracion", 1) == objetivo
+                and isinstance(i, int) and 0 <= i < len(estados)):
             estados[i] = v.get("veredicto", PENDIENTE)
     return estados
+
+
+def revision_de_causas(registro: dict) -> list[dict]:
+    """TODAS las causas de TODAS las pasadas, con su estado y lo que anotó una
+    persona sobre cada una.
+
+    Es la vista que necesitan el reanálisis y la pantalla a partir de la Fase 3,
+    y por eso está aquí y no en cada uno: el estado de una causa se deduce de los
+    veredictos, y ese cálculo no puede vivir en dos sitios.
+
+    Hace falta porque una causa ABIERTA puede estar en cualquier pasada. Una
+    pasada de reanálisis trae solo causas NUEVAS -- las que sobrevivieron a la
+    revisión no se copian, siguen donde nacieron con sus índices intactos --,
+    así que "lo que queda por mirar" se reparte entre iteraciones.
+    """
+    salida = []
+    for pasada in iteraciones(registro):
+        n = _iteracion_de(pasada)
+        estados = estado_de_causas(registro, n)
+        for i, causa in enumerate(pasada.get("root_causes") or []):
+            # El último apunte de esa causa, que es el que lleva la evidencia.
+            apunte = {}
+            for v in (registro.get("revision") or {}).get("veredictos", []):
+                if v.get("iteracion", 1) == n and v.get("causa") == i:
+                    apunte = v
+            salida.append({
+                "iteracion": n,
+                "indice": i,
+                "cause": causa.get("cause", ""),
+                "evidence": _evidencias_de(causa),
+                "recommended_action": causa.get("recommended_action", ""),
+                "estado": estados[i] if i < len(estados) else PENDIENTE,
+                "evidencia": apunte.get("evidencia", ""),
+                "sospecha": apunte.get("sospecha", ""),
+            })
+    return salida
+
+
+def _evidencias_de(causa: dict) -> list[str]:
+    """La evidencia que dio el MODELO, leyendo los dos esquemas.
+
+    Hasta el 2026-09-14 era un párrafo único en 'explanation'; ahora es una
+    lista en 'evidence'. Los expedientes viejos no se migran.
+    """
+    ev = causa.get("evidence")
+    if isinstance(ev, list):
+        return [str(x) for x in ev if str(x).strip()]
+    texto = causa.get("explanation") or ""
+    return [texto] if texto.strip() else []
 
 
 def registrar_veredicto(incidente_id: str, causa: int, veredicto: str,
@@ -820,6 +887,66 @@ SIN_VEREDICTO = "sin_veredicto"
 FALLO_DEL_ANALISIS = "fallo_del_analisis"
 
 
+def marcar_fallo(incidente_id: str, motivo: str, trace: dict | None = None) -> dict | None:
+    """El analisis se corto. Si el expediente YA tenia un diagnostico, no se
+    pierde.
+
+    El caso (Fase 3): el modelo propone tres causas, el operario descarta dos
+    con evidencia y pide un reanalisis, y ese reanalisis falla porque PI no
+    responde. Marcar el incidente como 'fallido' pondria la etiqueta 'fallo del
+    analisis' encima de un diagnostico perfectamente bueno -- que sigue en el
+    fichero, pero deja de verse. El operario perderia de vista el trabajo que
+    ya habia hecho.
+
+    Asi que un fallo con diagnostico previo devuelve el expediente a
+    'finalizado' y anota el intento aparte. 'Fallo del analisis' queda para lo
+    que de verdad describe: que NO hay ningun diagnostico.
+
+    Es el mismo principio que la reclasificacion: los hechos se conservan, lo
+    que cambia es la etiqueta.
+
+    'intentos_fallidos' es de SOLO ANADIR, como los veredictos: que un
+    reanalisis fallara dos veces seguidas es informacion, no ruido.
+    """
+    previo = leer_por_id(incidente_id) or {}
+    if not iteraciones(previo):
+        return mark(incidente_id, FALLIDO, trace=trace, motivo=motivo)
+
+    ahora = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    observability.audit(
+        "incident.reanalisis_fallido",
+        {"incidentId": incidente_id, "motivo": motivo},
+    )
+    cambios: dict = {
+        "estado": FINALIZADO,
+        # Cuenta como movimiento del workflow: el operario pidio el reanalisis
+        # y merece las 12 h para enterarse de que no salio.
+        "movimiento_workflow": ahora,
+        "intentos_fallidos": list(previo.get("intentos_fallidos") or [])
+                             + [{"en": ahora, "motivo": motivo}],
+    }
+    if trace:
+        cambios["trace"] = trace
+    log.warning("Reanalisis fallido; se conserva el diagnostico anterior: %s",
+                motivo, extra={"incidentId": incidente_id})
+    return _actualizar(incidente_id, cambios)
+
+
+def reanalisis_usados(registro: dict) -> int:
+    """Cuantos reanalisis se han gastado. El primer analisis no cuenta."""
+    return max(0, len(iteraciones(registro)) - 1)
+
+
+def quedan_reanalisis(registro: dict) -> bool:
+    """Si al incidente le queda presupuesto para otro reanalisis.
+
+    Se DEDUCE del numero de pasadas que hay en el fichero, no de un contador
+    aparte: un contador seria un segundo sitio del que fiarse, y ya sabemos
+    como acaba eso. Mismo principio que el cierre.
+    """
+    return reanalisis_usados(registro) < config.MAX_REANALISIS
+
+
 def cierre(registro: dict) -> tuple[str | None, bool]:
     """Cómo termina un incidente y si ya ha terminado.
 
@@ -852,14 +979,26 @@ def cierre(registro: dict) -> tuple[str | None, bool]:
         # PAUSADO e INTERRUMPIDO se recogen solos cuando PI vuelve a notificar.
         return None, False
 
-    estados = estado_de_causas(registro)
+    # TODAS las pasadas, no solo la vigente: un reanalisis trae causas nuevas y
+    # las que sobrevivieron siguen donde nacieron, asi que lo que queda abierto
+    # se reparte entre iteraciones.
+    estados = [c["estado"] for c in revision_de_causas(registro)]
     if CONFIRMADA in estados:
         return CAUSA_CONFIRMADA, True
+
     if estados and all(e == DESCARTADA for e in estados):
-        # En la Fase 2 esto es terminal. En la Fase 3 dejará de serlo: se
-        # intercalará el relanzado, y solo al agotarse el presupuesto de
-        # reanálisis se concluirá que la causa no se determinó.
-        return CAUSA_NO_DETERMINADA, True
+        # Descartarlas TODAS dejo de ser terminal el 2026-09-23. Antes cerraba
+        # de inmediato como 'causa no determinada'; ahora, mientras quede
+        # presupuesto, se intercala el relanzado -- que es justo cuando mas
+        # tiene que aportar, porque hay evidencia sobre todas las hipotesis y
+        # ninguna en pie.
+        #
+        # La etiqueta no cambia, y es deliberado: describe lo que se sabe AHORA
+        # -- ninguna causa determinada --, no que se haya dado por perdido. Lo
+        # que cambia es que el expediente se queda en activos con el boton de
+        # reanalizar en vez de irse a cerrados.
+        return CAUSA_NO_DETERMINADA, not quedan_reanalisis(registro)
+
     if DESCARTADA in estados:
         return REVISADO_PARCIALMENTE, False
     return SIN_VEREDICTO, False
@@ -1081,7 +1220,17 @@ def sweep_interrupted() -> int:
         registro = _leer(ruta)
         if not registro or registro.get("estado") not in _EN_CURSO:
             continue
-        registro["estado"] = INTERRUMPIDO
+        # Un reanalisis que muere a mitad tampoco puede tapar la pasada
+        # anterior. Y hay una razon mas: 'interrumpido' esta en _RECLAMABLES,
+        # asi que la siguiente notificacion de PI lo re-reservaria y lo
+        # analizaria DESDE CERO, perdiendo el diagnostico y los veredictos.
+        hay_diagnostico = bool(iteraciones(registro))
+        registro["estado"] = FINALIZADO if hay_diagnostico else INTERRUMPIDO
+        if hay_diagnostico:
+            registro["intentos_fallidos"] = list(registro.get("intentos_fallidos") or []) + [{
+                "en": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "motivo": "El proceso se detuvo durante el reanalisis.",
+            }]
         registro["actualizado_en"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         try:
             _escribir(ruta, registro)
