@@ -156,6 +156,61 @@ DIAG_VIEJO = {"root_causes": [
 ], "_ai_generated": IA}
 
 
+# --- Diagnosticos de otras zonas de la planta -------------------------------
+# Los activos son REALES, leidos del AF el 2026-09-25. Hasta ahora todos los
+# fixtures eran bombas de la misma estacion, y eso daba una falsa sensacion de
+# que la pantalla siempre ve lo mismo.
+DIAG_OXIGENO = {"root_causes": [
+    {"cause": "Colmatacion de los difusores de la parrilla de aireacion de la linea 1",
+     "evidence": ["El oxigeno disuelto cae de 2,1 a 0,8 mg/L en ocho horas sin que baje el caudal tratado.",
+                  "La presion en la linea de aire sube de 480 a 540 mbar a caudal de soplante constante."],
+     "recommended_action": "Inspeccionar y limpiar los difusores de la parrilla de la linea 1."},
+    {"cause": "Punta de carga organica en la entrada que consume el oxigeno mas rapido de lo que se aporta",
+     "evidence": ["Los solidos en suspension del reactor suben de 3.100 a 3.900 mg/L en el mismo tramo."],
+     "recommended_action": "Contrastar con la DQO de entrada y ajustar la consigna de aireacion."},
+    {"cause": "Deriva de la sonda de oxigeno disuelto por ensuciamiento de la membrana",
+     "evidence": ["La lectura no responde a los escalones de consigna del soplante."],
+     "recommended_action": "Limpiar y recalibrar la sonda OX313."},
+], "_ai_generated": IA,
+   "variables_que_faltan": ["Consumo electrico del soplante de la linea 1",
+                            "DQO de entrada al biologico",
+                            "Caudal de aire aportado a cada parrilla"]}
+
+DIAG_SOLIDOS = {"root_causes": [
+    {"cause": "Purga de fangos insuficiente, que acumula solidos en el reactor",
+     "evidence": ["El caudal de purga lleva cuatro dias por debajo de la consigna.",
+                  "Los solidos suben de forma monotona 180 mg/L al dia."],
+     "recommended_action": "Revisar la bomba de purga y su consigna de caudal."},
+    {"cause": "Recirculacion excesiva desde el decantador secundario",
+     "evidence": ["El caudal de recirculacion esta un 35 % por encima de su valor habitual."],
+     "recommended_action": "Ajustar la consigna de recirculacion."},
+], "_ai_generated": IA}
+
+DIAG_PH = {"root_causes": [
+    {"cause": "Vertido industrial acido aguas arriba, que llega sin amortiguar al primario",
+     "evidence": ["El pH cae de 7,2 a 6,1 en menos de una hora, mas rapido que cualquier deriva de proceso.",
+                  "El episodio coincide con una punta de conductividad en la entrada."],
+     "recommended_action": "Revisar el registro de vertidos autorizados en esa franja horaria."},
+    {"cause": "Sobredosificacion de cloruro ferrico en el punto de dosificacion 1",
+     "evidence": ["La dosificacion sube un 22 % respecto a su valor habitual para ese caudal."],
+     "recommended_action": "Comprobar el lazo de dosificacion y su senal de caudal."},
+    {"cause": "Deriva de la sonda de pH por ensuciamiento",
+     "evidence": ["La linea 2 no acompana la caida: mide 7,1 en el mismo instante."],
+     "recommended_action": "Calibrar la sonda PH213 y contrastar con muestra de laboratorio."},
+], "_ai_generated": IA,
+   "variables_que_faltan": ["Conductividad de la entrada de planta",
+                            "Registro de vertidos industriales autorizados"]}
+
+DIAG_CONSUMO_INTAKE = {"root_causes": [
+    {"cause": "Obstruccion parcial del filtro de aspiracion de la bomba",
+     "evidence": ["La presion de aspiracion cae 0,6 bar mientras el caudal se mantiene."],
+     "recommended_action": "Inspeccionar y limpiar el filtro de aspiracion."},
+    {"cause": "Desgaste del impulsor, que obliga a mas potencia para el mismo caudal",
+     "evidence": ["El consumo especifico sube un 11 % en tres semanas a caudal constante."],
+     "recommended_action": "Programar inspeccion del impulsor y medir holguras."},
+], "_ai_generated": IA}
+
+
 # --- Diagnosticos de una SEGUNDA pasada -------------------------------------
 # Traen 'que_cambia': lo que distingue verificar de volver a ordenar la lista, y
 # lo que le dice al operario que su comprobacion sirvio para algo.
@@ -437,6 +492,46 @@ FIXTURES = [
               fallidos=[(RECIENTE + 20,
                          "No se pudieron obtener los datos historicos de PI System.")],
               movimiento_min=RECIENTE + 20),
+
+    # ------------------------------------------- Otras zonas de la planta
+    # PENDIENTE DE REVISAR: finalizado, reciente y sin que nadie lo haya tocado.
+    # Es el caso mas frecuente en operacion y el unico que pide algo de alguien.
+    #
+    # Ademas trae 'variables_que_faltan' que apuntan a OTRO sistema -- la DQO de
+    # entrada esta en 1 - Intake --, que es justo el caso que hoy el Step 2 no
+    # alcanza.
+    incidente("4c3d4e5f0a1b", "OX313 Biological Line 1 Aerobic Area Oxygen",
+              "Biological Line 1", "Dissolved Oxygen", 0.8, 1.5, "Low",
+              "finalizado", 55, DIAG_OXIGENO),
+
+    # PENDIENTE DE REVISAR, en la otra linea del biologico.
+    incidente("5d4e5f0a1b2c", "SS324 Biological Line 2 Suspended Solids",
+              "Biological Line 2", "Mixed Liquor Suspended Solids", 4820.0, 4000.0,
+              "High", "finalizado", 130, DIAG_SOLIDOS),
+
+    # PENDIENTE DE REVISAR, en el intake.
+    incidente("6e5f0a1b2c3d", "PS01102", "Line 1",
+              "Specific Power Consumption", 0.38, 0.30, "High",
+              "finalizado", 240, DIAG_CONSUMO_INTAKE),
+
+    # El caso que motiva el paso de busqueda: una alerta en el PRIMARIO cuya
+    # sospecha senala la entrada de planta, que esta en otro sistema y no en la
+    # lista fija. Hoy el modelo no podria pedir esa variable.
+    incidente("7f0a1b2c3d4e", "PH213 Primary Line 1 Outlet pH", "Line 1",
+              "Outlet pH", 6.1, 6.5, "Low", "finalizado", 300,
+              DIAG_PH,
+              veredictos=[
+                  veredicto(200, 2, "descartada",
+                            "Sonda calibrada esta manana con patron de pH 7; la lectura es buena.",
+                            "Creo que viene de un vertido: mirad la conductividad de la entrada "
+                            "de planta, que no esta en la lista."),
+              ],
+              movimiento_min=200),
+
+    # Y uno en curso, para que la pestaña no este siempre igual.
+    incidente("8a1b2c3d4e5f", "FT337 Biologial Recirculation Flow",
+              "Recirculation and purge", "Flow Rate", 310.0, 420.0, "Low",
+              "analizando", 12),
 ]
 
 
