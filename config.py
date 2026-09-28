@@ -79,6 +79,28 @@ ANTHROPIC_API_KEY: str = os.environ.get("ANTHROPIC_API_KEY", "")
 # Modelo de Claude a usar si LLM_PROVIDER=anthropic.
 ANTHROPIC_MODEL: str = os.environ.get("ANTHROPIC_MODEL") or "claude-opus-4-8"
 
+# Razonamiento extendido en la ruta de Anthropic.
+#
+# Existe para IGUALAR LOS DOS PROVEEDORES, que es el problema que arregla:
+# gemini-2.5-flash razona por defecto y la llamada a Anthropic no lo pedía, así
+# que cambiar de proveedor cambiaba algo más que el proveedor. Comparar un
+# diagnóstico de una ruta con el de la otra no medía el modelo, medía eso.
+#
+# Es "adaptive", no un presupuesto de tokens: el propio modelo decide cuánto
+# razona, que es lo que hace viable encenderlo también en las llamadas cortas
+# --  la puerta de la búsqueda y las vueltas del bucle -- sin pagar en todas el
+# precio de la más difícil. Con `budget_tokens` habría que elegir un número
+# para pasos que no se parecen en nada, y además en claude-opus-4-8 ese
+# parámetro ya no se acepta: la API responde 400.
+#
+# Se puede apagar sin tocar código (ANTHROPIC_THINKING=false) por dos motivos:
+# para comparar con y sin él el día que haya con qué medir, y porque razonar
+# alarga las llamadas -- si alguna vez empieza a rozar LLM_TIMEOUT_SECONDS,
+# esta es la palanca inmediata.
+ANTHROPIC_THINKING: bool = (
+    os.environ.get("ANTHROPIC_THINKING") or "true"
+).strip().lower() in ("1", "true", "yes")
+
 # Techo de tokens de la respuesta del modelo, para AMBOS proveedores.
 #
 # Es un techo duro que la API aplica cortando la generación en seco: el modelo

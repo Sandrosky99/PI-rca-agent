@@ -17,6 +17,7 @@ RAIZ = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(RAIZ))
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 import config
+import llm_client
 
 fallos = []
 
@@ -99,6 +100,62 @@ check("proveedor desconocido se reporta", config.validate_config() != [])
 config.LLM_PROVIDER, config.GEMINI_API_KEY, config.ANTHROPIC_API_KEY = orig_prov, orig_g, orig_a
 
 shutil.rmtree(TMP, ignore_errors=True)
+print("\n=== 12. Razonamiento extendido en la ruta de Anthropic ===")
+# Existe para IGUALAR LOS DOS PROVEEDORES: gemini-2.5-flash razona por defecto y
+# la llamada a Anthropic no lo pedia, asi que cambiar de proveedor cambiaba algo
+# mas que el proveedor.
+check("encendido por defecto", config.ANTHROPIC_THINKING is True, config.ANTHROPIC_THINKING)
+fuente = (RAIZ / "llm_client.py").read_text(encoding="utf-8")
+# "adaptive" y no un presupuesto de tokens: en claude-opus-4-8 budget_tokens ya
+# no se acepta -- la API responde 400 --, asi que la forma vieja no es solo peor,
+# es un error.
+check("es adaptive", '{"type": "adaptive"}' in fuente)
+# Se mira LA LLAMADA, no el fichero: los comentarios de al lado nombran
+# budget_tokens justo para explicar por que no se usa.
+i = fuente.index("response = client.messages.create(")
+llamada = fuente[i:fuente.index(")", fuente.index("**extra", i))]
+check("y NO se pasa budget_tokens", "budget_tokens" not in llamada, llamada)
+check("el thinking entra por el extra", "**extra" in llamada, llamada)
+# Con razonamiento la API solo admite la temperatura por defecto.
+check("no se pasa temperatura", "temperature=" not in fuente)
+
+print("\n=== 12b. EL RIESGO: el primer bloque ya no es el texto ===")
+# Con razonamiento extendido la respuesta llega en VARIOS bloques y el primero
+# es el pensamiento. response.content[0].text -- que es lo que habia -- habria
+# devuelto el razonamiento en lugar del JSON, y habria roto el parseo de TODOS
+# los pasos con un error que no apunta ni de lejos a esa linea.
+class Bloque:
+    def __init__(self, tipo, texto=None):
+        self.type = tipo
+        if texto is not None:
+            self.text = texto
+
+
+class Respuesta:
+    def __init__(self, bloques, stop="end_turn"):
+        self.content = bloques
+        self.stop_reason = stop
+
+
+check("se salta el bloque de razonamiento",
+      llm_client._texto_de(Respuesta([Bloque("thinking"), Bloque("text", '{"ok":1}')]))
+      == '{"ok":1}')
+check("y sigue valiendo sin razonamiento",
+      llm_client._texto_de(Respuesta([Bloque("text", "hola")])) == "hola")
+# Un bloque de razonamiento NO tiene .text: acceder a el reventaria.
+check("no toca el .text del que no lo tiene",
+      not hasattr(Bloque("thinking"), "text"))
+
+# Sin bloque de texto no hay respuesta. Pasa si max_tokens se agota razonando, y
+# el aviso tiene que decir que hacer.
+try:
+    llm_client._texto_de(Respuesta([Bloque("thinking")], stop="max_tokens"))
+    check("sin texto avisa", False, "no lanzo nada")
+except llm_client.LLMGenerationError as exc:
+    check("sin texto avisa, y es el error del modulo", True)
+    check("dice el motivo de parada", "max_tokens" in str(exc), str(exc))
+    check("y que hacer", "ANTHROPIC_THINKING" in str(exc), str(exc))
+
 print("\n" + "=" * 62)
 if fallos:
     print(f"FALLOS: {len(fallos)} -> {fallos}")

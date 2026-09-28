@@ -160,10 +160,51 @@ def _generate_anthropic(system_prompt: str, user_message: str) -> str:
         timeout=config.LLM_TIMEOUT_SECONDS,
         max_retries=0,
     )
+    extra = {}
+    if config.ANTHROPIC_THINKING:
+        # "adaptive" y no {"type": "enabled", "budget_tokens": N}: el modelo
+        # decide cuánto razona. En claude-opus-4-8 budget_tokens además ya no se
+        # acepta -- la API responde 400 --, así que la forma vieja no es solo
+        # peor, es un error.
+        #
+        # No se pasa 'temperature' en ninguno de los dos casos, y con
+        # razonamiento extendido tampoco se puede: la API solo admite el valor
+        # por defecto.
+        extra["thinking"] = {"type": "adaptive"}
+
     response = client.messages.create(
         model=config.ANTHROPIC_MODEL,
         max_tokens=config.LLM_MAX_TOKENS,
         system=system_prompt,
         messages=[{"role": "user", "content": user_message}],
+        **extra,
     )
-    return response.content[0].text
+    return _texto_de(response)
+
+
+def _texto_de(response) -> str:
+    """El texto de la respuesta, saltándose los bloques de razonamiento.
+
+    Con razonamiento extendido la respuesta llega en VARIOS bloques y el primero
+    NO es el texto: es el pensamiento. `response.content[0].text` -- que es lo
+    que había aquí -- devolvería entonces el razonamiento en lugar de la
+    respuesta, o reventaría con AttributeError si el bloque no tiene 'text'.
+
+    Y no es un detalle cosmético: lo que sale de aquí va directo a
+    _extract_json_payload() en workflow.py. Devolver el razonamiento en vez del
+    JSON haría fallar el parseo de TODOS los pasos, y el mensaje de error no
+    apuntaría ni de lejos a esta línea.
+    """
+    for bloque in response.content:
+        if getattr(bloque, "type", None) == "text":
+            return bloque.text
+    # Sin bloque de texto no hay respuesta que devolver. Pasa, por ejemplo, si
+    # max_tokens se agota razonando. Se avisa con el motivo de parada, que es lo
+    # que lo explica.
+    raise LLMGenerationError(
+        "Claude no devolvió texto (stop_reason=%s, bloques=%s). Si es "
+        "'max_tokens', el modelo se quedó sin espacio: sube LLM_MAX_TOKENS o "
+        "apaga ANTHROPIC_THINKING." % (
+            getattr(response, "stop_reason", "?"),
+            [getattr(b, "type", "?") for b in response.content]),
+    )

@@ -765,10 +765,13 @@ C:\MCPServer\rca-agent\logs\service_error.log
 2. **Relanzar un análisis fallido.** Hoy un incidente en `fallido` es un callejón
    sin salida, y la mitad de los motivos de fallo son cortes externos que un
    reintento resolvería.
-3. **Igualar el razonamiento entre proveedores.** `gemini-2.5-flash` razona por
-   defecto; la llamada a Anthropic no pasa `thinking`, así que no razona.
-   Activarlo igualaría ambas rutas, pero sin evaluación no hay forma de medir si
-   mejora el diagnóstico.
+3. **Medir si el razonamiento extendido mejora el diagnóstico.** Desde el
+   2026-09-28 la llamada a Anthropic pasa `thinking: adaptive`, así que las dos
+   rutas razonan — `gemini-2.5-flash` ya lo hacía por defecto. Eso cierra una
+   diferencia entre proveedores que contaminaba cualquier comparación, pero
+   **no** responde a si el diagnóstico sale mejor: para eso hace falta una
+   evaluación que todavía no existe. Mientras tanto la palanca está puesta
+   (`ANTHROPIC_THINKING=false`) para poder comparar cuando la haya.
 4. **Ampliar la validación** a más KPIs y tipos de activo. Dos cosas concretas:
    el bloque `plant_context` está implementado y **el modelo aún no lo ha
    usado** —en la ejecución del 2026-09-23 eligió 0 de sus 10 variables, que es
