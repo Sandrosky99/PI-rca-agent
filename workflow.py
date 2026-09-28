@@ -359,12 +359,14 @@ _FINAL_INSTRUCTION = (
     "claves, \"element\" (nombre/ruta del elemento) y \"piApiPath\" (el "
     "piApiPath exacto tal como aparece en los datos del AF) -- los atributos "
     "cuyos datos requieres consultar para identificar la causa raíz.\n"
-    "- \"missing_variables\": un array de strings en lenguaje natural "
-    "describiendo qué tipo de variable adicional, que no aparece en los "
-    "datos del AF proporcionados, ayudaría a precisar el diagnóstico. Array "
-    "vacío si no falta ninguna. Esta clave es solo para informar al usuario "
-    "y no se usará para consultar datos, así que no inventes un piApiPath "
-    "para ella.\n"
+    "- \"missing_variables\": un array de COMO MUCHO 4 strings en lenguaje "
+    "natural, cada uno de una sola linea, describiendo qué variable adicional "
+    "-- que no aparece en los datos del AF proporcionados -- aportaría "
+    "evidencia para confirmar o descartar tus hipótesis. Array vacío si no "
+    "falta ninguna. Nómbrala como la nombraría un operario de planta, no con "
+    "un identificador: esto lo va a leer una persona, y de ahí sale qué "
+    "conviene añadir al contexto. No se usará para consultar datos, así que "
+    "no inventes un piApiPath para ella.\n"
     "Responde únicamente con ese JSON, sin bloques de código markdown (```), "
     "sin texto introductorio, resumen ni explicación adicional antes o después."
 )
@@ -667,9 +669,18 @@ def _validate_selected_variables(parsed_response, af_context: dict) -> tuple[lis
 
     missing_variables: list[str] = []
     if isinstance(raw_missing, list):
-        missing_variables = [m for m in raw_missing if isinstance(m, str) and m.strip()]
+        missing_variables = [m.strip() for m in raw_missing
+                             if isinstance(m, str) and m.strip()]
         if len(missing_variables) != len(raw_missing):
             log.warning("Step 4: se ignoran entradas no textuales en 'missing_variables'.")
+        # El tope se pide en el prompt Y se aplica aqui, como con las variables:
+        # el prompt es una instruccion, no una garantia. Se conservan las
+        # primeras porque el modelo las da por orden de utilidad.
+        if len(missing_variables) > MAX_VARIABLES_QUE_FALTAN:
+            log.warning("Step 4: el modelo declaro %d variables que faltan; se "
+                        "conservan las %d primeras.",
+                        len(missing_variables), MAX_VARIABLES_QUE_FALTAN)
+            missing_variables = missing_variables[:MAX_VARIABLES_QUE_FALTAN]
     elif raw_missing is not None:
         log.warning("Step 4: 'missing_variables' no es un array (se ignora): %r", raw_missing)
 
@@ -704,6 +715,11 @@ def _parse_detection_time(payload: dict) -> tuple[datetime, datetime]:
 # Lo calcula el codigo (3 menos las que quedan abiertas) y no se fia de que el
 # modelo cuente bien.
 MAX_CAUSAS_ABIERTAS = 3
+
+# Tope de 'variables que faltan' que se le aceptan al modelo en el Step 4. Son
+# para que las lea una persona -- de ahi sale que conviene añadir al contexto
+# fijo de planta --, y una lista larga no se lee: se ignora.
+MAX_VARIABLES_QUE_FALTAN = 4
 
 
 def bloque_feedback(revision: list[dict]) -> tuple[str, int]:
@@ -1691,4 +1707,14 @@ async def run_rca_analysis(notification_payload: dict, trace: dict | None = None
         "(un punto cada %d %s), reajustes: %d.",
         lookback_hours, interval[0], interval[1], adjustments,
     )
+    # Lo que el modelo dijo que le faltaba, al expediente. Sale del Step 4 y
+    # hasta el 2026-09-23 solo viajaba al Step 6 como limitacion declarada y se
+    # perdia: nadie se enteraba de que no se pudo mirar.
+    #
+    # Es la señal que hace crecer AF_PLANT_CONTEXT_ELEMENTS por evidencia en
+    # vez de por especulacion: si el modelo repite que necesita el pH del
+    # primario, se añade una vez y ya esta ahi para siempre.
+    if missing_variables:
+        diagnosis["variables_que_faltan"] = missing_variables
+
     return diagnosis

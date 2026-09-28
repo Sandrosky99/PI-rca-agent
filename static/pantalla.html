@@ -184,9 +184,20 @@
     display:block; font-size:14.5px; color:var(--texto-2); margin-top:3px;
     font-variant-numeric:tabular-nums;
   }
+  /* El problema y el contexto comparten fila: el contexto es dato de apoyo y
+     ocupaba una linea entera para si. En pantalla estrecha vuelven a apilarse
+     solos, que es para lo que esta el wrap. */
+  .fila-cabecera{
+    display:flex; flex-wrap:wrap; gap:8px 26px; align-items:baseline;
+  }
+  /* El problema NO crece: con flex:1 se estiraba hasta el borde y mandaba el
+     contexto al otro extremo de la pantalla, a dos palmos de lo que describe.
+     Asi los dos ocupan lo suyo y se quedan juntos. */
+  .fila-cabecera .problema{flex:0 1 auto; margin-bottom:0}
   .contexto{
-    color:var(--tenue); font-size:13.5px; margin:14px 0 0;
+    color:var(--tenue); font-size:13.5px; margin:0;
     display:flex; flex-wrap:wrap; gap:4px 14px;
+    flex:0 1 auto;
   }
   .contexto .sep{color:var(--borde)}
   .contexto b{color:var(--texto-2); font-weight:400}
@@ -335,13 +346,28 @@
     flex:0 0 auto;
   }
 
+  /* Lo que el modelo dijo que le faltaba. UNA linea, tenue y al final: es un
+     apunte para quien decide que variables añadir al contexto, no algo que
+     haya que leer para juzgar una causa. */
+  .faltan{
+    margin:16px 0 0; font-size:13px; color:var(--tenue);
+    display:flex; gap:8px; align-items:baseline;
+  }
+  .faltan b{
+    color:var(--tenue); font-size:10.5px; letter-spacing:.12em;
+    text-transform:uppercase; white-space:nowrap; font-weight:600;
+  }
+
   /* Que cambio tras el reanalisis. Va ARRIBA de las causas y destacado: es lo
      que le dice al operario que su comprobacion sirvio para algo. Sin esto, un
      reanalisis se lee como "aqui tienes otra lista". */
+  /* Mas ancho que el resto de bloques (108ch frente a 72): es una sola frase y
+     a 72 se partia en tres lineas. La pantalla es larga de por si, y cada linea
+     que se ahorra arriba es una que no empuja las causas fuera de la vista. */
   .que-cambia{
     margin:0 0 20px; padding:13px 16px; border-radius:8px;
     background:var(--acento-fondo); border:1px solid var(--borde);
-    font-size:14.5px; color:var(--texto-2); max-width:72ch;
+    font-size:14.5px; color:var(--texto-2); max-width:108ch;
   }
   .que-cambia b{
     display:block; color:var(--acento); font-size:10.5px;
@@ -362,7 +388,7 @@
     color:var(--tenue); font-size:10.5px; letter-spacing:.12em;
     text-transform:uppercase; display:block; margin-bottom:8px;
   }
-  .zona-reanalisis p{margin:0 0 11px; font-size:14.5px; color:var(--texto-2); max-width:72ch}
+  .zona-reanalisis p{margin:0 0 11px; font-size:14.5px; color:var(--texto-2)}
   .presupuesto{color:var(--tenue); font-size:12.5px; margin-left:10px}
 
   /* Separado de las causas y con su propio encabezado: lo de aqui actua sobre
@@ -375,7 +401,7 @@
     color:var(--tenue); font-size:10.5px; letter-spacing:.12em;
     text-transform:uppercase; display:block; margin-bottom:8px;
   }
-  .zona-alerta p{margin:0 0 11px; font-size:14.5px; color:var(--texto-2); max-width:72ch}
+  .zona-alerta p{margin:0 0 11px; font-size:14.5px; color:var(--texto-2)}
   .zona-alerta strong{color:var(--texto)}
   .aviso-ia{
     margin-top:26px; padding:12px 16px; border-radius:8px;
@@ -1009,6 +1035,18 @@ function conectarVeredictos(iid){
   }
 }
 
+// Lo que el modelo dijo que le habria hecho falta y no estaba en el AF.
+//
+// Va en UNA linea, al final y en gris: no sirve para juzgar una causa, sirve
+// para decidir que conviene añadir a AF_PLANT_CONTEXT_ELEMENTS. Hasta el
+// 2026-09-23 el modelo lo declaraba y se perdia dentro del analisis.
+function faltan(d){
+  const v = ((d.diagnostico || {}).variables_que_faltan) || [];
+  if(!v.length) return "";
+  return `<p class="faltan"><b>Habría ayudado</b><span>${
+    v.map(x => esc(x)).join(" · ")}</span></p>`;
+}
+
 // Volver a preguntar, con lo que se comprobo en planta.
 //
 // SOLO en activos, y nunca sobre un expediente cerrado: decision de la
@@ -1057,9 +1095,8 @@ function zonaReanalisis(d){
   }
   return `<div class="zona-reanalisis">
     <b>Volver a analizar</b>
-    <p>Se le dará lo que has descartado y por qué, y volverá a elegir qué
-       variables mirar con datos nuevos de PI. Lo que ya has descartado no se
-       volverá a proponer.</p>
+    <p>El feedback introducido se utilizará para reanalizar las posibles causas
+       raíz. Las causas descartadas no se volverán a proponer.</p>
     <button class="btn btn-si" data-reanalizar="1">Volver a analizar</button>${cuenta}</div>`;
 }
 
@@ -1086,9 +1123,7 @@ function zonaAlerta(d){
       ? `<p>Marcada como <strong>no válida</strong>: el problema no existía. El modelo
          no se equivocó — le dieron un problema inventado.</p>
          <button class="btn btn-sec" data-alerta="quitar">Quitar la marca</button>`
-      : `<p>Si esta alerta no debió dispararse — el problema no existía y el umbral de
-         PI está mal — márcalo aquí. No cuenta como fallo del diagnóstico, y es lo que
-         permite avisar de un umbral que hay que corregir.</p>
+      : `<p>Si esta alerta no debió dispararse, márcalo como no válida.</p>
          <button class="btn btn-sec" data-alerta="marcar">Marcar alerta no válida</button>`}
     </div>`;
 }
@@ -1208,13 +1243,16 @@ function pintarDetalle(d){
     <div class="bloque-cabecera">
       ${chipEstado(d)}
       <h2 class="titulo">${esc(d.asset)}</h2>
-      <p class="problema">
-        <span class="kpi">${esc(d.kpi_name)}</span> ${esc(direccion(d.threshold_type))}
-        <span class="cifras">${num(p.KPI)} frente a un límite de ${num(p.Limit)}</span>
-      </p>
-      <p class="contexto">${contexto.join('<span class="sep">·</span>')}</p>
+      <div class="fila-cabecera">
+        <p class="problema">
+          <span class="kpi">${esc(d.kpi_name)}</span> ${esc(direccion(d.threshold_type))}
+          <span class="cifras">${num(p.KPI)} frente a un límite de ${num(p.Limit)}</span>
+        </p>
+        <p class="contexto">${contexto.join('<span class="sep">·</span>')}</p>
+      </div>
     </div>
     ${cuerpo}
+    ${faltan(d)}
     ${zonaReanalisis(d)}
     ${zonaAlerta(d)}
     ${ia ? `<p class="aviso-ia"><b>Generado por IA.</b> ${esc(ia.notice)}
