@@ -498,6 +498,28 @@ check("con estilo propio", ".anadido{" in html)
 check("el recuadro no depende de que_cambia",
       "(cambio || bloqueAnadido)" in html)
 
+print("\n=== 8s. El recuento junto al titulo de las causas ===")
+# Cuantas hay y en que estado, para leerlo sin contar tarjetas.
+check("existe la funcion", "function recuento(estados){" in html)
+check("y el titulo la usa", "${recuento(estados)}" in html)
+check("con estilo de dato, no de etiqueta",
+      ".recuento{" in html and "text-transform:none" in html)
+
+# LA REGLA: un cero no se escribe. "3 - 0 descartadas" ocupa el mismo sitio que
+# el dato util y no dice nada que no se vea ya.
+i = html.index("function recuento(estados){")
+cuerpo = html[i:html.index("function zonaVeredicto", i)]
+check("las descartadas solo salen si las hay", "if(desc) partes.push" in cuerpo, cuerpo[-400:])
+check("y las confirmadas igual", "if(conf) partes.push" in cuerpo, cuerpo[-400:])
+check("el total SI sale siempre", "partes = [String(estados.length)]" in cuerpo)
+# Singular y plural: "1 descartada" y no "1 descartadas".
+check("concuerda en numero", 'desc === 1 ? "" : "s"' in cuerpo and 'conf === 1 ? "" : "s"' in cuerpo)
+# "confirmada" y no "aceptada": es la palabra del resto de la pantalla. Dos
+# nombres para lo mismo en la misma vista se leen como dos cosas distintas.
+check("usa la palabra del resto de la pantalla",
+      "confirmada" in cuerpo and "aceptada" not in cuerpo, cuerpo[-300:])
+check("y esa palabra es la del veredicto", "Confirmada por el operario" in html)
+
 print("\n" + "=" * 62)
 if fallos:
     print(f"FALLOS: {len(fallos)} -> {fallos}")

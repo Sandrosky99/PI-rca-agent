@@ -204,6 +204,14 @@
   .bloque-cabecera{padding-bottom:18px; border-bottom:1px solid var(--borde); margin-bottom:4px}
 
   h3{font-size:13px; letter-spacing:.1em; text-transform:uppercase; color:var(--tenue); margin:26px 0 12px}
+  /* El recuento junto al titulo. Se le quita la caja alta y el espaciado del
+     h3 a proposito: el titulo es una etiqueta y esto es un dato, y en
+     versalitas "2 DESCARTADAS" pesa mas que el propio titulo. */
+  .recuento{
+    text-transform:none; letter-spacing:0; font-weight:400;
+    color:var(--texto-2); margin-left:6px;
+  }
+
   /* Cada causa se lee en tres saltos: QUE pasa (una frase), POR QUE lo decimos
      (hechos sueltos) y QUE hacer. Antes era un solo parrafo y habia que
      leerselo entero para llegar a lo unico accionable. */
@@ -878,6 +886,28 @@ function ultimoApunte(d, c){
 function clave(c){ return c.iteracion + ":" + c.indice; }
 
 // Que se puede hacer con una causa, segun como este.
+// Cuantas hay y en que estado, para leerlo sin contar tarjetas. Va junto al
+// titulo porque es donde se mira antes de bajar por la lista.
+//
+// Un cero NO se escribe. "3 - 0 descartadas" ocupa el mismo sitio que el dato
+// util y no dice nada que no se vea: si no hay ninguna descartada, es que nadie
+// ha bajado a planta todavia. Vale igual para las confirmadas, que ademas son
+// como mucho una -- en cuanto hay una confirmada, la pantalla deja de ofrecer
+// veredicto sobre las demas.
+//
+// Se dice "confirmadas" y no "aceptadas" porque es la palabra que usa el resto
+// de la pantalla ("Confirmada por el operario"). Dos nombres para lo mismo en
+// la misma vista se leen como dos cosas distintas.
+function recuento(estados){
+  const cuantas = e => estados.filter(x => x === e).length;
+  const partes = [String(estados.length)];
+  const desc = cuantas("descartada");
+  const conf = cuantas("confirmada");
+  if(desc) partes.push(`${desc} descartada${desc === 1 ? "" : "s"}`);
+  if(conf) partes.push(`${conf} confirmada${conf === 1 ? "" : "s"}`);
+  return esc(partes.join(" · "));
+}
+
 function zonaVeredicto(d, c, estados){
   const estado = c.estado;
   // Con una causa ya confirmada, la pregunta esta contestada: juzgar las demas
@@ -1264,7 +1294,8 @@ function pintarDetalle(d){
     cuerpo = ((cambio || bloqueAnadido)
         ? `<p class="que-cambia"><b>Qué ha cambiado</b>${esc(cambio || "")}${bloqueAnadido}</p>`
         : "")
-      + `<h3>Causas propuestas</h3>` + orden.map(n => {
+      + `<h3>Causas propuestas <span class="recuento">${recuento(estados)}</span></h3>`
+      + orden.map(n => {
       const c = causas[n];
       const ev = evidencias(c);
       return `
