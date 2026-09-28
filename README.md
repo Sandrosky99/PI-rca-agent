@@ -361,7 +361,7 @@ La evidencia es obligatoria al descartar, y no por burocracia: **es lo único qu
 hace que un reanálisis valga para algo**. Sin ella, la segunda pasada sería el
 segundo clasificado ascendido sobre los mismos datos.
 
-### Qué pasará en el reanálisis (Fase 3, en construcción)
+### El reanálisis
 
 ```
   el operario descarta una causa con evidencia
@@ -377,18 +377,36 @@ segundo clasificado ascendido sobre los mismos datos.
 
 Que vuelva por la selección de variables es deliberado: si solo se repitiera el
 diagnóstico, la segunda respuesta llegaría con el mismo tono de autoridad y menos
-fundamento. Por eso el fichero guarda **una lista de pasadas**
-(`diagnosticos`, cada una con su `iteracion`) y cada veredicto dice a qué
-iteración pertenece — si apuntara solo al índice, los veredictos de la primera
-tanda pasarían a señalar causas que no son.
+fundamento. Por eso el fichero guarda **una lista de pasadas** y cada veredicto
+dice a qué iteración pertenece.
 
-Y por eso el contexto del Step 2 tuvo que crecer con `plant_context` y la ficha
-del equipo: si el operario aporta evidencia sobre una variable que el Step 2 no
-alcanza, el modelo no podría pedirla por mucho feedback que se le dé.
+En la segunda pasada cambian tres reglas: **desaparece el mínimo de dos causas**
+—es lo que obliga a rellenar cuando los datos solo sostienen una—, **«no lo sé»**
+pasa a ser una respuesta válida, y se le pide **`que_cambia`**: una frase diciendo
+qué se ha movido a la luz de lo comprobado. Nunca más de tres causas abiertas en
+total, y ese tope lo calcula el código.
+
+**Las causas que sobreviven las conserva el código, no el modelo.** Se le dice
+que ya están contadas y que no las repita. Dejar que las suelte en silencio sería
+dejarle retirar una hipótesis que ninguna persona ha refutado.
+
+**Presupuesto de 2 reanálisis**, visible en la pantalla («te queda 1 de 2») y
+deducido del número de pasadas del fichero. Mientras quede, descartar todas las
+causas **no cierra** el incidente: se intercala el relanzado. Al agotarse, se
+concluye *causa no determinada*.
+
+**Si el reanálisis falla, no destruye la pasada anterior**: el expediente vuelve a
+`finalizado` con su diagnóstico intacto y el intento se anota aparte. *Fallo del
+análisis* queda para lo que de verdad describe: que no hay ningún diagnóstico.
 
 > **Nunca sobre un expediente cerrado**, ni aunque se le aporte evidencia nueva en
 > frío. Decisión de la propietaria: si el reanálisis pudiera dispararse desde
 > cerrados, volveríamos a tener dos relojes.
+
+**Validado de punta a punta** el 2026-09-23 contra el AF, PI y el modelo reales:
+alerta → análisis → veredicto → reanálisis, 90 s + 90 s, 4 llamadas al modelo. Se
+le dio una sospecha sobre un caudalímetro descalibrado y **la contrastó contra los
+datos y la rechazó**, que era lo que había que comprobar.
 
 ### Cómo se abre, y de dónde viene su seguridad
 
@@ -560,6 +578,7 @@ Solo se exige la clave del proveedor realmente seleccionado, no ambas.
 | `AF_PLANT_ROOT` | Raíz del AF a la que se restringe todo lo que se consulte | `WWTP` |
 | `AF_PLANT_CONTEXT_ELEMENTS` | Elementos que se añaden al contexto de toda alerta, separados por `\|` | vacío |
 | `MAX_PLANT_CONTEXT_ATTRIBUTES` | Tope de atributos que puede aportar ese bloque | `60` |
+| `MAX_REANALISIS` | Reanálisis permitidos por incidente. El primero no cuenta | `2` |
 
 El acotado a la planta **no es cosmético**: el grafo es un entorno compartido con
 otras demos, los nombres de elemento se repiten entre ellas, y hay un modelo
@@ -636,6 +655,7 @@ Documentación interactiva completa en `http://localhost:8090/docs` (Swagger UI 
 | `GET` | `/incidentes/{id}` | El expediente completo **salvo el `trace`**, que es el 98,9 % del fichero y no pinta nada en una pantalla. |
 | `POST` | `/incidentes/{id}/veredicto` | Confirma o descarta una causa, con su evidencia. También la devuelve a `pendiente` para deshacer. |
 | `POST` | `/incidentes/{id}/reclasificacion` | Marca la alerta como no válida, o quita la marca. |
+| `POST` | `/incidentes/{id}/reanalisis` | Vuelve a analizar llevándole al modelo lo que se descartó y con qué evidencia. Rechaza si está cerrado, si no queda presupuesto o si no hay ninguna causa descartada. |
 
 ---
 
@@ -719,16 +739,20 @@ C:\MCPServer\rca-agent\logs\service_error.log
 | 4 | El modelo identifica qué variables reales necesita | ✅ Completado |
 | 5 | Obtener datos históricos de PI vía `aveva-pi-mcp` | ✅ Completado |
 | 6 | El modelo produce diagnóstico y recomendaciones | ✅ Completado |
+| ↻ | **Reanálisis** — el operario descarta con evidencia y el workflow vuelve a entrar por el Step 4 con ese feedback | ✅ Completado |
 
 **Validación:** ciclo completo el 2026-08-20 y repetido el 2026-09-23 contra el AF, PI y el modelo reales, con la alerta de `Hydraulic Efficiency` sobre `PS20102 A03 PS02 Pump 02`: 206 s, 3 llamadas al modelo, 159 variables ofrecidas y 24 elegidas. El modelo pidió ampliar la ventana de 24 h a 7 días y se le concedió; volvió a pedir y se le denegó por presupuesto. Validación real pero no exhaustiva: falta ejercitarlo con otros KPIs y tipos de activo.
 
 ### Pendiente
 
-1. **La Fase 3 — reanálisis con el feedback humano.** Empezada: el expediente ya
-   guarda las pasadas del análisis (`diagnosticos`, con su `iteracion`), y el
-   contexto ya alcanza variables de otras zonas de la planta. Falta la re-entrada
-   con el feedback, que un reanálisis fallido no destruya la primera pasada, y la
-   pantalla. Ver [`docs/DISENO-INTERACCION-HUMANA.md`](./docs/DISENO-INTERACCION-HUMANA.md).
+1. **El paso de búsqueda del reanálisis.** Es lo único que falta de la Fase 3.
+   Cuando la sospecha del operario señala un activo de otro sistema que tampoco
+   está en `AF_PLANT_CONTEXT_ELEMENTS` —«mirad la conductividad de la entrada de
+   planta»— el modelo no puede pedir esa variable ni queriendo: el Step 2 no
+   llega ahí. Hace falta traducir lo que escribió la persona a vocabulario del
+   AF y buscarlo, acotado a la planta y enseñando siempre qué se ha mirado.
+   El riesgo no es no encontrarla: es encontrar **la equivocada** y que el
+   diagnóstico cite con confianza una variable de otra parte de la planta.
 2. **Relanzar un análisis fallido.** Hoy un incidente en `fallido` es un callejón
    sin salida, y la mitad de los motivos de fallo son cortes externos que un
    reintento resolvería.
@@ -736,11 +760,12 @@ C:\MCPServer\rca-agent\logs\service_error.log
    defecto; la llamada a Anthropic no pasa `thinking`, así que no razona.
    Activarlo igualaría ambas rutas, pero sin evaluación no hay forma de medir si
    mejora el diagnóstico.
-4. **Ampliar la validación** a más KPIs y tipos de activo. Y en concreto: el
-   bloque `plant_context` está implementado y **el modelo aún no lo ha usado** —
-   en la ejecución del 2026-09-23 eligió 0 de sus 10 variables, que es lo
-   correcto para una alerta de bomba, pero deja sin comprobar que las pida cuando
-   toque.
+4. **Ampliar la validación** a más KPIs y tipos de activo. Dos cosas concretas:
+   el bloque `plant_context` está implementado y **el modelo aún no lo ha
+   usado** —en la ejecución del 2026-09-23 eligió 0 de sus 10 variables, que es
+   lo correcto para una alerta de bomba pero deja sin comprobar que las pida
+   cuando toque—; y solo existe **un** reanálisis real, así que no sabemos con
+   qué frecuencia la sospecha señalará fuera del contexto disponible.
 
 ---
 
