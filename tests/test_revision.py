@@ -253,10 +253,21 @@ incidents.mark(iid6, incidents.FINALIZADO, diagnostico=DIAG, trace={"step6_promp
 fichero = json.loads((TMP / "inc" / f"{iid6}.json").read_text(encoding="utf-8"))
 check("el veredicto sobrevive a que escriba el workflow",
       fichero["revision"]["veredictos"][0]["evidencia"] == "No es esto.", fichero.get("revision"))
-check("y el trace del workflow sigue ahi", "step6_prompts" in fichero["trace"])
+# El trace se APILA por pasada desde el 2026-09-23: sembrar() dejo el de la
+# primera y este mark() añade el de la segunda. Antes se escribia encima, y un
+# reanalisis borraba la procedencia de la pasada anterior -- cuyo diagnostico si
+# se conservaba. Lo destapo una prueba de punta a punta.
+check("y el trace del workflow sigue ahi",
+      "step6_prompts" in fichero["traces"][-1], fichero.get("traces"))
+check("sin pisar el de la pasada anterior",
+      "step3_prompt" in fichero["traces"][0], [sorted(t) for t in fichero["traces"]])
+check("cada uno sabe de que pasada es",
+      [t["iteracion"] for t in fichero["traces"]] == [1, 2],
+      [t.get("iteracion") for t in fichero["traces"]])
 veredicto(iid6, causa=1, veredicto="descartada", evidencia="Tampoco.")
 fichero = json.loads((TMP / "inc" / f"{iid6}.json").read_text(encoding="utf-8"))
-check("el trace sobrevive a que escriba la persona", "step6_prompts" in fichero["trace"])
+check("el trace sobrevive a que escriba la persona",
+      "step6_prompts" in fichero["traces"][-1])
 check("y hay dos veredictos", len(fichero["revision"]["veredictos"]) == 2)
 
 print("\n=== 12. El estado de las causas se CALCULA, no se guarda ===")

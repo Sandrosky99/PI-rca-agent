@@ -233,6 +233,32 @@ def iteraciones(registro: dict) -> list[dict]:
     return []
 
 
+def traces(registro: dict) -> list[dict]:
+    """Los prompts y respuestas de CADA pasada, de la mas antigua a la reciente.
+
+    Mismo problema que tenia el diagnostico, y misma forma de resolverlo. Hasta
+    el 2026-09-23 el trace era un objeto suelto que mark() escribia entero en
+    cada pasada, asi que un reanalisis PISABA los prompts de la anterior.
+
+    Lo destapo una prueba de punta a punta: el volcado de la primera pasada solo
+    existe porque se guardo a mano antes de relanzar. Sin eso habria desaparecido.
+
+    No es solo incomodo. base/software-spec §1.5 pide conservar el prompt que
+    llevo a un artefacto generado por IA: el diagnostico de la primera pasada si
+    se conservaba, su procedencia no.
+
+    Compatibilidad: los expedientes con el campo 'trace' suelto no se migran --
+    base §1.7 --, se leen y cuentan como la pasada 1.
+    """
+    guardados = registro.get("traces")
+    if isinstance(guardados, list):
+        return [t for t in guardados if isinstance(t, dict)]
+    antiguo = registro.get("trace")
+    if isinstance(antiguo, dict):
+        return [dict(antiguo, iteracion=antiguo.get("iteracion", 1))]
+    return []
+
+
 def diagnostico_vigente(registro: dict) -> dict | None:
     """La última pasada: lo que se enseña y sobre lo que se opina.
 
@@ -385,7 +411,7 @@ def leer_por_id(incidente_id: str) -> dict | None:
     registro = _leer(_directorio() / f"{incidente_id}.json")
     if registro is None:
         return None
-    return {k: v for k, v in registro.items() if k != "trace"}
+    return {k: v for k, v in registro.items() if k not in ("trace", "traces")}
 
 
 def _duplicado_por_enfriamiento(identidad: str, ahora: datetime) -> dict | None:
@@ -653,6 +679,11 @@ def mark(incidente_id: str, estado: str, diagnostico: dict | None = None,
     # Hace falta para el reloj de las 12 h: sin ella no se puede distinguir un
     # movimiento del sistema de un clic de una persona, y cualquier veredicto
     # rejuvenecía un incidente de hace tres días. Ver _anclaje_reloj().
+    # El expediente COMPLETO, no leer_por_id(): esa quita 'trace' y 'traces'
+    # para no arrastrar 250 KB hasta la pantalla, y aqui hacen falta enteros --
+    # sin ellos, apilar una pasada nueva borraria todas las anteriores.
+    previo = _leer(_directorio() / f"{incidente_id}.json") or {}
+
     cambios: dict = {
         "estado": estado,
         "movimiento_workflow": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -669,7 +700,6 @@ def mark(incidente_id: str, estado: str, diagnostico: dict | None = None,
         # arrancó el análisis y este, la pantalla ha podido escribir veredictos.
         # Queda la misma carrera teórica que con los veredictos, y con la misma
         # consecuencia: se pierde una escritura, no se corrompe el fichero.
-        previo = leer_por_id(incidente_id) or {}
         cambios["diagnosticos"] = _con_iteracion_nueva(previo, diagnostico)
         if "diagnostico" in previo:
             # Expediente con la forma antigua: su contenido ya está copiado
@@ -681,7 +711,14 @@ def mark(incidente_id: str, estado: str, diagnostico: dict | None = None,
         # Prompts y respuestas del modelo. Aquí y no en el log: con el logging
         # estructurado se truncarían a 200 caracteres, y este fichero es el
         # registro del caso -- base/software-spec §1.5 (procedencia del prompt).
-        cambios["trace"] = trace
+        #
+        # Se APILA, como el diagnóstico: cada pasada guarda el suyo. Antes se
+        # escribía encima y un reanálisis borraba la procedencia de la pasada
+        # anterior, cuyo diagnóstico sí se conservaba.
+        anteriores = traces(previo)
+        cambios["traces"] = anteriores + [dict(trace, iteracion=len(anteriores) + 1)]
+        if "trace" in previo:
+            cambios["trace"] = _BORRAR
     return _actualizar(incidente_id, cambios)
 
 
@@ -1160,7 +1197,7 @@ def podar_traces() -> tuple[int, int]:
 
     for ruta in _directorio().glob("*.json"):
         registro = _leer(ruta)
-        if not registro or not registro.get("trace"):
+        if not registro or not (registro.get("trace") or registro.get("traces")):
             continue
 
         marca = registro.get("actualizado_en") or registro.get("recibido_en")
@@ -1173,8 +1210,12 @@ def podar_traces() -> tuple[int, int]:
         if cuando >= limite:
             continue
 
-        trace = registro["trace"]
-        peso = len(json.dumps(trace, ensure_ascii=False))
+        # Se podan TODAS las pasadas a la vez: la antiguedad es del expediente,
+        # no de cada prompt, y dejar media procedencia no sirve de nada.
+        pasadas = traces(registro)
+        peso = len(json.dumps(registro.get("traces") or registro.get("trace"),
+                              ensure_ascii=False))
+        claves = sorted({k for t in pasadas for k in t if k != "iteracion"})
 
         observability.audit(
             "incident.prune_trace",
@@ -1184,11 +1225,13 @@ def podar_traces() -> tuple[int, int]:
 
         registro["trace_podado"] = {
             "fecha": ahora.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "claves": sorted(trace),
+            "claves": claves,
+            "pasadas": len(pasadas),
             "bytes": peso,
             "motivo": f"retencion de {config.INCIDENT_TRACE_RETENTION_DAYS} dias",
         }
-        del registro["trace"]
+        registro.pop("trace", None)
+        registro.pop("traces", None)
 
         try:
             _escribir(ruta, registro)
