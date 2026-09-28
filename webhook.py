@@ -72,7 +72,8 @@ _ANALISIS_EN_CURSO = asyncio.Semaphore(
 )
 
 
-async def _analizar_incidente(payload: dict, registro: dict) -> None:
+async def _analizar_incidente(payload: dict, registro: dict,
+                              revision: list[dict] | None = None) -> None:
     """Envuelve el análisis para dejar constancia de cómo terminó.
 
     El workflow ya captura sus propios errores y corta de forma controlada
@@ -90,10 +91,11 @@ async def _analizar_incidente(payload: dict, registro: dict) -> None:
                  extra={"incidentId": registro["id"], "asset": registro["asset"],
                         "limite": config.MAX_CONCURRENT_ANALYSES})
     async with _ANALISIS_EN_CURSO:
-        await _ejecutar_analisis(payload, registro)
+        await _ejecutar_analisis(payload, registro, revision)
 
 
-async def _ejecutar_analisis(payload: dict, registro: dict) -> None:
+async def _ejecutar_analisis(payload: dict, registro: dict,
+                             revision: list[dict] | None = None) -> None:
     """El análisis propiamente dicho, ya con turno concedido."""
     incidents.mark(registro["id"], incidents.ANALIZANDO)
     trace: dict = {}
@@ -110,21 +112,21 @@ async def _ejecutar_analisis(payload: dict, registro: dict) -> None:
         # dura como mucho un par de minutos. La plaza del semáforo sí se libera
         # al instante, que es lo que importa para los que esperan turno.
         diagnostico = await asyncio.wait_for(
-            workflow.run_rca_analysis(payload, trace),
+            workflow.run_rca_analysis(payload, trace, revision),
             timeout=config.ANALYSIS_TIMEOUT_SECONDS,
         )
     except (asyncio.TimeoutError, TimeoutError):
         log.error("Analisis abortado por exceder el tiempo maximo.",
                   extra={"incidentId": registro["id"],
                          "limiteSegundos": config.ANALYSIS_TIMEOUT_SECONDS})
-        incidents.mark(registro["id"], incidents.FALLIDO, trace=trace,
-                       motivo="El análisis superó el tiempo máximo.")
+        incidents.marcar_fallo(registro["id"], trace=trace,
+                               motivo="El análisis superó el tiempo máximo.")
         return
     except Exception:
         log.exception("Analisis abortado por un error no controlado.",
                       extra={"incidentId": registro["id"]})
-        incidents.mark(registro["id"], incidents.FALLIDO, trace=trace,
-                       motivo="El análisis se detuvo por un error inesperado. "
+        incidents.marcar_fallo(registro["id"], trace=trace,
+                               motivo="El análisis se detuvo por un error inesperado. "
                               "El detalle técnico está en el log del servicio.")
         return
     if diagnostico is None:
@@ -132,8 +134,8 @@ async def _ejecutar_analisis(payload: dict, registro: dict) -> None:
         # en el trace por qué. Si no lo dejó -- no debería pasar --, se guarda
         # algo antes que nada: un incidente que solo dice "fallido" no le sirve
         # a quien está mirando la pantalla.
-        incidents.mark(registro["id"], incidents.FALLIDO, trace=trace,
-                       motivo=trace.get("motivo_fallo")
+        incidents.marcar_fallo(registro["id"], trace=trace,
+                               motivo=trace.get("motivo_fallo")
                        or "El análisis no llegó a completarse. El detalle está "
                           "en el log del servicio.")
     else:
@@ -629,8 +631,26 @@ def _con_estado_de_causas(registro: dict) -> dict:
     # lista entera -- que multiplicaría por tres el tamaño de la respuesta con
     # causas que la pantalla no pinta.
     sin_lista = {k: v for k, v in registro.items() if k != "diagnosticos"}
+    # 'causas' es la lista COMPUESTA: todas las causas de todas las pasadas,
+    # cada una con su estado y con lo que anotó una persona. La compone aquí el
+    # servidor y no la pantalla porque el estado de una causa se deduce de los
+    # veredictos, y ese cálculo no puede vivir en dos sitios.
+    #
+    # Se llama 'causas' y no 'revision' porque el expediente YA tiene un campo
+    # 'revision' -- el bloque de veredictos que escribe la pantalla --, y usar
+    # ese nombre aquí lo pisaba en la respuesta.
+    #
+    # Hace falta desde la Fase 3: una pasada de reanálisis trae solo causas
+    # NUEVAS, así que las descartadas y las que siguen abiertas se quedan en la
+    # pasada donde nacieron. Enseñando solo la vigente, desaparecerían.
     return dict(sin_lista,
                 diagnostico=incidents.diagnostico_vigente(registro),
+                causas=incidents.revision_de_causas(registro),
+                reanalisis={
+                    "usados": incidents.reanalisis_usados(registro),
+                    "maximo": config.MAX_REANALISIS,
+                    "quedan": incidents.quedan_reanalisis(registro),
+                },
                 estadoCausas=incidents.estado_de_causas(registro),
                 cierre=etiqueta,
                 cerrado=incidents.esta_cerrado(registro))
@@ -719,6 +739,77 @@ async def registrar_reclasificacion(incidente_id: str, cuerpo: _Reclasificacion)
         registro = incidents.registrar_reclasificacion(incidente_id, cuerpo.reclasificacion)
     except incidents.RevisionError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    return _con_estado_de_causas(registro)
+
+
+@app.post(
+    "/incidentes/{incidente_id}/reanalisis",
+    summary="Vuelve a analizar con lo que se comprobó en planta",
+    description=(
+        "Relanza el análisis llevándole al modelo lo que una persona "
+        "descartó y con qué evidencia. Vuelve a entrar por la selección de "
+        "variables, no solo por el diagnóstico, y trae datos nuevos de PI.\n\n"
+        "Hace falta al menos una causa descartada: sin evidencia nueva, la "
+        "segunda pasada sería una tirada de dados sobre los mismos datos."
+    ),
+)
+async def relanzar_analisis(incidente_id: str, tareas: BackgroundTasks) -> dict:
+    """Lo dispara una PERSONA desde la pantalla, nunca el sistema solo.
+
+    El workflow no sabe cuándo ha vuelto PI -- solo se entera cuando le toca
+    hablar con él --, así que montar sondeo y comprobaciones de salud en un
+    sistema puramente reactivo sería la solución equivocada. Quien sabe es la
+    persona que está delante.
+
+    Y nunca automático al descartar la última causa: es justo cuando menos
+    probable es que quede alguien mirando, y además gastaría una iteración a
+    ciegas.
+    """
+    registro = incidents.leer_por_id(incidente_id)
+    if registro is None:
+        raise HTTPException(status_code=404, detail="Incidente no encontrado")
+
+    # Los mensajes de error van escritos para quien está delante de la
+    # pantalla, no para depurar: se muestran tal cual.
+    if registro.get("estado") in incidents._EN_CURSO:
+        raise HTTPException(status_code=409,
+                            detail="Este análisis ya está en marcha.")
+
+    # Sobre un expediente CERRADO no se reanaliza nunca, ni aunque se le haya
+    # aportado evidencia nueva en frío. Decisión de la propietaria: si el
+    # reanálisis pudiera dispararse desde cerrados, volveríamos a tener dos
+    # relojes -- el de la pestaña y el del botón -- y eso ya se descartó.
+    if incidents.esta_cerrado(registro):
+        raise HTTPException(
+            status_code=409,
+            detail="Este caso ya está cerrado y no se puede volver a analizar.")
+
+    if not incidents.quedan_reanalisis(registro):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Ya se ha reanalizado {config.MAX_REANALISIS} veces.")
+
+    revision = incidents.revision_de_causas(registro)
+    if not any(c["estado"] == incidents.DESCARTADA for c in revision):
+        raise HTTPException(
+            status_code=400,
+            detail="Descarta antes alguna causa, diciendo qué comprobaste. "
+                   "Sin eso, volver a preguntar daría lo mismo con los mismos datos.")
+
+    payload = registro.get("payload") or {}
+    observability.audit(
+        "incident.reanalisis",
+        {"incidentId": incidente_id,
+         "iteracion": incidents.reanalisis_usados(registro) + 2},
+    )
+    log.info("Reanálisis pedido desde la pantalla.",
+             extra={"incidentId": incidente_id, "asset": registro.get("asset")})
+
+    # Mismo camino que una alerta nueva: el semáforo de simultáneos y el tope
+    # de tiempo valen igual. Marcar "analizando" lo hace _ejecutar_analisis
+    # cuando de verdad le toca turno, para que el estado no mienta mientras
+    # espera en la cola.
+    tareas.add_task(_analizar_incidente, payload, registro, revision)
     return _con_estado_de_causas(registro)
 
 

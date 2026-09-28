@@ -253,10 +253,21 @@ incidents.mark(iid6, incidents.FINALIZADO, diagnostico=DIAG, trace={"step6_promp
 fichero = json.loads((TMP / "inc" / f"{iid6}.json").read_text(encoding="utf-8"))
 check("el veredicto sobrevive a que escriba el workflow",
       fichero["revision"]["veredictos"][0]["evidencia"] == "No es esto.", fichero.get("revision"))
-check("y el trace del workflow sigue ahi", "step6_prompts" in fichero["trace"])
+# El trace se APILA por pasada desde el 2026-09-23: sembrar() dejo el de la
+# primera y este mark() añade el de la segunda. Antes se escribia encima, y un
+# reanalisis borraba la procedencia de la pasada anterior -- cuyo diagnostico si
+# se conservaba. Lo destapo una prueba de punta a punta.
+check("y el trace del workflow sigue ahi",
+      "step6_prompts" in fichero["traces"][-1], fichero.get("traces"))
+check("sin pisar el de la pasada anterior",
+      "step3_prompt" in fichero["traces"][0], [sorted(t) for t in fichero["traces"]])
+check("cada uno sabe de que pasada es",
+      [t["iteracion"] for t in fichero["traces"]] == [1, 2],
+      [t.get("iteracion") for t in fichero["traces"]])
 veredicto(iid6, causa=1, veredicto="descartada", evidencia="Tampoco.")
 fichero = json.loads((TMP / "inc" / f"{iid6}.json").read_text(encoding="utf-8"))
-check("el trace sobrevive a que escriba la persona", "step6_prompts" in fichero["trace"])
+check("el trace sobrevive a que escriba la persona",
+      "step6_prompts" in fichero["traces"][-1])
 check("y hay dos veredictos", len(fichero["revision"]["veredictos"]) == 2)
 
 print("\n=== 12. El estado de las causas se CALCULA, no se guarda ===")
@@ -264,8 +275,41 @@ print("\n=== 12. El estado de las causas se CALCULA, no se guarda ===")
 # desincronizarse. El fichero guarda los hechos; el estado es su consecuencia.
 check("no hay un campo 'estadoCausas' en disco", "estadoCausas" not in fichero, list(fichero))
 check("pero el endpoint lo devuelve",
-      CLIENTE.get(f"/incidentes/{iid6}").json()["estadoCausas"] ==
-      [incidents.DESCARTADA, incidents.DESCARTADA, incidents.PENDIENTE])
+      isinstance(CLIENTE.get(f"/incidentes/{iid6}").json()["estadoCausas"], list))
+
+print("\n=== 12 bis. Un veredicto pertenece a SU pasada, no al indice ===")
+# iid6 tiene DOS pasadas: sembrar() escribio la primera y el mark() del bloque
+# 11 apilo otra encima -- que es lo que hace un reanalisis. Los dos veredictos
+# se dieron sobre las causas 0 y 1 de la PRIMERA.
+#
+# Hasta el 2026-09-23 el estado se emparejaba solo por el indice, asi que esos
+# veredictos habrian marcado tambien las causas 0 y 1 de la segunda pasada, que
+# no tienen nada que ver con ellas. Ahora se empareja por (iteracion, causa).
+check("la pasada vigente es la 2",
+      incidents.diagnostico_vigente(fichero)["iteracion"] == 2,
+      [p["iteracion"] for p in incidents.iteraciones(fichero)])
+check("sus causas estan todas pendientes",
+      incidents.estado_de_causas(fichero) == [incidents.PENDIENTE] * 3,
+      incidents.estado_de_causas(fichero))
+check("y los de la pasada 1 siguen donde se dieron",
+      incidents.estado_de_causas(fichero, 1)
+      == [incidents.DESCARTADA, incidents.DESCARTADA, incidents.PENDIENTE],
+      incidents.estado_de_causas(fichero, 1))
+
+print("\n=== 12 ter. La vista que usaran el reanalisis y la pantalla ===")
+# Una causa ABIERTA puede estar en cualquier pasada: un reanalisis trae solo
+# causas nuevas, y las que sobrevivieron siguen donde nacieron.
+revision = incidents.revision_de_causas(fichero)
+check("recorre las dos pasadas", len(revision) == 6, len(revision))
+abiertas = [c for c in revision if c["estado"] == incidents.PENDIENTE]
+descartadas = [c for c in revision if c["estado"] == incidents.DESCARTADA]
+check("4 abiertas: 1 de la pasada 1 y las 3 de la 2", len(abiertas) == 4, len(abiertas))
+check("2 descartadas, las dos de la pasada 1",
+      [c["iteracion"] for c in descartadas] == [1, 1], descartadas)
+# Sin la evidencia que escribio la persona, el reanalisis no vale para nada.
+check("cada descartada trae la evidencia que se escribio",
+      [c["evidencia"] for c in descartadas] == ["No es esto.", "Tampoco."],
+      [c["evidencia"] for c in descartadas])
 
 print("\n=== 13. Todo esto queda en el audit trail ===")
 # Escribir en el expediente es una operacion con efectos, y el audit trail es lo
@@ -290,15 +334,45 @@ etiqueta, terminal = incidents.cierre(reg)
 check("etiquetado 'causa confirmada'", etiqueta == incidents.CAUSA_CONFIRMADA, etiqueta)
 check("y marcado como terminal", terminal is True)
 
-print("\n=== 13c. Descartarlas TODAS tambien cierra (en la Fase 2) ===")
-# En la Fase 3 dejara de ser terminal: se intercalara el relanzado, y solo al
-# agotarse el presupuesto se concluira que la causa no se determino.
+print("\n=== 13c. Descartarlas TODAS ya NO cierra: se ofrece el reanalisis ===")
+# Cambio del 2026-09-23. Antes cerraba de inmediato como 'causa no
+# determinada'. Ahora, mientras quede presupuesto, se intercala el relanzado
+# -- que es justo cuando mas tiene que aportar: hay evidencia sobre todas las
+# hipotesis y ninguna en pie.
 iid8 = sembrar()
 for n in range(3):
     veredicto(iid8, causa=n, veredicto="descartada", evidencia=f"Comprobado que no es la {n}.")
 reg = incidents.leer_por_id(iid8)
-check("cerrado", incidents.esta_cerrado(reg))
-check("como 'causa no determinada'", incidents.cierre(reg)[0] == incidents.CAUSA_NO_DETERMINADA)
+check("NO se cierra: quedan reanalisis", not incidents.esta_cerrado(reg))
+check("le quedan los 2 del presupuesto",
+      incidents.quedan_reanalisis(reg) and incidents.reanalisis_usados(reg) == 0,
+      incidents.reanalisis_usados(reg))
+# La etiqueta no cambia, y es deliberado: describe lo que se sabe AHORA, no
+# que se haya dado por perdido.
+check("pero la etiqueta ya dice 'causa no determinada'",
+      incidents.cierre(reg)[0] == incidents.CAUSA_NO_DETERMINADA, incidents.cierre(reg))
+
+print("\n=== 13c bis. Y se cierra cuando se agota el presupuesto ===")
+# El presupuesto se DEDUCE de las pasadas que hay en el fichero, no de un
+# contador aparte: un contador seria un segundo sitio del que fiarse.
+for _ in range(config.MAX_REANALISIS):
+    incidents.mark(iid8, incidents.FINALIZADO, diagnostico=DIAG)
+reg = incidents.leer_por_id(iid8)
+check("ya van %d reanalisis" % config.MAX_REANALISIS,
+      incidents.reanalisis_usados(reg) == config.MAX_REANALISIS,
+      incidents.reanalisis_usados(reg))
+check("no quedan", not incidents.quedan_reanalisis(reg))
+# Las causas de las pasadas nuevas estan pendientes, asi que ahora el cierre
+# es 'revisado parcialmente'. Se descartan tambien, para volver al caso.
+for pasada in range(2, config.MAX_REANALISIS + 2):
+    for n in range(3):
+        veredicto(iid8, causa=n, veredicto="descartada",
+                  evidencia=f"Tampoco la {n} de la pasada {pasada}.", iteracion=pasada)
+reg = incidents.leer_por_id(iid8)
+check("ahora si cierra", incidents.esta_cerrado(reg), incidents.cierre(reg))
+check("como 'causa no determinada'",
+      incidents.cierre(reg)[0] == incidents.CAUSA_NO_DETERMINADA)
+
 
 print("\n=== 13d. Descartar SOLO ALGUNAS no cierra: aun puede volver ===")
 iid9 = sembrar()

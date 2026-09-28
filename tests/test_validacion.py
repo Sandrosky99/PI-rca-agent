@@ -37,7 +37,7 @@ from fastapi.testclient import TestClient
 llamadas_llm = []
 
 
-async def _analisis_espia(payload, trace=None):
+async def _analisis_espia(payload, trace=None, revision=None):
     llamadas_llm.append(payload)
     return {"root_causes": [{"cause": "x", "explanation": "y", "recommended_action": "z"}]}
 

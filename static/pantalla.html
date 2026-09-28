@@ -184,9 +184,20 @@
     display:block; font-size:14.5px; color:var(--texto-2); margin-top:3px;
     font-variant-numeric:tabular-nums;
   }
+  /* El problema y el contexto comparten fila: el contexto es dato de apoyo y
+     ocupaba una linea entera para si. En pantalla estrecha vuelven a apilarse
+     solos, que es para lo que esta el wrap. */
+  .fila-cabecera{
+    display:flex; flex-wrap:wrap; gap:8px 26px; align-items:baseline;
+  }
+  /* El problema NO crece: con flex:1 se estiraba hasta el borde y mandaba el
+     contexto al otro extremo de la pantalla, a dos palmos de lo que describe.
+     Asi los dos ocupan lo suyo y se quedan juntos. */
+  .fila-cabecera .problema{flex:0 1 auto; margin-bottom:0}
   .contexto{
-    color:var(--tenue); font-size:13.5px; margin:14px 0 0;
+    color:var(--tenue); font-size:13.5px; margin:0;
     display:flex; flex-wrap:wrap; gap:4px 14px;
+    flex:0 1 auto;
   }
   .contexto .sep{color:var(--borde)}
   .contexto b{color:var(--texto-2); font-weight:400}
@@ -241,10 +252,18 @@
     background:var(--panel); color:var(--texto);
   }
   .btn:hover{border-color:var(--acento); color:var(--acento)}
+  /* Un boton deshabilitado SIN estilo parece pulsable y no hace nada, que es
+     peor que no deshabilitarlo: se apaga y el cursor lo dice. El :hover se
+     neutraliza con :not(), porque si no seguiria iluminandose al pasar. */
+  .btn:disabled{
+    opacity:.45; cursor:not-allowed; border-color:var(--borde);
+    color:var(--tenue); background:var(--panel);
+  }
+  .btn:disabled:hover{border-color:var(--borde); color:var(--tenue); background:var(--panel)}
   .btn-si{border-color:var(--ok); color:var(--ok)}
-  .btn-si:hover{background:var(--ok); color:#fff; border-color:var(--ok)}
+  .btn-si:not(:disabled):hover{background:var(--ok); color:#fff; border-color:var(--ok)}
   .btn-no{border-color:var(--malo); color:var(--malo)}
-  .btn-no:hover{background:var(--malo); color:#fff; border-color:var(--malo)}
+  .btn-no:not(:disabled):hover{background:var(--malo); color:#fff; border-color:var(--malo)}
   .btn-sec{font-weight:400; font-size:13px; padding:5px 12px; color:var(--tenue)}
 
   /* Las dos causas juzgadas se rodean, cada una de su color. La descartada NO
@@ -327,6 +346,51 @@
     flex:0 0 auto;
   }
 
+  /* Lo que el modelo dijo que le faltaba. UNA linea, tenue y al final: es un
+     apunte para quien decide que variables añadir al contexto, no algo que
+     haya que leer para juzgar una causa. */
+  .faltan{
+    margin:16px 0 0; font-size:13px; color:var(--tenue);
+    display:flex; gap:8px; align-items:baseline;
+  }
+  .faltan b{
+    color:var(--tenue); font-size:10.5px; letter-spacing:.12em;
+    text-transform:uppercase; white-space:nowrap; font-weight:600;
+  }
+
+  /* Que cambio tras el reanalisis. Va ARRIBA de las causas y destacado: es lo
+     que le dice al operario que su comprobacion sirvio para algo. Sin esto, un
+     reanalisis se lee como "aqui tienes otra lista". */
+  /* Mas ancho que el resto de bloques (108ch frente a 72): es una sola frase y
+     a 72 se partia en tres lineas. La pantalla es larga de por si, y cada linea
+     que se ahorra arriba es una que no empuja las causas fuera de la vista. */
+  .que-cambia{
+    margin:0 0 20px; padding:13px 16px; border-radius:8px;
+    background:var(--acento-fondo); border:1px solid var(--borde);
+    font-size:14.5px; color:var(--texto-2); max-width:108ch;
+  }
+  .que-cambia b{
+    display:block; color:var(--acento); font-size:10.5px;
+    letter-spacing:.12em; text-transform:uppercase; margin-bottom:6px;
+  }
+
+  /* De que pasada viene una causa. Tenue: no compite con el enunciado, pero
+     sin esto dos causas identicas de pasadas distintas serian indistinguibles. */
+  .pasada{color:var(--tenue); font-weight:400; letter-spacing:0}
+
+  /* La zona de reanalisis, con el mismo tratamiento que la de la alerta: actua
+     sobre el incidente entero, no sobre una causa. */
+  .zona-reanalisis{
+    margin-top:26px; padding:15px 18px; border-radius:8px;
+    background:var(--panel); border:1px solid var(--borde);
+  }
+  .zona-reanalisis > b{
+    color:var(--tenue); font-size:10.5px; letter-spacing:.12em;
+    text-transform:uppercase; display:block; margin-bottom:8px;
+  }
+  .zona-reanalisis p{margin:0 0 11px; font-size:14.5px; color:var(--texto-2)}
+  .presupuesto{color:var(--tenue); font-size:12.5px; margin-left:10px}
+
   /* Separado de las causas y con su propio encabezado: lo de aqui actua sobre
      el incidente entero. */
   .zona-alerta{
@@ -337,7 +401,7 @@
     color:var(--tenue); font-size:10.5px; letter-spacing:.12em;
     text-transform:uppercase; display:block; margin-bottom:8px;
   }
-  .zona-alerta p{margin:0 0 11px; font-size:14.5px; color:var(--texto-2); max-width:72ch}
+  .zona-alerta p{margin:0 0 11px; font-size:14.5px; color:var(--texto-2)}
   .zona-alerta strong{color:var(--texto)}
   .aviso-ia{
     margin-top:26px; padding:12px 16px; border-radius:8px;
@@ -531,9 +595,28 @@ function direccion(tipo){
   return "fuera del límite";
 }
 
-function chip(estado){
+function chip(estado, etiqueta){
+  // 'etiqueta' permite decir otra palabra SIN cambiar de estado: la pildora
+  // conserva su forma, su color y su pulso. Se uso al principio una clase
+  // aparte para 'recalculando' y salio cuadrada, porque la que redondea es
+  // .chip y aquella no existia.
   return `<span class="chip e-${esc(estado)}${estado==="analizando"?" pulso":""}">`
-       + `${esc(ESTADOS[estado] || estado)}</span>`;
+       + `${esc(etiqueta || ESTADOS[estado] || estado)}</span>`;
+}
+
+// Un analisis en marcha SOBRE un diagnostico que ya existe. No es un estado del
+// workflow -- para el sigue siendo 'analizando', ocupa la misma plaza del limite
+// de simultaneos y cuenta en el mismo filtro de 'procesando' --, pero para quien
+// mira no es lo mismo esperar el primer resultado que esperar el segundo.
+//
+// Se mira en las DOS formas que llegan: la fila de la lista trae 'numCausas' y
+// el detalle trae la lista 'causas'. Comprobar solo una hacia que la lista
+// dijese "recalculando" y la cabecera del detalle "procesando", para el mismo
+// incidente.
+function recalculando(x){
+  return x.estado === "analizando"
+      && (x.numCausas > 0 || (x.causas || []).length > 0
+          || ((x.reanalisis || {}).usados || 0) > 0);
 }
 
 // La marca que resume un incidente, en la lista y en el detalle.
@@ -547,6 +630,7 @@ function chip(estado){
 // provisional -- puede cambiar en cuanto alguien toque algo -- y presentarlo
 // como si fuera un hecho seria adelantar una conclusion que no esta tomada.
 function chipEstado(x){
+  if(recalculando(x)) return chip("analizando", "recalculando");
   // Manda el CIERRE en dos casos: cuando el incidente esta cerrado, y cuando
   // sigue abierto pero YA HAY VEREDICTOS.
   //
@@ -760,34 +844,42 @@ function pintarLista(incidentes){
 
 // El ultimo apunte sobre una causa. Los veredictos son una lista de solo
 // anadir, asi que corregir deja los dos: el que vale es el ultimo.
-function ultimoApunte(d, n){
-  const v = ((d.revision || {}).veredictos || []).filter(x => x.causa === n);
+// Un veredicto pertenece a SU pasada. Con dos, emparejar solo por el indice
+// haria que el veredicto de la causa 0 de la primera marcase tambien la causa 0
+// de la segunda, que no tiene nada que ver con ella.
+function ultimoApunte(d, c){
+  const v = ((d.revision || {}).veredictos || [])
+    .filter(x => x.causa === c.indice && (x.iteracion || 1) === c.iteracion);
   return v.length ? v[v.length - 1] : null;
 }
 
+// La clave de una causa ya no es su numero: es el par pasada+indice.
+function clave(c){ return c.iteracion + ":" + c.indice; }
+
 // Que se puede hacer con una causa, segun como este.
-function zonaVeredicto(d, n, estado, estados){
+function zonaVeredicto(d, c, estados){
+  const estado = c.estado;
   // Con una causa ya confirmada, la pregunta esta contestada: juzgar las demas
   // no aporta nada y solo invita a dejar el expediente en un estado raro. La
   // confirmada conserva su "Deshacer", que es la via para rectificar.
   const hayConfirmada = estados.includes("confirmada");
   if(hayConfirmada && estado !== "confirmada"){
-    return estado === "descartada" ? bloqueDescartada(d, n) : "";
+    return estado === "descartada" ? bloqueDescartada(d, c) : "";
   }
 
-  if(formAbierto === n){
-    const previo = ultimoApunte(d, n) || {};
+  if(formAbierto === clave(c)){
+    const previo = ultimoApunte(d, c) || {};
     return `<div class="bloque bloque-veredicto">
-      <form class="form-descarte" data-causa="${n}">
+      <form class="form-descarte" data-causa="${clave(c)}">
         <div>
-          <label for="ev${n}">Por qué no es esta causa</label>
-          <textarea id="ev${n}" name="evidencia" required
+          <label for="ev${clave(c)}">Por qué no es esta causa</label>
+          <textarea id="ev${clave(c)}" name="evidencia" required
             placeholder="Lo que has comprobado. Por ejemplo: «no hay obstrucción, inspección visual del rodete»."
             >${esc(previo.evidencia || "")}</textarea>
         </div>
         <div>
-          <label for="sos${n}">Qué sospechas tú <span class="opcional">— opcional</span></label>
-          <textarea id="sos${n}" name="sospecha"
+          <label for="sos${clave(c)}">Qué sospechas tú <span class="opcional">— opcional</span></label>
+          <textarea id="sos${clave(c)}" name="sospecha"
             placeholder="Si tienes una idea de por dónde puede ir."
             >${esc(previo.sospecha || "")}</textarea>
         </div>
@@ -806,24 +898,24 @@ function zonaVeredicto(d, n, estado, estados){
     // exactamente lo que este proyecto lleva evitando.
     return `<div class="bloque bloque-veredicto">
       <span class="marca marca-si">Confirmada por el operario</span>
-      <button class="btn btn-sec" data-deshacer="${n}">Deshacer</button></div>`;
+      <button class="btn btn-sec" data-deshacer="${clave(c)}">Deshacer</button></div>`;
   }
 
-  if(estado === "descartada") return bloqueDescartada(d, n, true);
+  if(estado === "descartada") return bloqueDescartada(d, c, true);
 
   return `<div class="bloque bloque-veredicto">
-    <button class="btn btn-si" data-confirmar="${n}">Es esta causa</button>
-    <button class="btn btn-no" data-descartar="${n}">No es esta</button></div>`;
+    <button class="btn btn-si" data-confirmar="${clave(c)}">Es esta causa</button>
+    <button class="btn btn-no" data-descartar="${clave(c)}">No es esta</button></div>`;
 }
 
 // Lo que se enseña de una causa descartada. 'conBoton' es false cuando otra
 // causa ya esta confirmada: la evidencia se sigue viendo -- es el trabajo que
 // hizo alguien y no se tira -- pero ya no hay nada que rectificar aqui.
-function bloqueDescartada(d, n, conBoton){
-  const a = ultimoApunte(d, n) || {};
+function bloqueDescartada(d, c, conBoton){
+  const a = ultimoApunte(d, c) || {};
   return `<div class="bloque bloque-veredicto">
     <span class="marca marca-no">Descartada por el operario</span>
-    ${conBoton ? `<button class="btn btn-sec" data-deshacer="${n}">Deshacer</button>` : ""}
+    ${conBoton ? `<button class="btn btn-sec" data-deshacer="${clave(c)}">Deshacer</button>` : ""}
     ${a.en ? `<span class="cuando-veredicto">${desde(a.en) || hora(a.en)}</span>` : ""}
     ${a.evidencia ? `<div class="evidencia-dada"><b>Por qué no era</b>${esc(a.evidencia)}</div>` : ""}
     ${a.sospecha ? `<div class="evidencia-dada"><b>Lo que se sospecha</b>${esc(a.sospecha)}</div>` : ""}
@@ -857,15 +949,33 @@ function conectarVeredictos(iid){
 
   cont.querySelectorAll("[data-confirmar]").forEach(b => b.onclick = async () => {
     try{
-      pintarDetalle(await enviarVeredicto(iid, {causa: +b.dataset.confirmar, veredicto: "confirmada"}));
+      const [it, idx] = b.dataset.confirmar.split(":").map(Number);
+      pintarDetalle(await enviarVeredicto(
+        iid, {causa: idx, iteracion: it, veredicto: "confirmada"}));
     }catch(e){ errorForm = e.message; refrescar(); }
   });
 
   cont.querySelectorAll("[data-descartar]").forEach(b => b.onclick = () => {
-    formAbierto = +b.dataset.descartar;      // suspende el refresco del detalle
+    formAbierto = b.dataset.descartar;       // suspende el refresco del detalle
     errorForm = "";
     refrescar();
   });
+
+  const bReanalizar = cont.querySelector("[data-reanalizar]");
+  if(bReanalizar) bReanalizar.onclick = async () => {
+    bReanalizar.disabled = true;
+    bReanalizar.textContent = "Lanzando...";
+    try{
+      const r = await fetch(`/incidentes/${encodeURIComponent(iid)}/reanalisis`,
+                            {method: "POST"});
+      if(!r.ok) throw new Error((await r.json().catch(() => ({}))).detail
+                                || "No se pudo lanzar el reanálisis.");
+      // Se fija, como con un veredicto: el incidente pasa a 'analizando' y
+      // puede salirse del filtro que hay puesto justo cuando acabas de pedirlo.
+      fijado = iid;
+      pintarDetalle(await r.json());
+    }catch(e){ errorForm = e.message; refrescar(); }
+  };
 
   cont.querySelectorAll("[data-alerta]").forEach(b => b.onclick = async () => {
     // Quitarla no pide motivo, igual que deshacer un veredicto: es el unico
@@ -891,7 +1001,9 @@ function conectarVeredictos(iid){
     // dos apuntes. Sin pedir motivo -- casi siempre sera un clic mal dado, y
     // poner fricción a corregir un error solo consigue que no se corrija.
     try{
-      pintarDetalle(await enviarVeredicto(iid, {causa: +b.dataset.deshacer, veredicto: "pendiente"}));
+      const [it, idx] = b.dataset.deshacer.split(":").map(Number);
+      pintarDetalle(await enviarVeredicto(
+        iid, {causa: idx, iteracion: it, veredicto: "pendiente"}));
     }catch(e){ errorForm = e.message; refrescar(); }
   });
 
@@ -910,8 +1022,9 @@ function conectarVeredictos(iid){
         return refrescar();
       }
       try{
+        const [it, idx] = formAbierto.split(":").map(Number);
         const actualizado = await enviarVeredicto(iid, {
-          causa: formAbierto, veredicto: "descartada",
+          causa: idx, iteracion: it, veredicto: "descartada",
           evidencia, sospecha: form.sospecha.value.trim(),
         });
         formAbierto = null; errorForm = "";
@@ -920,6 +1033,71 @@ function conectarVeredictos(iid){
     };
     form.querySelector("textarea").focus();
   }
+}
+
+// Lo que el modelo dijo que le habria hecho falta y no estaba en el AF.
+//
+// Va en UNA linea, al final y en gris: no sirve para juzgar una causa, sirve
+// para decidir que conviene añadir a AF_PLANT_CONTEXT_ELEMENTS. Hasta el
+// 2026-09-23 el modelo lo declaraba y se perdia dentro del analisis.
+function faltan(d){
+  const v = ((d.diagnostico || {}).variables_que_faltan) || [];
+  if(!v.length) return "";
+  return `<p class="faltan"><b>Habría ayudado</b><span>${
+    v.map(x => esc(x)).join(" · ")}</span></p>`;
+}
+
+// Volver a preguntar, con lo que se comprobo en planta.
+//
+// SOLO en activos, y nunca sobre un expediente cerrado: decision de la
+// propietaria. Si pudiera dispararse desde cerrados volveriamos a tener dos
+// relojes -- el de la pestaña y el del boton --, que es justo lo que se
+// descarto al dejar uno solo.
+//
+// Y nunca automatico al descartar la ultima causa: es cuando menos probable es
+// que quede alguien mirando, y gastaria una iteracion a ciegas.
+function zonaReanalisis(d){
+  if(verCerrados || d.cerrado) return "";
+  const r = d.reanalisis || {};
+  const hayDescartada = (d.causas || []).some(c => c.estado === "descartada");
+  if(!hayDescartada && !r.usados) return "";
+
+  const quedan = (r.maximo || 0) - (r.usados || 0);
+  const cuenta = r.maximo
+    ? `<span class="presupuesto">${quedan > 0
+        ? `te queda${quedan === 1 ? "" : "n"} ${quedan} de ${r.maximo}`
+        : `ya se ha usado ${r.maximo === 1 ? "el único" : "los " + r.maximo}`}</span>`
+    : "";
+
+  // Con el analisis en marcha no hay nada que pulsar: el servidor lo rechazaria
+  // con un 409, y un boton que se puede pulsar para recibir un error es un boton
+  // mal puesto. Se DESHABILITA en vez de esconderse, para que se vea por que no
+  // se puede -- si desapareciera, parecería que el reanalisis ya no es posible.
+  if(d.estado === "analizando" || d.estado === "recibido"){
+    return `<div class="zona-reanalisis">
+      <b>Volver a analizar</b>
+      <p>${recalculando(d)
+            ? "Ya se está recalculando. Podrás volver a pedirlo cuando termine."
+            : "El análisis está en marcha."}</p>
+      <button class="btn btn-si" disabled>Volver a analizar</button>${cuenta}</div>`;
+  }
+
+  if(!r.quedan){
+    return `<div class="zona-reanalisis">
+      <b>Volver a analizar</b>
+      <p>Se ha agotado el número de reanálisis para este caso.${cuenta}</p></div>`;
+  }
+  if(!hayDescartada){
+    return `<div class="zona-reanalisis">
+      <b>Volver a analizar</b>
+      <p>Descarta antes alguna causa, diciendo qué comprobaste. Sin eso, volver a
+         preguntar daría lo mismo con los mismos datos.</p></div>`;
+  }
+  return `<div class="zona-reanalisis">
+    <b>Volver a analizar</b>
+    <p>El feedback introducido se utilizará para reanalizar las posibles causas
+       raíz. Las causas descartadas no se volverán a proponer.</p>
+    <button class="btn btn-si" data-reanalizar="1">Volver a analizar</button>${cuenta}</div>`;
 }
 
 // Marcar que la alerta no debio existir. Actua sobre el INCIDENTE ENTERO, no
@@ -945,16 +1123,21 @@ function zonaAlerta(d){
       ? `<p>Marcada como <strong>no válida</strong>: el problema no existía. El modelo
          no se equivocó — le dieron un problema inventado.</p>
          <button class="btn btn-sec" data-alerta="quitar">Quitar la marca</button>`
-      : `<p>Si esta alerta no debió dispararse — el problema no existía y el umbral de
-         PI está mal — márcalo aquí. No cuenta como fallo del diagnóstico, y es lo que
-         permite avisar de un umbral que hay que corregir.</p>
+      : `<p>Si esta alerta no debió dispararse, márcalo como no válida.</p>
          <button class="btn btn-sec" data-alerta="marcar">Marcar alerta no válida</button>`}
     </div>`;
 }
 
 function pintarDetalle(d){
   const p = d.payload || {};
-  const causas = (d.diagnostico && d.diagnostico.root_causes) || [];
+  // TODAS las pasadas, no solo la vigente. Un reanalisis trae causas NUEVAS y
+  // las anteriores se quedan donde nacieron: pintando solo la ultima pasada,
+  // las descartadas -- con la evidencia que escribio alguien -- y las que
+  // seguian abiertas desapareceran de la vista.
+  //
+  // La compone el servidor, no esta pantalla: el estado de una causa se deduce
+  // de los veredictos, y ese calculo no puede vivir en dos sitios.
+  const causas = d.causas || [];
   const ia = d.diagnostico && d.diagnostico._ai_generated;
 
   // El motivo, cuando lo hay, se dice con las palabras que guardo el workflow.
@@ -964,8 +1147,15 @@ function pintarDetalle(d){
 
   let cuerpo = "";
   if(d.estado === "analizando"){
-    cuerpo = `<p class="vacio">El análisis está en marcha. Esta pantalla se
-              actualiza sola en cuanto termine.</p>`;
+    // No es lo mismo el primer analisis que un reanalisis: en el segundo ya hay
+    // un diagnostico y unos veredictos detras, y decir solo "el analisis esta en
+    // marcha" haria pensar que se ha perdido lo anterior.
+    cuerpo = recalculando(d)
+      ? `<p class="vacio">Recalculando con lo que has comprobado. Lo que ya
+         habías descartado sigue guardado; esta pantalla se actualiza sola en
+         cuanto termine.</p>`
+      : `<p class="vacio">El análisis está en marcha. Esta pantalla se
+         actualiza sola en cuanto termine.</p>`;
   } else if(d.estado === "recibido"){
     // NO es lo mismo que 'analizando', y confundirlos hacia que la pantalla
     // dijera "en marcha" de algo que ni siquiera habia empezado. El porque
@@ -987,7 +1177,7 @@ function pintarDetalle(d){
   } else if(!causas.length){
     cuerpo = `<p class="vacio">Sin causas propuestas.</p>`;
   } else {
-    const estados = d.estadoCausas || causas.map(() => "pendiente");
+    const estados = causas.map(c => c.estado || "pendiente");
 
     // En la pestaña de cerrados, la causa confirmada va primero: en un
     // expediente cerrado lo que se busca es la respuesta, no el orden en que el
@@ -1003,12 +1193,19 @@ function pintarDetalle(d){
         (estados[b] === "confirmada") - (estados[a] === "confirmada") || a - b);
     }
 
-    cuerpo = `<h3>Causas propuestas</h3>` + orden.map(n => {
+    // Lo que cambio, cuando lo hay: solo aparece tras un reanalisis, porque es
+    // lo unico que distingue verificar de volver a ordenar la lista.
+    const cambio = (d.diagnostico || {}).que_cambia;
+    cuerpo = (cambio
+        ? `<p class="que-cambia"><b>Qué ha cambiado</b>${esc(cambio)}</p>`
+        : "")
+      + `<h3>Causas propuestas</h3>` + orden.map(n => {
       const c = causas[n];
       const ev = evidencias(c);
       return `
       <article class="causa ${esc(estados[n])}">
-        <div class="n">CAUSA ${n+1} DE ${causas.length}</div>
+        <div class="n">CAUSA ${n+1} DE ${causas.length}${
+          c.iteracion > 1 ? ` <span class="pasada">· del reanálisis ${c.iteracion - 1}</span>` : ""}</div>
         <div class="bloque bloque-problema">
           <b>Problema</b>
           <h4 class="q">${esc(c.cause)}</h4>
@@ -1022,7 +1219,7 @@ function pintarDetalle(d){
         }</div>`}
         ${c.recommended_action ? `<div class="bloque bloque-accion">
           <b>Acción recomendada</b><p>${esc(c.recommended_action)}</p></div>` : ""}
-        ${zonaVeredicto(d, n, estados[n], estados)}
+        ${zonaVeredicto(d, c, estados)}
       </article>`;
     }).join("");
   }
@@ -1046,13 +1243,17 @@ function pintarDetalle(d){
     <div class="bloque-cabecera">
       ${chipEstado(d)}
       <h2 class="titulo">${esc(d.asset)}</h2>
-      <p class="problema">
-        <span class="kpi">${esc(d.kpi_name)}</span> ${esc(direccion(d.threshold_type))}
-        <span class="cifras">${num(p.KPI)} frente a un límite de ${num(p.Limit)}</span>
-      </p>
-      <p class="contexto">${contexto.join('<span class="sep">·</span>')}</p>
+      <div class="fila-cabecera">
+        <p class="problema">
+          <span class="kpi">${esc(d.kpi_name)}</span> ${esc(direccion(d.threshold_type))}
+          <span class="cifras">${num(p.KPI)} frente a un límite de ${num(p.Limit)}</span>
+        </p>
+        <p class="contexto">${contexto.join('<span class="sep">·</span>')}</p>
+      </div>
     </div>
     ${cuerpo}
+    ${faltan(d)}
+    ${zonaReanalisis(d)}
     ${zonaAlerta(d)}
     ${ia ? `<p class="aviso-ia"><b>Generado por IA.</b> ${esc(ia.notice)}
             <br><span style="color:var(--tenue)">Modelo: ${esc(ia.model)}</span></p>`

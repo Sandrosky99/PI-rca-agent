@@ -3,6 +3,7 @@
 Comprueban lo que SÍ se ha implementado y dejan constancia ejecutable de lo que
 se decidió no implementar, para que un cambio accidental salte aquí.
 """
+import json
 import io
 import sys
 import tempfile
@@ -84,7 +85,13 @@ check("responde 200", r.status_code == 200)
 check("no expone el nombre del activo", "PS20102" not in r.text, r.text[:140])
 check("no expone la jerarquia de planta",
       not any(x in r.text for x in ("Pumping Station", "External Pumping", "WWTP")), r.text[:140])
-check("no expone valores de proceso", "41.3" not in r.text and "48.0" not in r.text)
+# Se mira el cuerpo SIN el timestamp, y no el texto crudo. El timestamp lleva
+# segundos y decimas, asi que '41.3' casaba con cualquier respuesta emitida en
+# el segundo 41,3 -- un falso positivo que salta el 0,3 % de las ejecuciones y
+# que solo aparece cuando el reloj lo decide. Visto el 2026-09-23.
+sin_reloj = json.dumps({k: v for k, v in cuerpo.items() if k != 'timestamp'})
+check("no expone valores de proceso",
+      "41.3" not in sin_reloj and "48.0" not in sin_reloj, sin_reloj[:140])
 check("el recuento de incidentes son solo numeros",
       all(isinstance(v, int) for v in cuerpo.get("incidentes", {}).values()),
       cuerpo.get("incidentes"))

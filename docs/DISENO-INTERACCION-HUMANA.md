@@ -5,8 +5,8 @@
 
 | | |
 |---|---|
-| **Fecha** | 10 de septiembre de 2026 · revisado el 22 |
-| **Estado** | Fases 1 y 2 entregadas · Fase 3 con el diseño cerrado, sin empezar |
+| **Fecha** | 10 de septiembre de 2026 · revisado el 28 |
+| **Estado** | Fases 1 y 2 entregadas · Fase 3 entregada salvo el paso de búsqueda |
 | **Alcance** | Fases 1 a 3 |
 
 ---
@@ -512,6 +512,35 @@ Los expedientes con la forma antigua **no se migran**: reescribir un registro de
 trazabilidad para adaptarlo a un esquema nuevo es lo que base §1.7 no quiere. Se
 leen y cuentan como la iteración 1.
 
+### Dos campos más que pasan a lista (2026-09-28)
+
+Por el mismo motivo que `diagnosticos`, y descubiertos al usarlo:
+
+```
+traces:            [ {iteracion, system_prompt, step3_prompt, ...} ]
+intentos_fallidos: [ {en, motivo} ]
+```
+
+**`traces` era el fallo más silencioso.** `mark()` escribía el trace entero en
+cada pasada, así que un reanálisis borraba los prompts de la anterior. El
+diagnóstico de la pasada 1 **sí** se conservaba; su procedencia no. Y
+base/software-spec §1.5 pide conservar el prompt que llevó a un artefacto
+generado por IA: teníamos el artefacto sin el prompt.
+
+Lo destapó una prueba de punta a punta, no una suite: el volcado de la primera
+pasada solo existía porque se guardó a mano antes de relanzar.
+
+**`intentos_fallidos`** es la otra cara de una decisión: un reanálisis que falla
+**no puede destruir la pasada anterior**. Antes lo marcaba como `fallido` y la
+etiqueta *fallo del análisis* tapaba un diagnóstico perfectamente bueno. Ahora
+vuelve a `finalizado` y el intento se anota aparte, de solo añadir: que falle dos
+veces seguidas es información.
+
+**`variables_que_faltan`**, dentro de cada pasada, guarda lo que el modelo dijo
+que le habría hecho falta y no estaba en el AF. Sale en la pantalla en una línea:
+es la señal que hace crecer el contexto fijo **por evidencia** en vez de por
+especulación.
+
 ### Lo que el reanálisis necesitaba del Step 2 (implementado 2026-09-23)
 
 Al diseñar el feedback apareció un hueco que no es de pantalla sino de alcance:
@@ -567,6 +596,52 @@ hecho de cuándo trabajó el workflow por última vez, y no se deduce de ningún
 
 Y lo que **no** lleva: ni disposición, ni nº de OT, ni autor, ni estado de cierre —que se
 deduce—, ni lista de interacciones, que se cayó con la decisión de no detectar presencia.
+
+## 5 ter. Lo que falta: la sospecha que señala fuera del contexto
+
+El Step 2 alcanza el subárbol del activo, el de su subsistema y los elementos de
+`AF_PLANT_CONTEXT_ELEMENTS`. **Todo lo demás del AF es inalcanzable.**
+
+Así que si el operario escribe *«creo que viene de un vertido: mirad la
+conductividad de la entrada de planta»* y esa variable no está en ninguno de los
+tres sitios, el modelo **no puede pedirla ni queriendo**. Le decimos que la
+sospecha es una pista a contrastar y le escondemos el dato con el que
+contrastarla.
+
+Y no basta con buscar el texto: nadie escribe «PH213 Primary Line 1 Outlet pH»,
+escribe «el pH de salida del primario». Buscar eso literalmente no encuentra
+nada; buscar solo `pH` devuelve cuatro elementos, uno de ellos en *Emissions*.
+
+**El riesgo no es no encontrarla: es encontrar la equivocada.** Hoy el fallo es
+visible y benigno —el modelo declara en `variables_que_faltan` que no la tenía y
+modula su confianza—. Con una búsqueda floja pasaría a ser un diagnóstico seguro
+de sí mismo citando una variable de otra parte de la planta. Es el mismo tipo de
+fallo que el espejo de Wonderware: no revienta nada, solo miente.
+
+El mecanismo previsto, si se construye:
+
+1. **El modelo traduce, no busca.** Se le da la sospecha y devuelve términos de
+   vocabulario AF. Es lo único que sabe hacer que el código no: saltar del
+   castellano de planta al inglés de PI. No se le da acceso al grafo.
+2. **El código busca**, acotado a la planta y descartando las ramas que no son
+   proceso.
+3. **El código puntúa** y se queda con tres como mucho. Sin puntuación, `pH`
+   traería medio AF.
+4. Entran como un **cuarto bloque etiquetado**, y el prompt dice lo que son: un
+   intento de emparejar lo que escribió una persona, no algo que ella nombrara.
+5. **Y se le enseña a la persona, siempre.** Esto no es cosmética: es el
+   guardarraíl. Si el emparejamiento se equivoca, que se vea.
+
+Sería la **cuarta llamada al modelo**, y hace falta una regla nueva de qué ramas
+del WWTP son proceso y cuáles no —`Sankey Diagrams`, `PM_from_PME` y los árboles
+de navegación no deberían poder entrar jamás—. Eso es configuración, como la
+lista fija.
+
+> Hay un fixture montado como banco de pruebas: `PH213 Primary Line 1 Outlet pH`,
+> con una causa descartada y una sospecha que señala la conductividad de la
+> entrada de planta.
+
+---
 
 ### El segundo escritor
 
@@ -638,7 +713,7 @@ dentro de tres meses.
 | 1 | **Esquema del fichero** — ver §5 bis | Fase 2 | ✅ cerrado el 2026-09-15 |
 | 2 | **Transporte de la pantalla** (sondeo), endpoints en la app FastAPI | Fase 1 | ✅ hecho el 2026-09-14 |
 | 3 | **El segundo escritor** — ver §5 bis | Fase 2 | ✅ hecho el 2026-09-15 |
-| 4 | **Re-entrada en `run_rca_analysis`** — hoy solo acepta el payload; hay que sacar el Step 4 a un punto re-entrable | Fase 3 | ⬜ |
+| 4 | **Re-entrada en `run_rca_analysis`** — ver §5 ter | Fase 3 | ✅ hecho el 2026-09-28: acepta `revision` y vuelve a entrar por el Step 4 |
 | 5 | **Arreglo de `pausado`** | — | ✅ hecho el 2026-09-11 |
 
 Fases, donde cada una sirve por sí sola:
@@ -648,26 +723,33 @@ Fases, donde cada una sirve por sí sola:
    qué escribe la gente de verdad antes de construir encima. Queda fuera a propósito el
    **tiempo restante de la ventana** (§5): con el reloj moviendo solo de pestaña sería una
    cuenta atrás hacia nada. Entra con la Fase 3, que es cuando vencer apaga el reanálisis.
-3. **La vuelta al modelo**, con las dos reglas: verificar en vez de razonar, y «no lo
-   sé» como resultado de primera clase.
+3. **La vuelta al modelo**, con las dos reglas: verificar en vez de razonar, y
+   «no lo sé» como resultado de primera clase. ✅ Entregada el 2026-09-28,
+   salvo el paso de búsqueda (§5 ter). Validada de punta a punta contra el AF, PI
+   y el modelo reales: se le dio una sospecha y **la contrastó y la rechazó**.
 
-### Dónde corta la Fase 2
+### Dónde cortaba la Fase 2, y qué cambió al llegar la 3
 
-El **reanálisis con feedback no existe todavía** — es Fase 3. De ahí dos consecuencias
-que conviene tener presentes al implementar:
+Se deja escrito porque explica por qué algunas cosas están como están.
 
-- El reloj de 12 h **solo mueve de pestaña**. La acción que iba a gobernar aún no está.
-- Si el operario **descarta todas las causas**, se cierra ya como *causa no determinada*.
+| | Fase 2 | Fase 3 (2026-09-28) |
+|---|---|---|
+| El reloj de 12 h | Solo movía de pestaña | Además apaga el botón de reanalizar |
+| Descartar **todas** las causas | Cerraba al momento | Ofrece el relanzado mientras quede presupuesto; al agotarlo, *causa no determinada* |
 
-> ⚠️ **Para la Fase 3.** Ese segundo punto cambia: descartarlas todas dejará de ser
-> terminal y pasará a ofrecer el relanzado, y solo al agotarse el presupuesto de
-> reanálisis se concluirá *causa no determinada*. Es decir, se **intercala** un paso
-> antes de la conclusión actual. No olvidarlo al empezar la Fase 3.
+Lo que **no** cambió, y era una decisión: sobre un expediente cerrado **no se
+ofrece reanálisis**, ni aunque se le aporte evidencia nueva en frío. El
+razonamiento está en §3 bis, y la tentación de «ya que hay evidencia, deja
+reanalizar» reintroduciría el segundo reloj que se descartó.
+
+> ⚠️ **Y una consecuencia que quedó pendiente.** En §5 se aplazó el *tiempo
+> restante de la ventana* con el argumento de que «con el reloj moviendo solo de
+> pestaña sería una cuenta atrás hacia nada» y de que entraría con la Fase 3,
+> «que es cuando vencer apaga el reanálisis».
 >
-> Y lo contrario también está decidido: **sobre un expediente cerrado no se ofrece
-> reanálisis**, ni aunque se le aporte evidencia nueva en frío. El razonamiento está en
-> §3 bis; la tentación de «ya que hay evidencia, deja reanalizar» reintroduciría el
-> segundo reloj que se descartó.
+> **La Fase 3 está entregada y eso no se ha hecho.** Ahora vencer el reloj sí
+> quita algo —el botón—, así que el argumento para aplazarlo ya no se sostiene.
+> Queda como lo único de la Fase 2 que sigue sin entregar.
 
 La pestaña de **cerrados es una pestaña aparte**, no el mismo listado con el filtro de
 periodo corrido hacia atrás.

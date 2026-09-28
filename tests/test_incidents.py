@@ -282,7 +282,7 @@ check("poda solo el antiguo", podados == 1, f"podados={podados}")
 check("reporta los bytes liberados", liberados > 90000, f"{liberados}")
 
 v = json.loads(rv.read_text(encoding="utf-8"))
-check("el trace desaparece", "trace" not in v, list(v))
+check("el trace desaparece", "traces" not in v and "trace" not in v, list(v))
 check("el diagnostico SE CONSERVA",
       incidents.diagnostico_vigente(v)["root_causes"][0]["cause"] == "x")
 check("el payload SE CONSERVA", v["payload"]["Asset"] == "Bomba Vieja")
@@ -296,7 +296,7 @@ check("el fichero encoge mucho", rv.stat().st_size < tam_antes / 10,
       f"{tam_antes} -> {rv.stat().st_size}")
 
 n = json.loads(rn.read_text(encoding="utf-8"))
-check("el reciente NO se toca", "trace" in n and "trace_podado" not in n, list(n))
+check("el reciente NO se toca", "traces" in n and "trace_podado" not in n, list(n))
 
 check("una segunda pasada no hace nada", incidents.podar_traces() == (0, 0))
 
@@ -310,7 +310,7 @@ reg = json.loads(rx.read_text(encoding="utf-8"))
 reg["actualizado_en"] = "2020-01-01T00:00:00Z"
 rx.write_text(json.dumps(reg), encoding="utf-8")
 check("no poda nada", incidents.podar_traces() == (0, 0))
-check("el trace sigue ahi", "trace" in json.loads(rx.read_text(encoding="utf-8")))
+check("el trace sigue ahi", "traces" in json.loads(rx.read_text(encoding="utf-8")))
 config.INCIDENT_TRACE_RETENTION_DAYS = orig_ret
 
 print("\n=== 21. Escritura atomica: no quedan .tmp ===")

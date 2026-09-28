@@ -129,9 +129,9 @@ check("y la lista lo cuenta como una causa",
 print("\n=== 5. El detalle NO trae el trace ===")
 # Medido sobre un incidente real, el trace es el 98,9 % del fichero, y son los
 # prompts en crudo. No pinta nada en la pantalla y se transferiria en cada clic.
-check("el trace se queda fuera", "trace" not in d, list(d))
+check("el trace se queda fuera", "traces" not in d and "trace" not in d, list(d))
 fichero = json.loads((TMP / "inc" / f"{a['id']}.json").read_text(encoding="utf-8"))
-check("pero sigue guardado en disco", "trace" in fichero, list(fichero))
+check("pero sigue guardado en disco", "traces" in fichero, list(fichero))
 
 print("\n=== 6. EL CASO QUE IMPORTA: el id no sirve para salirse del directorio ===")
 # El id llega desde la URL. Sin validar el formato, un id con ".." leeria

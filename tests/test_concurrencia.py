@@ -58,7 +58,7 @@ class Vigia:
         self.pico = 0
         self.completados = 0
 
-    async def __call__(self, payload, trace=None):
+    async def __call__(self, payload, trace=None, revision=None):
         self.dentro += 1
         self.pico = max(self.pico, self.dentro)
         try:
@@ -145,7 +145,7 @@ print("\n=== 6. Un analisis que revienta libera su turno ===")
 limpiar()
 con_limite(2)
 
-async def _revienta(payload, trace=None):
+async def _revienta(payload, trace=None, revision=None):
     raise RuntimeError("fallo dentro del analisis")
 
 workflow.run_rca_analysis = _revienta
@@ -166,7 +166,7 @@ limpiar()
 con_limite(1)
 config.ANALYSIS_TIMEOUT_SECONDS = 1
 
-async def _se_cuelga(payload, trace=None):
+async def _se_cuelga(payload, trace=None, revision=None):
     await asyncio.sleep(30)          # nunca termina dentro del tope
 
 workflow.run_rca_analysis = _se_cuelga
@@ -192,7 +192,7 @@ limpiar()
 con_limite(1)
 estados_vistos = []
 
-async def _mirar(payload, trace=None):
+async def _mirar(payload, trace=None, revision=None):
     # Mientras este corre, el otro esta esperando turno. Se mira su fichero.
     otro = TMP / "inc" / f"{en_cola['id']}.json"
     reg = incidents._leer(otro)

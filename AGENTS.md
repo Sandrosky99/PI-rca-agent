@@ -86,23 +86,22 @@ con otros KPIs y otros tipos de activo.
 
 ### Próximo paso
 
-**La Fase 3 está empezada** (2026-09-23). Lo hecho hasta ahora:
+**La Fase 3 está entregada salvo un paso** (2026-09-28). El ciclo completo
+funciona: el operario descarta causas con evidencia, pulsa reanalizar, y el
+workflow vuelve a entrar **por la selección de variables** con ese feedback y
+con datos nuevos de PI.
 
-- **El expediente guarda las pasadas del análisis**, no una sola: el campo
-  `diagnostico` pasa a `diagnosticos`, una lista con su `iteracion`. Un veredicto
-  apunta a `(iteracion, causa)`, y sobre una lista plana ese par no tendría a
-  dónde apuntar cuando llegue la segunda tanda de causas.
-- **El Step 2 identifica el activo por la cadena** `System + Subsystem + Asset`,
-  con el alcance acotado a `AF_PLANT_ROOT`.
-- **Tercer bloque `plant_context`** y **ficha del equipo**, que salieron de
-  diseñar el reanálisis: el operario puede aportar evidencia sobre variables que
-  el Step 2 no alcanza.
+Validado de punta a punta contra el AF, PI y el modelo reales (2026-09-23):
+alerta → análisis → veredicto → reanálisis, 90 s + 90 s, 4 llamadas al modelo.
+El modelo **contrastó la sospecha del operario y la rechazó**, que era lo que
+había que comprobar.
 
-Lo que falta de la Fase 3: la re-entrada en `run_rca_analysis()` con el feedback,
-el manejo de estados (un reanálisis fallido **no puede destruir** la iteración 1),
-el cambio en `cierre()` —descartar todas deja de ser terminal— y la pantalla
-(botón, contador y estado «recalculando»). Sigue pendiente cerrar el **texto del
-feedback** que se le entrega al modelo.
+Lo que queda: **el paso de búsqueda** para cuando la sospecha señale un activo
+de otro sistema que tampoco esté en `AF_PLANT_CONTEXT_ELEMENTS`. Hoy el modelo
+no puede pedir esa variable ni queriendo. Hay un fixture montado como banco de
+pruebas (`PH213 Primary Line 1 Outlet pH`, con una sospecha que señala la
+conductividad de la entrada de planta).
+
 
 
 **Decidir el canal de salida del diagnóstico.** Desde el 2026-09-03 el diagnóstico se guarda en el
@@ -634,6 +633,128 @@ descartaría como «variable inventada» justo lo que el prompt le acaba de
 ofrecer, y el síntoma sería un WARNING desconcertante en vez de un error.
 
 
+### Qué guarda el fichero de un incidente (Fase 3, 2026-09-28)
+
+Tres campos pasan de ser un objeto suelto a una **lista por pasada**, todos por
+el mismo motivo: un incidente puede analizarse más de una vez y lo anterior no
+se pisa.
+
+```
+diagnosticos:      [ {iteracion, root_causes, _ai_generated,
+                      que_cambia, variables_que_faltan} ]
+traces:            [ {iteracion, system_prompt, step3_prompt,
+                      step4_response, step6_prompts, step6_responses} ]
+intentos_fallidos: [ {en, motivo} ]
+revision:            {veredictos: [{en, iteracion, causa, veredicto,
+                                    evidencia, sospecha}], reclasificacion}
+```
+
+**Un veredicto apunta a `(iteracion, causa)`**, no solo al índice. El campo
+`iteracion` estaba en el esquema desde el 2026-09-15 esperando precisamente
+esto: con dos pasadas, emparejar por el índice haría que el veredicto de la
+causa 0 de la primera marcase también la causa 0 de la segunda.
+
+**`traces` era el fallo más silencioso de los tres.** Hasta el 2026-09-28
+`mark()` escribía el trace entero en cada pasada, así que un reanálisis borraba
+los prompts de la anterior. El diagnóstico sí se conservaba; su procedencia no,
+y base/software-spec §1.5 pide conservar el prompt que llevó a un artefacto
+generado por IA. Lo destapó una prueba de punta a punta, no una suite.
+
+**`variables_que_faltan`** sale del `missing_variables` del Step 4, que hasta
+entonces viajaba al Step 6 como limitación declarada y se perdía. Ahora llega a
+la pantalla, en una línea: es la señal que hace crecer
+`AF_PLANT_CONTEXT_ELEMENTS` **por evidencia** en vez de por especulación.
+Tope de 4, pedido en el prompt y aplicado en el código.
+
+Las formas antiguas (`diagnostico` y `trace` sueltos) **no se migran** —base
+§1.7: los registros de trazabilidad no se reescriben— y se leen como la pasada 1.
+
+`incidents.revision_de_causas()` es la vista que necesitan el reanálisis y la
+pantalla: todas las causas de todas las pasadas, con su estado y con lo que
+anotó una persona. Hace falta porque **una causa abierta puede estar en
+cualquier pasada** — un reanálisis trae solo causas nuevas y las supervivientes
+siguen donde nacieron.
+
+### El reanálisis: volver a preguntar con lo que se comprobó (Fase 3, 2026-09-28)
+
+`run_rca_analysis(payload, trace, revision)`. Con `revision` vacío es la primera
+pasada y nada de esto aparece.
+
+**Vuelve a entrar por el Step 4, no por el Step 6**, y es la decisión de fondo:
+si solo se repitiera el diagnóstico, la segunda respuesta sería el segundo
+clasificado ascendido sobre los mismos datos. Se rehace el Step 2, se piden
+datos nuevos a PI, y el feedback entra en los **dos** prompts con papeles
+distintos: en el Step 4 guía *qué mirar*, en el Step 6 impide repetir una causa
+ya refutada.
+
+`bloque_feedback()` construye el texto. Decisiones de la propietaria, todas con
+su porqué:
+
+| | |
+|---|---|
+| **Sin mínimo de dos causas** | Solo en la segunda pasada. El mínimo es literalmente lo que fabrica el segundo clasificado: obliga a rellenar cuando los datos sostienen una, o ninguna |
+| **Nunca más de tres en total** | Contando las que ya había y no se han rechazado. El tope lo calcula el código (`3 − abiertas`), no se fía de que el modelo cuente |
+| **Las abiertas van arriba** | Si lo primero que ve son sus hipótesis tachadas, parece que lo que hizo la persona no sirvió de nada |
+| **«No lo sé» es válido** | `root_causes` vacío, y en `que_cambia` qué haría falta para decidir |
+| **Observaciones de campo, nunca instrucciones** | La evidencia la escribe una persona y va a un modelo en la nube |
+
+⚠️ **Las causas que sobreviven las conserva el CÓDIGO, no el modelo.** Se le dice
+que ya están contadas y que no las repita. Dejar que las suelte en silencio sería
+dejarle retirar una hipótesis que ninguna persona ha refutado, y aquí una causa
+solo la cierra alguien. Opinar sobre ellas sí puede, en `que_cambia`.
+
+**`que_cambia`** es una frase diciendo qué ha cambiado a la luz de lo comprobado.
+Es lo que distingue verificar de volver a ordenar la lista, y de paso le dice a
+quien lo lee que su comprobación sirvió. Se le pide explícitamente que no valga
+«se ha tenido en cuenta la información nueva»: que diga **qué** se movió.
+
+#### Qué pasa si el reanálisis falla
+
+**No puede destruir la pasada anterior.** `incidents.marcar_fallo()` sustituye a
+`mark(FALLIDO)` en los tres sitios donde el webhook corta un análisis:
+
+| Situación | Antes | Ahora |
+|---|---|---|
+| Falla y **había** diagnóstico | `fallido` → tapaba el bueno | Vuelve a `finalizado`, intacto |
+| Falla y **no había** | `fallido` | `fallido` — la etiqueta describe la verdad |
+| El proceso muere a mitad | `interrumpido` | `finalizado` si había diagnóstico |
+
+El intento se anota en `intentos_fallidos`, lista de solo añadir: que falle dos
+veces seguidas es información, no ruido.
+
+La tercera fila tenía un agujero peor: `interrumpido` está en `_RECLAMABLES`, así
+que la siguiente notificación de PI **re-reservaba el incidente y lo analizaba
+desde cero**, perdiendo diagnóstico y veredictos.
+
+#### El presupuesto
+
+`MAX_REANALISIS` (2). Se **deduce** del número de pasadas del fichero, no de un
+contador aparte: un contador sería un segundo sitio del que fiarse.
+
+Mientras quede presupuesto, **descartar todas las causas deja de cerrar el
+incidente**: se intercala el relanzado, que es justo cuando más tiene que aportar
+-- hay evidencia sobre todas las hipótesis y ninguna en pie. La etiqueta sigue
+siendo *causa no determinada* y es deliberado: describe lo que se sabe **ahora**,
+no que se haya dado por perdido.
+
+⚠️ Quitar la terminalidad **no** lo deja abierto para siempre. `esta_cerrado()`
+tiene dos tramos -- `terminal` es un atajo, no la única vía -- y el reloj de 12 h
+lo sigue cerrando igual.
+
+#### El disparador
+
+`POST /incidentes/{id}/reanalisis`. Comprueba, en orden: que existe, que no está
+ya analizando, **que no está cerrado** (decisión de la propietaria: ni con
+evidencia nueva en frío), que queda presupuesto, y que hay alguna causa
+descartada. Los mensajes van escritos para quien está delante de la pantalla.
+
+Va por el mismo camino que una alerta de PI: el semáforo de simultáneos y el tope
+de tiempo valen igual, y el estado pasa a `analizando` solo cuando le toca turno.
+
+**Lo dispara una persona, nunca el sistema.** El workflow no sabe cuándo ha vuelto
+PI. Y nunca automático al descartar la última causa: es cuando menos probable es
+que quede alguien mirando, y gastaría una iteración a ciegas.
+
 ### Step 5 — Datos históricos de PI (`pi_client.py`, implementado 2026-07-28)
 
 Lanza `aveva-pi-mcp` como subproceso (MCP sobre stdio, igual que `graph_client.py`) y usa
@@ -941,6 +1062,7 @@ rca-agent/
 │                          GET /health · POST /notification · GET /notifications/history
 │                          GET /pantalla · GET /incidentes · GET /incidentes/{id}
 │                          POST /incidentes/{id}/veredicto · .../reclasificacion
+│                          POST /incidentes/{id}/reanalisis
 ├── workflow.py          ← Orquestación (run_rca_analysis) + Steps 3, 4 y 6 + la ficha
 ├── graph_client.py      ← Cliente MCP para afkg-graph-mcp (Step 2)
 ├── pi_client.py         ← Cliente MCP para aveva-pi-mcp (Step 5 y la ficha del equipo)
@@ -1001,6 +1123,7 @@ rca-agent/
 | `PI_TARGET_POINTS_PER_VARIABLE` | No | Puntos por variable a los que se ajusta la resolución al ampliar | `120` |
 | `DEMO_MODE` | No | Avisa al modelo de que las desviaciones son sintéticas y periódicas | `false` |
 | `MAX_SELECTED_VARIABLES` | No | Tope de variables aceptadas de la selección del Step 4 | `40` |
+| `MAX_REANALISIS` | No | Reanálisis permitidos por incidente. El primer análisis no cuenta | `2` |
 | `AF_PLANT_ROOT` | No | Raíz del AF a la que se restringe TODO lo que se consulte. Se aplica **anclada** con el separador | `WWTP` |
 | `AF_PLANT_CONTEXT_ELEMENTS` | No | Elementos que se añaden al contexto de toda alerta, separados por `\|`. Sufijo `\*` para incluir el subárbol | vacío |
 | `MAX_PLANT_CONTEXT_ATTRIBUTES` | No | Tope de atributos que puede aportar el bloque de planta entero | `60` |

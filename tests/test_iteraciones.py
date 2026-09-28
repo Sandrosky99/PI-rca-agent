@@ -219,6 +219,61 @@ check("y el listado cuenta bien sus causas",
       next(i for i in CLIENTE.get("/incidentes?limite=200").json()["incidentes"]
            if i["id"] == iid)["numCausas"] == 2)
 
+print("\n=== 11. Un reanalisis que FALLA no destruye la pasada anterior ===")
+# El caso: el modelo propone tres causas, el operario descarta dos con
+# evidencia y pide un reanalisis, y ese reanalisis falla porque PI no responde.
+#
+# Marcarlo 'fallido' pondria la etiqueta 'fallo del analisis' ENCIMA de un
+# diagnostico perfectamente bueno -- que sigue en el fichero, pero deja de
+# verse. El operario perderia de vista el trabajo que ya habia hecho.
+iid = sembrar()
+incidents.marcar_fallo(iid, "No se pudieron obtener los datos de PI System.")
+r = fichero(iid)
+check("vuelve a finalizado, no a fallido",
+      r["estado"] == incidents.FINALIZADO, r["estado"])
+check("el diagnostico sigue entero",
+      len(incidents.diagnostico_vigente(r)["root_causes"]) == 2)
+check("y el cierre NO dice 'fallo del analisis'",
+      incidents.cierre(r)[0] != incidents.FALLO_DEL_ANALISIS, incidents.cierre(r))
+# El intento no se esconde: se anota aparte.
+check("el intento fallido queda anotado",
+      len(r["intentos_fallidos"]) == 1, r.get("intentos_fallidos"))
+check("con su motivo",
+      "PI System" in r["intentos_fallidos"][0]["motivo"], r["intentos_fallidos"][0])
+# De solo anadir, como los veredictos: que falle dos veces es informacion.
+incidents.marcar_fallo(iid, "El modelo no respondio.")
+check("y el segundo se suma al primero",
+      len(fichero(iid)["intentos_fallidos"]) == 2)
+
+print("\n=== 11 bis. Sin diagnostico previo si es 'fallo del analisis' ===")
+# Es lo que la etiqueta describe de verdad: que NO hay ningun diagnostico.
+iid = sembrar(estado=incidents.ANALIZANDO, diagnostico=None)
+incidents.marcar_fallo(iid, "El modelo no respondio al elegir variables.")
+r = fichero(iid)
+check("marcado fallido", r["estado"] == incidents.FALLIDO, r["estado"])
+check("y el cierre lo dice",
+      incidents.cierre(r)[0] == incidents.FALLO_DEL_ANALISIS, incidents.cierre(r))
+check("el motivo va en su campo de siempre",
+      "elegir variables" in (r.get("motivo") or ""), r.get("motivo"))
+
+print("\n=== 12. Si el proceso muere a mitad, tampoco se pierde ===")
+# Y hay una razon mas para no dejarlo en 'interrumpido': ese estado esta en
+# _RECLAMABLES, asi que la siguiente notificacion de PI lo re-reservaria y lo
+# analizaria DESDE CERO, perdiendo el diagnostico y los veredictos.
+con_diag = sembrar()
+incidents.mark(con_diag, incidents.ANALIZANDO)
+sin_diag = sembrar(estado=incidents.ANALIZANDO, diagnostico=None)
+incidents.sweep_interrupted()
+check("el que tenia diagnostico vuelve a finalizado",
+      fichero(con_diag)["estado"] == incidents.FINALIZADO, fichero(con_diag)["estado"])
+check("con sus causas intactas",
+      len(incidents.diagnostico_vigente(fichero(con_diag))["root_causes"]) == 2)
+check("y el corte anotado",
+      "se detuvo" in fichero(con_diag)["intentos_fallidos"][0]["motivo"],
+      fichero(con_diag).get("intentos_fallidos"))
+check("el que no tenia si queda interrumpido",
+      fichero(sin_diag)["estado"] == incidents.INTERRUMPIDO, fichero(sin_diag)["estado"])
+
 print("\n" + "=" * 62)
 if fallos:
     print(f"FALLOS: {len(fallos)} -> {fallos}")
