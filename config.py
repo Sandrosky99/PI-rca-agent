@@ -236,7 +236,7 @@ LLM_TIMEOUT_SECONDS: int = _entero("LLM_TIMEOUT_SECONDS", 120)
 # la espera peor es calculable: ceil(alertas / simultáneos) x este valor.
 #
 # 10 min: un análisis normal son 2-3. Quien lo agote está roto, no lento.
-ANALYSIS_TIMEOUT_SECONDS: int = _entero("ANALYSIS_TIMEOUT_SECONDS", 600)
+ANALYSIS_TIMEOUT_SECONDS: int = _entero("ANALYSIS_TIMEOUT_SECONDS", 900)
 
 # Cuánto se sigue reintentando UNA llamada al modelo cuando el error es de los
 # que se arreglan solos (5xx, límite de ritmo, conexión).
@@ -259,11 +259,18 @@ ANALYSIS_TIMEOUT_SECONDS: int = _entero("ANALYSIS_TIMEOUT_SECONDS", 600)
 #     ventana efectiva = 90 + 30 = 120 s por llamada
 #     peor caso = trabajo normal (~150 s) + 3 x 120 = 510 s
 #
-# y 510 cabe en ANALYSIS_TIMEOUT_SECONDS=600 con holgura. Con 120 s de ventana
-# el peor caso da justo 600 y lo cortaría el tope: el análisis moriría igual,
-# pero con el mensaje genérico de tiempo agotado en vez del específico.
+# REHECHO el 2026-09-28, al añadir la búsqueda del reanálisis. Ya no son 3
+# llamadas: la puerta añade una y el bucle hasta 5, y cada una puede irse a 120 s
+# si el proveedor tiene un corte. Pero el bucle entero lleva su propio tope
+# (BUSQUEDA_TIMEOUT_SECONDS), así que no se suman sus 5 llamadas sino ese tope:
 #
-# Si se sube esta ventana, hay que subir también ANALYSIS_TIMEOUT_SECONDS.
+#     peor caso = 150 + 3 x 120 (Steps 4 y 6) + 120 (la puerta) + 180 (el bucle)
+#               = 810 s
+#
+# y 810 cabe en ANALYSIS_TIMEOUT_SECONDS=900. Con 600 no cabía, y el conjunto
+# moriría llevándose por delante un diagnóstico que ya estaba hecho.
+#
+# Si se sube esta ventana, o se añaden llamadas, hay que rehacer esta cuenta.
 LLM_RETRY_WINDOW_SECONDS: int = _entero("LLM_RETRY_WINDOW_SECONDS", 90)
 
 # Qué ventana muestra la pantalla de la sala de control al abrirse, en horas, y
@@ -421,6 +428,40 @@ MAX_SELECTED_VARIABLES: int = _entero("MAX_SELECTED_VARIABLES", 40)
 # Se enseña en la pantalla ("te queda 1 de 2"): un presupuesto que se ve se
 # gasta mejor que uno que no se ve.
 MAX_REANALISIS: int = _entero("MAX_REANALISIS", 2)
+
+
+# =============================================================================
+# La búsqueda de la sospecha (Fase 3, §5 ter del documento de diseño)
+# =============================================================================
+# Cuando el operario escribe una sospecha que señala un activo que NO está en
+# ninguno de los tres bloques del af_context, el modelo no puede pedir esa
+# variable ni queriendo. La búsqueda lo resuelve, y es el ÚNICO sitio del
+# proyecto donde el modelo recibe una herramienta.
+#
+# Dos topes, y el que manda es el de iteraciones:
+#
+#   - 5 iteraciones. Medido el 2026-09-23: una llamada al modelo son ~15 s y una
+#     consulta al grafo ~2 s, así que cinco vueltas son unos 85 s.
+#   - 180 s de reloj. NO es el mando: es la guarda contra el cuelgue. Son 180 y
+#     no 120 porque una sola llamada puede irse a LLM_TIMEOUT_SECONDS=120, y con
+#     120 de tope una llamada lenta se comería la búsqueda entera.
+#
+# Agotar cualquiera de los dos NO es un fallo: la búsqueda devuelve "no lo he
+# encontrado", el análisis sigue y el diagnóstico se produce igual. Es contexto
+# que mejora la selección, no un requisito -- igual que la ficha del equipo.
+MAX_ITERACIONES_BUSQUEDA: int = _entero("MAX_ITERACIONES_BUSQUEDA", 5)
+BUSQUEDA_TIMEOUT_SECONDS: int = _entero("BUSQUEDA_TIMEOUT_SECONDS", 180)
+
+# Ramas del AF que la búsqueda NO puede devolver nunca. No son proceso: son
+# diagramas, modelos importados y nodos de navegación, y un elemento de ahí
+# metido en el contexto sería ruido con pinta de dato.
+#
+# Va aparte del filtro de planta porque son dos cosas distintas: aquel dice en
+# qué instalación estamos, éste qué partes de ella son mediciones.
+AF_RAMAS_NO_PROCESO: list[str] = [
+    r.strip() for r in (os.environ.get("AF_RAMAS_NO_PROCESO")
+                        or "Sankey Diagrams|PM_from_PME").split("|") if r.strip()
+]
 
 
 # =============================================================================

@@ -248,6 +248,104 @@ async def _resolver_cadena(session: ClientSession, asset_name: str,
     return path_activo, path_subsistema
 
 
+# Tope de resultados que se le devuelven al modelo por busqueda. No es coste:
+# es que una lista larga no se elige, se hojea. Si hacen falta mas, que afine el
+# termino -- para eso el bucle tiene cinco vueltas.
+_TOPE_RESULTADOS = 8
+
+# Tope de longitud del termino. El modelo escribe este parametro, asi que es
+# entrada no confiable como cualquier otra cosa que venga de el.
+_TOPE_TERMINO = 80
+
+
+def _es_proceso(path: str) -> bool:
+    """Si ese path esta en una rama que mide algo.
+
+    Las ramas de diagramas y modelos importados devuelven elementos con pinta de
+    dato que no lo son. Se comprueba por SEGMENTO y no por subcadena, igual que
+    el resto: "Sankey Diagrams" no puede colarse como parte de otro nombre.
+    """
+    return not (set(_segmentos(path)) & set(config.AF_RAMAS_NO_PROCESO))
+
+
+async def buscar_en_la_planta(session: ClientSession, termino: str) -> list[dict]:
+    """Busca en el AF de esta planta. Es la UNICA herramienta que recibe el modelo.
+
+    No se le pasa el servidor MCP, se le pasa esto. La diferencia importa: entre
+    las tools de afkg-graph-mcp esta refresh_graph, que es de ESCRITURA -- su
+    ultima pasada real inserto 1.087 nodos, actualizo 1.280 y borro 1.457 sobre
+    un Neo4j que comparten las demas demos. Darle el servidor seria darle eso, y
+    no hace falta que se le ocurra usarlo mal: basta con que lo llame "para
+    asegurarse de que el grafo esta al dia".
+
+    Asi que el modelo es agentico en la DECISION -- que buscar, cuando parar --
+    pero no en el ALCANCE: la planta la fija el codigo, las ramas que no son
+    proceso se descartan aqui, y el numero de resultados tambien.
+
+    Busca elementos Y atributos porque un operario puede nombrar cualquiera de
+    los dos: "el pH de salida del primario" es un elemento (PH213...), pero "la
+    turbidez de entrada" es un atributo de otro elemento (1 - Intake|Turbidity
+    inlet). Cual sea no lo sabe quien escribe la sospecha.
+
+    Devuelve una lista de {tipo, nombre, donde, descripcion}, sin piApiPath: lo
+    que el modelo elige es un SITIO, y las rutas las resuelve el codigo despues.
+    Asi no puede copiar mal una ruta ni inventarsela.
+    """
+    termino = (termino or "").strip()[:_TOPE_TERMINO]
+    if not termino:
+        return []
+
+    planta = (config.AF_PLANT_ROOT + SEPARADOR_AF) if config.AF_PLANT_ROOT else None
+    salida: list[dict] = []
+    vistos: set[str] = set()
+
+    for tipo in ("Element", "Attribute"):
+        # El filtro de planta del servidor solo sirve para elementos: el 'path'
+        # de un ATRIBUTO es unicamente su nombre ("Turbidity inlet"), asi que
+        # path_contains="WWTP" no casa con ninguno y los descartaba todos.
+        # Comprobado el 2026-09-28: con el filtro, 0 resultados; sin el, 2.
+        # Para atributos se acota aqui abajo, contra su piApiPath.
+        result = await session.call_tool(
+            "graph_search",
+            {"node_type": tipo, "name_contains": termino,
+             "path_contains": planta if tipo == "Element" else None, "limit": 200},
+        )
+        texto = "".join(getattr(c, "text", "") for c in result.content)
+        i, j = texto.find("{"), texto.rfind("}")
+        if i < 0:
+            continue
+        for nodo in json.loads(texto[i:j + 1]).get("results", []):
+            # De un atributo interesa DONDE vive, que es lo que lo identifica;
+            # su 'path' a secas es solo su nombre.
+            ruta = (nodo.get("piApiPath") or nodo.get("path") or "")
+            donde = ruta.split("|")[0].split("BBDD_DEMO" + SEPARADOR_AF)[-1]
+            # La planta se comprueba SIEMPRE aqui, tambien para los elementos:
+            # que el servidor ya haya filtrado no quita que esta sea la unica
+            # linea que garantiza que nada de otra instalacion se cuela.
+            if not donde or not donde.startswith(config.AF_PLANT_ROOT + SEPARADOR_AF):
+                continue
+            if not _es_proceso(donde):
+                continue
+            clave = donde + "|" + (nodo.get("name") or "")
+            if clave in vistos:
+                continue
+            vistos.add(clave)
+            salida.append({
+                "tipo": "elemento" if tipo == "Element" else "variable",
+                "nombre": nodo.get("name") or "",
+                "donde": donde,
+                "descripcion": nodo.get("description") or "",
+            })
+            if len(salida) >= _TOPE_RESULTADOS:
+                log.info("Busqueda '%s': se alcanzo el tope de %d resultados.",
+                         termino, _TOPE_RESULTADOS)
+                return salida
+
+    log.info("Busqueda '%s': %d resultado(s).", termino, len(salida))
+    return salida
+
+
+
 async def _contexto_de_planta(session: ClientSession) -> list[dict]:
     """Elementos que se anaden al contexto de TODA alerta de la planta.
 
