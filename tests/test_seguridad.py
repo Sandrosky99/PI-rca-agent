@@ -32,7 +32,7 @@ from fastapi.testclient import TestClient
 # Doble del workflow: sin esto, cada POST lanzaria un analisis REAL contra el
 # LLM y los MCP servers -- minutos de espera y coste por cada peticion de la
 # prueba. Aqui solo interesa el comportamiento del endpoint.
-async def _sin_analisis(payload, trace=None):
+async def _sin_analisis(payload, trace=None, **_):
     return {"root_causes": [{"cause": "x", "explanation": "y", "recommended_action": "z"}]}
 
 

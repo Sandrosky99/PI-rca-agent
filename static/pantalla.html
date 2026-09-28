@@ -374,6 +374,27 @@
     letter-spacing:.12em; text-transform:uppercase; margin-bottom:6px;
   }
 
+
+  /* Lo que escribe el CODIGO dentro del recuadro, debajo de la frase del
+     modelo. Va marcado y con otro tono a proposito: en esta pantalla conviven
+     lo que propuso la IA y lo que hizo el sistema, y confundirlos es
+     exactamente lo que este proyecto lleva evitando. */
+  .anadido{
+    display:block; margin-top:10px; padding-top:9px;
+    border-top:1px dashed var(--borde); font-size:13px; color:var(--tenue);
+  }
+  .anadido i{font-style:normal; color:var(--texto-2); font-weight:600}
+  .anadido .sitio{font-size:12px; color:var(--tenue)}
+
+  /* Que fue de la sospecha de una causa descartada. Tenue y en una linea: no
+     compite con la evidencia, pero sin esto alguien escribe una corazonada y
+     no llega a saber si se miro. */
+  .suerte-sospecha{
+    margin-top:8px; font-size:12.5px; color:var(--tenue); line-height:1.5;
+  }
+  .suerte-sospecha b{color:var(--texto-2); font-weight:600}
+  .suerte-sospecha .sitio{color:var(--tenue)}
+
   /* De que pasada viene una causa. Tenue: no compite con el enunciado, pero
      sin esto dos causas identicas de pasadas distintas serian indistinguibles. */
   .pasada{color:var(--tenue); font-weight:400; letter-spacing:0}
@@ -918,8 +939,38 @@ function bloqueDescartada(d, c, conBoton){
     ${conBoton ? `<button class="btn btn-sec" data-deshacer="${clave(c)}">Deshacer</button>` : ""}
     ${a.en ? `<span class="cuando-veredicto">${desde(a.en) || hora(a.en)}</span>` : ""}
     ${a.evidencia ? `<div class="evidencia-dada"><b>Por qué no era</b>${esc(a.evidencia)}</div>` : ""}
-    ${a.sospecha ? `<div class="evidencia-dada"><b>Lo que se sospecha</b>${esc(a.sospecha)}</div>` : ""}
+    ${a.sospecha ? `<div class="evidencia-dada"><b>Lo que se sospecha</b>${esc(a.sospecha)}${
+      suerteDeLaSospecha(d, c)}</div>` : ""}
     </div>`;
+}
+
+// Que fue de la sospecha que escribio esta persona. Se enseña SIEMPRE que haya
+// pasado algo con ella, incluido cuando no se encontro: que la planta no mida
+// eso es un resultado, y quien lo escribio merece saber que se miro.
+//
+// Lo que no aparece aqui es una sospecha que hablaba de algo que ya estaba
+// disponible -- no hubo busqueda porque no hacia falta -- o una escrita despues
+// del ultimo analisis. En esos dos casos no hay nada que contar.
+function suerteDeLaSospecha(d, c){
+  const q = (d.sospechas || {})[clave(c)];
+  if(!q) return "";
+  if(q.motivo === "encontrado"){
+    return `<div class="suerte-sospecha">Se buscó y se añadió al análisis: <b>${esc(q.nombre)}</b>${
+      q.donde ? ` <span class="sitio">${esc(q.donde)}</span>` : ""}</div>`;
+  }
+  if(q.motivo === "no_existe"){
+    return `<div class="suerte-sospecha">Se buscó en la planta y no existe: aquí no se mide eso.</div>`;
+  }
+  if(q.motivo === "sin_presupuesto"){
+    return `<div class="suerte-sospecha">Se buscó y no se llegó a localizar.</div>`;
+  }
+  if(q.motivo === "pendiente"){
+    // "Pendiente" y no "descartada", y con el motivo: en esa pasada habia mas
+    // sospechas que el tope y se atendieron por el orden en que se ven aqui.
+    // Sin decirlo, aparecer en un reanalisis posterior seria inexplicable.
+    return `<div class="suerte-sospecha">Pendiente de buscar: en esa pasada se atendieron antes otras sospechas.</div>`;
+  }
+  return "";
 }
 
 async function enviarVeredicto(iid, cuerpo){
@@ -1196,8 +1247,22 @@ function pintarDetalle(d){
     // Lo que cambio, cuando lo hay: solo aparece tras un reanalisis, porque es
     // lo unico que distingue verificar de volver a ordenar la lista.
     const cambio = (d.diagnostico || {}).que_cambia;
-    cuerpo = (cambio
-        ? `<p class="que-cambia"><b>Qué ha cambiado</b>${esc(cambio)}</p>`
+    // Lo que se anadio al expediente por una sospecha. Esta frase la escribe el
+    // codigo, no el modelo: es un hecho comprobable -- se busco y se encontro
+    // esto -- y no una interpretacion. Por eso va marcada aparte.
+    //
+    // Se enseñan TODAS las de todas las pasadas, no solo las de la ultima:
+    // "anadido a este expediente" es acumulativo, y lo que entro en la pasada 1
+    // sigue estando en el contexto de la 2.
+    const anadido = d.anadido || [];
+    const bloqueAnadido = anadido.length
+      ? `<span class="anadido">${anadido.map(a =>
+          `Añadido a este expediente por tu sospecha: <i>${esc(a.nombre)}</i>${
+            a.donde ? ` <span class="sitio">${esc(a.donde)}</span>` : ""}`
+        ).join("<br>")}</span>`
+      : "";
+    cuerpo = ((cambio || bloqueAnadido)
+        ? `<p class="que-cambia"><b>Qué ha cambiado</b>${esc(cambio || "")}${bloqueAnadido}</p>`
         : "")
       + `<h3>Causas propuestas</h3>` + orden.map(n => {
       const c = causas[n];

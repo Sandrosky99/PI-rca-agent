@@ -67,6 +67,32 @@ ATRIBUTOS = [
      "piApiPath": PREFIJO + ruta("Cement", "Site A", "Lavado") + "|Turbidity outlet"},
 ]
 
+# Vecindario reducido pero con la forma real: la bomba NO lleva sus medidas
+# encima, las lleva en los hijos. Medido el 2026-09-28 sobre PS20102: 4
+# atributos propios (identidad y configuracion) frente a 74 en el subarbol.
+RUTA_BOMBA = ruta("WWTP", "Operational", "Pumping Station 01", "PS20102")
+INTAKE = ruta("WWTP", "Operational", "1 - Intake")
+VECINDARIO = {
+    "PS20102": {"element": {"name": "PS20102", "description": "Bomba 02"},
+                "relationships": {
+                    "HAS_ATTRIBUTE": [{"name": "Asset Code", "piApiPath": "p|Asset Code"}],
+                    "PARENT_OF": [{"name": "Indicators", "path": RUTA_BOMBA + SEP + "Indicators"}]}},
+    "Indicators": {"element": {"name": "Indicators", "description": ""},
+                   "relationships": {
+                       "HAS_ATTRIBUTE": [],
+                       "PARENT_OF": [{"name": "Head", "path": RUTA_BOMBA + SEP + "Indicators" + SEP + "Head"}]}},
+    "Head": {"element": {"name": "Head", "description": "Altura"},
+             "relationships": {"HAS_ATTRIBUTE": [
+                 {"name": "Value", "uom": "m", "piApiPath": "p|Head"},
+                 {"name": "Reference", "uom": "m", "piApiPath": "p|Ref"}]}},
+    # Un instrumento: un solo atributo, y sin hijos que traer.
+    "1 - Intake": {"element": {"name": "1 - Intake", "description": "Entrada"},
+                   "relationships": {"HAS_ATTRIBUTE": [
+                       {"name": "Turbidity inlet", "uom": "NTU", "piApiPath": "p|Turb"},
+                       {"name": "Flow", "uom": "m3/h", "piApiPath": "p|Flow"}]}},
+}
+
+
 pedidos = []
 
 
@@ -77,6 +103,8 @@ class SesionFalsa:
 
     async def call_tool(self, _tool, args):
         pedidos.append(dict(args))
+        if _tool == "graph_neighborhood":
+            return self._vecindario(args)
         tipo, termino = args["node_type"], args["name_contains"].lower()
         filtro = args.get("path_contains")
         if tipo == "Element":
@@ -87,6 +115,17 @@ class SesionFalsa:
             res = [dict(a, description="") for a in ATRIBUTOS
                    if termino in a["name"].lower() and (not filtro or filtro in a["path"])]
         cuerpo = json.dumps({"count": len(res), "results": res})
+
+        class C:
+            text = cuerpo
+
+        class R:
+            content = [C()]
+        return R()
+
+    def _vecindario(self, args):
+        nodo = VECINDARIO.get(args["name"])
+        cuerpo = json.dumps(nodo or {"error": "no existe"})
 
         class C:
             text = cuerpo
@@ -173,6 +212,50 @@ cuerpo = fuente[i:fuente.index("async def ", i + 10)]
 # no puede haber es una llamada: el unico call_tool de aqui es a graph_search.
 llamadas = [x.split(chr(34))[1] for x in cuerpo.split("call_tool(")[1:]]
 check("el unico call_tool es graph_search", llamadas == ["graph_search"], llamadas)
+
+print("\n=== 9. traer_al_contexto: un ACTIVO viene con sus hijos ===")
+# La objecion que motiva esto: con la jerarquia de PI, las medidas de una bomba
+# son elementos HIJOS. Traerla sin ellos da 4 atributos de identidad -- la
+# apariencia de haber atendido la sospecha sin atenderla.
+sesion = SesionFalsa()
+grupos, truncado = asyncio.run(graph_client.traer_al_contexto(
+    sesion, {"tipo": "elemento", "nombre": "PS20102", "donde": RUTA_BOMBA}, 80))
+attrs = [a["name"] for g in grupos for a in g["attributes"]]
+check("baja al subarbol", "Value" in attrs and "Reference" in attrs, attrs)
+# El grupo que sale lleva el breadcrumb entero: bajo de verdad. Y el elemento
+# raiz no genera grupo propio porque sus 4 atributos son metadatos y
+# _filter_attributes los descarta -- que es justo el motivo de que sin hijos no
+# quedara nada util.
+check("y el grupo lleva el camino recorrido",
+      any(" > " in g["element"] for g in grupos), [g["element"] for g in grupos])
+check("no truncado con presupuesto de sobra", truncado is False)
+
+print("\n=== 10. traer_al_contexto: una VARIABLE viene sola ===")
+grupos, truncado = asyncio.run(graph_client.traer_al_contexto(
+    sesion, {"tipo": "variable", "nombre": "Turbidity inlet", "donde": INTAKE}, 80))
+check("un solo grupo", len(grupos) == 1, grupos)
+check("y un solo atributo: el pedido",
+      [a["name"] for a in grupos[0]["attributes"]] == ["Turbidity inlet"], grupos)
+# Traer el elemento entero seria traer lo que nadie pidio.
+check("no arrastra a sus vecinos",
+      all(a["name"] != "Flow" for a in grupos[0]["attributes"]), grupos)
+
+print("\n=== 11. El presupuesto corta, y se AVISA ===")
+# Un activo a medias sin avisar es peor que uno ausente: el modelo veria un
+# equipo incompleto sin saberlo.
+grupos, truncado = asyncio.run(graph_client.traer_al_contexto(
+    sesion, {"tipo": "elemento", "nombre": "PS20102", "donde": RUTA_BOMBA}, 1))
+check("corta", sum(len(g["attributes"]) for g in grupos) <= 1, grupos)
+check("y lo dice", truncado is True)
+grupos, truncado = asyncio.run(graph_client.traer_al_contexto(
+    sesion, {"tipo": "elemento", "nombre": "PS20102", "donde": RUTA_BOMBA}, 0))
+check("sin presupuesto no consulta nada", grupos == [], grupos)
+
+print("\n=== 12. Un acierto que no aporta nada NO es un error ===")
+grupos, truncado = asyncio.run(graph_client.traer_al_contexto(
+    sesion, {"tipo": "elemento", "nombre": "No existe", "donde": "X"}, 80))
+check("lista vacia, sin excepcion", grupos == [], grupos)
+
 
 print("\n" + "=" * 62)
 if fallos:

@@ -26,6 +26,7 @@ graph_client.py — Cliente MCP para afkg-graph-mcp (Step 2 del workflow RCA)
 
 import json
 import logging
+from contextlib import asynccontextmanager
 
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
@@ -45,6 +46,26 @@ _SERVER_PARAMS = StdioServerParameters(
         "python", "src/afkg_graph_mcp/server.py",
     ],
 )
+
+
+@asynccontextmanager
+async def sesion_af():
+    """Abre una sesion contra afkg-graph-mcp y la cierra al salir.
+
+    Existe porque el bucle de la busqueda hace VARIAS consultas seguidas -- una
+    por vuelta, hasta cinco -- y cada una abriendo su propia sesion significaria
+    arrancar cinco veces el subproceso del servidor. Con esto se abre una y se
+    reutiliza.
+
+    Quien conduce el bucle es workflow.py, no este fichero: las decisiones del
+    modelo viven alli y el acceso al grafo vive aqui. Por eso lo que se exporta
+    es la sesion, y no un bucle que llamaria al modelo desde el cliente del
+    grafo -- que hoy ni sabe que existe un modelo.
+    """
+    async with stdio_client(_SERVER_PARAMS) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            yield session
 
 # Atributos de metadatos/bookkeeping del AF: identifican o describen el activo
 # (o son configuración interna del PI Point), pero no son variables de proceso
@@ -346,6 +367,81 @@ async def buscar_en_la_planta(session: ClientSession, termino: str) -> list[dict
 
 
 
+async def traer_al_contexto(session: ClientSession, acierto: dict,
+                            presupuesto: int) -> tuple[list[dict], bool]:
+    """Convierte un acierto de la busqueda en grupos con la forma de los demas
+    bloques: {element, description, attributes}.
+
+    Lo que se trae depende del TIPO, y la diferencia es de 1 a 74:
+
+      - 'variable' -- un instrumento suelto: "Turbidity inlet". Se trae ese
+        atributo y nada mas.
+      - 'elemento' -- un activo: una bomba. Se trae CON SU SUBARBOL. Medido el
+        2026-09-28 sobre PS20102: el subarbol son 16 grupos y 74 atributos, y
+        sus atributos propios son solo 4 -- identidad y configuracion. Head,
+        Hydraulic Efficiency y Hydraulic Power cuelgan todos de 'Indicators'.
+        Traerlo sin hijos seria la apariencia de haber atendido la sospecha sin
+        atenderla.
+
+    La decision la toma el CODIGO a partir del tipo, no el modelo: aqui ya no se
+    le pregunta nada. El eligio un sitio; el alcance de lo que entra lo fija
+    esta funcion.
+
+    'presupuesto' son los atributos que aun caben en el bloque -- se comparte
+    entre todos los objetivos de la pasada, ver config.MAX_ATRIBUTOS_ANADIDOS.
+
+    Devuelve (grupos, truncado). 'truncado' importa: un activo a medias sin
+    avisar es peor que uno ausente, asi que quien llama lo dice en el prompt.
+
+    Una lista vacia significa que el acierto no aporta nada consultable. No es
+    un error -- el grafo tiene elementos sin atributos utiles -- pero quien
+    llama debe tratarlo como "no encontrado".
+    """
+    nombre = acierto.get("nombre") or ""
+    donde = acierto.get("donde") or ""
+    if not nombre or not donde or presupuesto <= 0:
+        return [], False
+
+    if acierto.get("tipo") == "variable":
+        # 'donde' es el path del ELEMENTO que lo contiene; el atributo no tiene
+        # path propio (ver buscar_en_la_planta). Se consulta ese elemento y se
+        # filtra por nombre: traerlo entero seria traer lo que nadie pidio.
+        padre = _segmentos(donde)[-1] if _segmentos(donde) else ""
+        if not padre:
+            return [], False
+        datos = await _call_graph_neighborhood(session, padre, donde)
+        if "error" in datos:
+            log.warning("No se pudo traer '%s' de '%s': %s", nombre, donde, datos["error"])
+            return [], False
+        attrs = [a for a in _filter_attributes(
+            datos.get("relationships", {}).get("HAS_ATTRIBUTE", []))
+            if a.get("name") == nombre]
+        if not attrs:
+            return [], False
+        return [{"element": padre,
+                 "description": (datos.get("element") or {}).get("description", ""),
+                 "attributes": attrs}], False
+
+    # Un elemento: su subarbol entero. 'donde' es su propio path, que es unico,
+    # asi que sirve de desambiguador -- los nombres se repiten en el grafo.
+    grupos = await _walk_subtree(session, nombre, donde, [nombre], skip_names=set())
+
+    salida, contados = [], 0
+    for g in grupos:
+        cuantos = len(g.get("attributes") or [])
+        if contados + cuantos > presupuesto:
+            log.warning("Contexto anadido: '%s' no cabe entero (%d atributos, "
+                        "presupuesto %d); se corta.", nombre, contados + cuantos, presupuesto)
+            return salida, True
+        salida.append(g)
+        contados += cuantos
+
+    log.info("Contexto anadido: '%s' aporta %d grupo(s), %d atributo(s).",
+             nombre, len(salida), contados)
+    return salida, False
+
+
+
 async def _contexto_de_planta(session: ClientSession) -> list[dict]:
     """Elementos que se anaden al contexto de TODA alerta de la planta.
 
@@ -451,55 +547,52 @@ async def build_af_context(asset_name: str, subsystem_name: str,
     # los mismos nombres de equipo y atributos distintos. Ver config.AF_PLANT_ROOT.
     planta = (config.AF_PLANT_ROOT + SEPARADOR_AF) if config.AF_PLANT_ROOT else None
 
-    async with stdio_client(_SERVER_PARAMS) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
+    async with sesion_af() as session:
+        # La jerarquia del payload de PI se usa ENTERA, y hasta el
+        # 2026-09-22 se tiraba. Lo que identifica un elemento no es su
+        # nombre sino la cadena System + Subsystem + Asset:
+        #
+        #   payload:   System=External Pumping  Subsystem=Pumping Station 01
+        #              Asset=PS20102 A03 PS02 Pump 02
+        #   path real: WWTP\Operational\External Pumping\Area C\Pumping
+        #              Station 01\PS20102 A03 PS02 Pump 02
+        #
+        # Hay segmentos intercalados (Operational, Area C), asi que la
+        # cadena no reconstruye el path -- pero si lo identifica.
+        path_activo, path_subsistema = await _resolver_cadena(
+            session, asset_name, subsystem_name, system_name,
+        )
 
-            # La jerarquia del payload de PI se usa ENTERA, y hasta el
-            # 2026-09-22 se tiraba. Lo que identifica un elemento no es su
-            # nombre sino la cadena System + Subsystem + Asset:
-            #
-            #   payload:   System=External Pumping  Subsystem=Pumping Station 01
-            #              Asset=PS20102 A03 PS02 Pump 02
-            #   path real: WWTP\Operational\External Pumping\Area C\Pumping
-            #              Station 01\PS20102 A03 PS02 Pump 02
-            #
-            # Hay segmentos intercalados (Operational, Area C), asi que la
-            # cadena no reconstruye el path -- pero si lo identifica.
-            path_activo, path_subsistema = await _resolver_cadena(
-                session, asset_name, subsystem_name, system_name,
+        # El recorrido arranca del path exacto que salio de la cadena. Si
+        # no se encontro, se cae al techo de planta: quedarse sin contexto
+        # es peor que la ambiguedad.
+        main_asset_context = await _walk_subtree(
+            session, asset_name, path_activo or planta,
+            [asset_name], skip_names=set(),
+        )
+
+        # Se anade a TODA alerta de la planta, este donde este en la
+        # jerarquia. Va en su propio bloque y no mezclado con los otros dos
+        # porque su prioridad es distinta: puede influir o no, y el prompt
+        # lo dice.
+        # Ficha del equipo: no entra en el menu del Step 4, va directa
+        # al Step 6. Ver _IDENTIDAD_ATTRS.
+        identidad = []
+        if path_activo:
+            datos = await _call_graph_neighborhood(session, asset_name, path_activo)
+            if "error" not in datos:
+                for a in datos.get("relationships", {}).get("HAS_ATTRIBUTE", []):
+                    if a.get("name") in _IDENTIDAD_ATTRS and a.get("piApiPath"):
+                        identidad.append({"name": a["name"], "piApiPath": a["piApiPath"]})
+
+        plant_context = await _contexto_de_planta(session)
+
+        nearby_elements_context = []
+        if subsystem_name and subsystem_name != asset_name:
+            nearby_elements_context = await _walk_subtree(
+                session, subsystem_name, path_subsistema or planta,
+                [subsystem_name], skip_names={asset_name},
             )
-
-            # El recorrido arranca del path exacto que salio de la cadena. Si
-            # no se encontro, se cae al techo de planta: quedarse sin contexto
-            # es peor que la ambiguedad.
-            main_asset_context = await _walk_subtree(
-                session, asset_name, path_activo or planta,
-                [asset_name], skip_names=set(),
-            )
-
-            # Se anade a TODA alerta de la planta, este donde este en la
-            # jerarquia. Va en su propio bloque y no mezclado con los otros dos
-            # porque su prioridad es distinta: puede influir o no, y el prompt
-            # lo dice.
-            # Ficha del equipo: no entra en el menu del Step 4, va directa
-            # al Step 6. Ver _IDENTIDAD_ATTRS.
-            identidad = []
-            if path_activo:
-                datos = await _call_graph_neighborhood(session, asset_name, path_activo)
-                if "error" not in datos:
-                    for a in datos.get("relationships", {}).get("HAS_ATTRIBUTE", []):
-                        if a.get("name") in _IDENTIDAD_ATTRS and a.get("piApiPath"):
-                            identidad.append({"name": a["name"], "piApiPath": a["piApiPath"]})
-
-            plant_context = await _contexto_de_planta(session)
-
-            nearby_elements_context = []
-            if subsystem_name and subsystem_name != asset_name:
-                nearby_elements_context = await _walk_subtree(
-                    session, subsystem_name, path_subsistema or planta,
-                    [subsystem_name], skip_names={asset_name},
-                )
 
     return {
         "main_asset_context": main_asset_context,

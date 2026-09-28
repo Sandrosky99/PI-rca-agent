@@ -9,9 +9,17 @@ llm_client.py — Capa de abstracción sobre el proveedor de LLM (Gemini / Anthr
   hay Gemini o Claude.
 
   Nota: generate() nunca pasa el parámetro "tools" a ninguno de los dos
-  proveedores. El modelo solo ve texto y devuelve texto; quien llama a los
-  MCP servers es el código Python (graph_client.py, pi_client.py). Esto es
-  un workflow, no un agente -- ver CLAUDE.md, "Terminología".
+  proveedores, y por eso sigue habiendo una sola firma para los dos. El modelo
+  solo ve texto y devuelve texto; quien llama a los MCP servers es el código
+  Python (graph_client.py, pi_client.py). Esto es un workflow, no un agente --
+  ver CLAUDE.md, "Terminología".
+
+  El matiz, desde la Fase 3: en el bucle de búsqueda del reanálisis el texto que
+  devuelve el modelo SÍ decide cuál es la siguiente consulta al grafo. No por
+  tool use del proveedor -- aquí no lo hay --, sino porque workflow.py lee ese
+  texto como una acción en JSON, la valida y la ejecuta. Se hizo así a propósito:
+  implementar tool use nativo obligaría a escribir el protocolo de Gemini y el de
+  Anthropic por separado, que es exactamente lo que esta capa existe para evitar.
 
 ¿Por qué existe esta capa?
   Anthropic y Google no comparten un estándar de API: cada uno define su

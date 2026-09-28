@@ -41,7 +41,7 @@ que no existe:
 |---|---|---|
 | Quién decide el siguiente paso | `run_rca_analysis()`: los 6 steps están escritos en orden en el cuerpo de la función | El modelo, en cada vuelta de un bucle |
 | Llamadas al LLM | **Las fija el código**, no el modelo: 2 en posiciones fijas (Steps 4 y 6), más una repetición del Step 6 por cada ampliación de ventana concedida (`MAX_HISTORY_ADJUSTMENTS`, 1 por defecto) | Un número indeterminado |
-| Acceso a herramientas | **Ninguno.** `llm_client.generate()` nunca pasa el parámetro `tools` | El modelo recibe las tools y decide cuál invocar |
+| Acceso a herramientas | **Una, y envuelta por nosotros.** `llm_client.generate()` nunca pasa `tools`; el único paso que le ofrece algo es la búsqueda del reanálisis, y lo que recibe no es el servidor MCP sino `graph_client.buscar_en_la_planta()` — sólo lectura, acotada a esta planta, 8 resultados y sin rutas. Ver *La excepción* más abajo | El modelo recibe las tools y decide cuál invocar |
 | Quién llama a los MCP servers | El código Python (`graph_client.py`, `pi_client.py`) | El modelo, vía tool use |
 | Reintentos y recuperación | Código determinista (`tenacity`, `_query_with_retry()`) | El modelo observa el error y decide |
 | Condición de parada | La última línea de la función | El modelo decide cuándo ha terminado |
@@ -50,6 +50,32 @@ que no existe:
 qué datos se piden a PI. Pero cambia el *contenido* de un paso que se iba a ejecutar igualmente, no
 el *orden* ni la *existencia* de los pasos. El grafo de control es idéntico para todas las alertas.
 Eso es selección de datos dentro de una ruta fija, no autonomía.
+
+**La excepción, y dónde empieza y acaba.** Desde la Fase 3 hay un paso — y sólo uno — en el que el
+modelo dirige: la **búsqueda**, que se activa cuando al pedir un reanálisis alguien escribe una
+sospecha que señala un activo que no está en el contexto («mirad la conductividad de la entrada de
+planta»). Ahí el modelo decide qué buscar y cuándo parar, en un bucle de hasta
+`MAX_ITERACIONES_BUSQUEDA` vueltas y `BUSQUEDA_TIMEOUT_SECONDS` segundos.
+
+Lo que seguiría decidiendo el código, que es lo que lo mantiene acotado:
+
+- **Si el paso se ejecuta.** Lo decide una puerta (`sospechas_que_senalan_fuera`) y ante cualquier
+  duda dice que no. Lo normal es que la sospecha hable de algo que ya se tiene.
+- **Cuántas cosas se buscan.** Las cuenta el código sobre las sospechas que escribieron personas,
+  cada una con la clave `(iteracion, indice)` de su causa. El modelo contesta sí o no a cada una;
+  no emite un número, no puede inventarse una que nadie escribió, y no decide el orden.
+- **El alcance de la búsqueda.** La planta, las ramas que no son proceso y el tope de resultados
+  los fija `buscar_en_la_planta()`. Y no devuelve `piApiPath`: el modelo elige un **sitio**, y la
+  ruta la resuelve el código después.
+- **Qué entra en el contexto.** Lo decide `traer_al_contexto()` a partir del tipo — un instrumento
+  viene solo, un activo viene con su subárbol — con su propio tope de atributos.
+- **Qué herramienta recibe.** No el servidor MCP: entre las tools de `afkg-graph-mcp` está
+  `refresh_graph`, de **escritura** sobre un Neo4j que comparten las demás demos. No hace falta que
+  se le ocurra usarla mal; basta con que la llame «para asegurarse de que el grafo está al día».
+
+Agotar el presupuesto **no es un fallo**: lo que quede sin resolver sale como no encontrado, el
+análisis sigue y el diagnóstico se produce igual. Es contexto que mejora la selección, no un
+requisito. Para el resto del workflow el grafo de control sigue siendo idéntico en cada alerta.
 
 El patrón es **encadenamiento de prompts** (*prompt chaining*): la salida de la primera llamada
 alimenta una consulta determinista de datos, y el resultado de esa consulta alimenta la segunda,
@@ -62,6 +88,11 @@ servers directamente al modelo y envolverlo en un bucle. Se ganaría poder perse
 inesperada (ampliar la ventana, saltar a un activo vecino); se pagaría latencia, coste variable por
 alerta y un flujo mucho más difícil de auditar.
 
+La búsqueda es un primer paso en esa dirección, y por eso se construyó al revés de como se
+describe ahí: **no** se le dieron las tools de un MCP server, se le dio una función envuelta. La
+diferencia es la que separa «el modelo decide dentro de lo que le dejamos» de «el modelo decide».
+Ampliar lo que puede invocar es la decisión de arquitectura, no haber abierto la puerta una vez.
+
 ---
 
 ## Estado del proyecto
@@ -71,7 +102,8 @@ alerta y un flujo mucho más difícil de auditar.
 | 1 | Recibir notificación HTTP POST de PI System | ✅ Completado |
 | 2 | Consultar el AF (afkg-graph-mcp) identificando el activo por la cadena `System + Subsystem + Asset` → `main_asset_context` / `nearby_elements_context` / `plant_context` | ✅ Completado (`graph_client.py`) |
 | ↳ | **Ficha del equipo** — qué máquina es, leída de PI. Sin número: no es una fase, alimenta el mensaje del Step 3 | ✅ Completado (`workflow.ficha_del_equipo()`) |
-| 3 | Preparar el mensaje de 4 secciones (objetivo con 5 prioridades, payload, modelo de datos con 3 bloques + ficha, JSON del AF) | ✅ Completado (`build_analysis_context()`) |
+| ↳ | **Búsqueda** — cuando la sospecha de quien revisa señala un activo que no está en el contexto, se localiza en el AF y se añade. Sin número: sólo existe en un reanálisis, y alimenta también el mensaje del Step 3 | ✅ Completado (`workflow.ampliar_contexto()`) |
+| 3 | Preparar el mensaje de 4 secciones (objetivo con 5 prioridades, payload, modelo de datos con los bloques del AF + ficha, JSON del AF) | ✅ Completado (`build_analysis_context()`) |
 | 4 | El modelo identifica, de esas variables reales, cuáles necesita analizar | ✅ Completado (parseado y usado en el Step 5) |
 | 5 | Obtener datos históricos de PI vía MCP Server (aveva-pi-mcp) | ✅ Completado (`pi_client.py`) |
 | 6 | El modelo produce diagnóstico y recomendaciones | ✅ Completado (`build_diagnosis_context()`) |
@@ -86,10 +118,11 @@ con otros KPIs y otros tipos de activo.
 
 ### Próximo paso
 
-**La Fase 3 está entregada salvo un paso** (2026-09-28). El ciclo completo
-funciona: el operario descarta causas con evidencia, pulsa reanalizar, y el
-workflow vuelve a entrar **por la selección de variables** con ese feedback y
-con datos nuevos de PI.
+**La Fase 3 está entregada** (2026-09-28). El ciclo completo funciona: el
+operario descarta causas con evidencia, pulsa reanalizar, y el workflow vuelve a
+entrar **por la selección de variables** con ese feedback y con datos nuevos de
+PI. Si la sospecha señala algo que no está en el contexto, el paso de búsqueda
+lo localiza en el AF y lo añade.
 
 Validado de punta a punta contra el AF, PI y el modelo reales (2026-09-23):
 alerta → análisis → veredicto → reanálisis, 90 s + 90 s, 4 llamadas al modelo.
@@ -1164,8 +1197,11 @@ Cosas que un asistente de IA (o cualquier contribuidor) debe evitar en este repo
   usarse: los `piApiPath` contra el `af_context` (`_validate_selected_variables`) y la petición de
   ventana contra el catálogo (`_parse_history_request`). No añadir rutas por las que la respuesta
   del modelo llegue sin validar a una consulta, un comando o un fichero (ai-governance §1.7, §1.8).
-- **No dar tools al modelo.** El diseño es deliberadamente un workflow: quien llama a los MCP
-  servers es el código. Convertirlo en un agente es una decisión de arquitectura, no un ajuste.
+- **No dar tools al modelo, salvo donde ya está acotado.** Quien llama a los MCP servers es el
+  código. La única excepción es la búsqueda del reanálisis, y ni siquiera ahí recibe un servidor:
+  recibe `graph_client.buscar_en_la_planta()`, una función envuelta de **sólo lectura**. Ampliar lo
+  que el modelo puede invocar — y sobre todo darle algo de **escritura**, `refresh_graph` el primer
+  candidato — es una decisión de arquitectura, no un ajuste.
 - **Ojo con lo que se envía al LLM.** Los prompts llevan estructura de planta y datos de proceso a
   un modelo en la nube. No añadir campos nuevos al prompt sin valorar qué se está exponiendo
   (ai-governance §1.4).

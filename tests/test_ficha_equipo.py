@@ -183,9 +183,10 @@ print("\n=== 9. El prompt y la lista blanca salen del MISMO sitio ===")
 # Es el arreglo de fondo: mientras sean la misma constante no pueden discrepar,
 # y una clave nueva en el af_context no se cuela sola en el mensaje.
 check("existe la constante", hasattr(workflow, "_BLOQUES_PARA_EL_MODELO"))
-check("son los tres bloques",
+check("son los cuatro bloques",
       workflow._BLOQUES_PARA_EL_MODELO
-      == ("main_asset_context", "nearby_elements_context", "plant_context"),
+      == ("main_asset_context", "nearby_elements_context", "plant_context",
+          "contexto_anadido"),
       workflow._BLOQUES_PARA_EL_MODELO)
 check("la usa la lista blanca", "for block in _BLOQUES_PARA_EL_MODELO:" in fuente)
 check("y la usa el prompt", "for b in _BLOQUES_PARA_EL_MODELO" in fuente)

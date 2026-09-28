@@ -452,6 +452,29 @@ MAX_REANALISIS: int = _entero("MAX_REANALISIS", 2)
 MAX_ITERACIONES_BUSQUEDA: int = _entero("MAX_ITERACIONES_BUSQUEDA", 5)
 BUSQUEDA_TIMEOUT_SECONDS: int = _entero("BUSQUEDA_TIMEOUT_SECONDS", 180)
 
+# Cuántas sospechas distintas se pueden atender en UNA pasada. El presupuesto de
+# arriba es del paso entero, no de cada objetivo: dos búsquedas más una elección
+# son 3 llamadas de las 5, así que dos objetivos caben sin tocar la aritmética
+# de ANALYSIS_TIMEOUT_SECONDS.
+#
+# Lo que sobra del tope NO se pierde ni se descarta en silencio: queda como
+# sospecha pendiente colgada de su causa, visible en la pantalla y en el orden
+# en que la persona las ve. Por eso el tope puede ser bajo sin que nadie se
+# quede sin respuesta.
+MAX_BUSQUEDAS_POR_PASADA: int = _entero("MAX_BUSQUEDAS_POR_PASADA", 2)
+
+# Tope de atributos de TODO el bloque añadido, sumando los objetivos atendidos.
+#
+# 80 sale de una medida, no de una intuición: el subárbol completo de la bomba
+# PS20102 son 16 grupos y 74 atributos, y sus atributos PROPIOS son sólo 4 --
+# identidad y configuración. Los 70 útiles (Head, Hydraulic Efficiency,
+# Hydraulic Power) cuelgan de 'Indicators'. Añadir un activo sin sus hijos es la
+# apariencia de haber atendido la sospecha sin atenderla, así que se baja; y 80
+# es lo que hace falta para que quepa uno entero con margen.
+#
+# Un instrumento suelto, en cambio, es 1 atributo (FT105, SS101...).
+MAX_ATRIBUTOS_ANADIDOS: int = _entero("MAX_ATRIBUTOS_ANADIDOS", 80)
+
 # Ramas del AF que la búsqueda NO puede devolver nunca. No son proceso: son
 # diagramas, modelos importados y nodos de navegación, y un elemento de ahí
 # metido en el contexto sería ruido con pinta de dato.

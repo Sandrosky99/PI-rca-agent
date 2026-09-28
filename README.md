@@ -69,12 +69,20 @@ Merece la pena tener clara la distinción antes de leer el código, porque los n
 |---|---|---|
 | Quién decide el siguiente paso | `run_rca_analysis()`: los 6 steps están escritos en orden en el cuerpo de la función | El modelo, en cada vuelta de un bucle |
 | Llamadas al modelo | **Las fija el código**, no el modelo: 2 en posiciones fijas (Steps 4 y 6), más una repetición del Step 6 por cada ampliación de ventana concedida (`MAX_HISTORY_ADJUSTMENTS`, 1 por defecto) | Un número indeterminado |
-| Acceso a herramientas | **Ninguno.** `llm_client.generate()` nunca pasa un parámetro `tools` | El modelo recibe las tools y decide cuál invocar |
+| Acceso a herramientas | **Una, y envuelta por nosotros.** `llm_client.generate()` nunca pasa un parámetro `tools`; el único paso que le ofrece algo es la búsqueda del reanálisis, y recibe una función de sólo lectura acotada a esta planta, no el servidor MCP | El modelo recibe las tools y decide cuál invocar |
 | Quién llama a los MCP servers | El código Python (`graph_client.py`, `pi_client.py`) | El modelo, vía *tool use* |
 | Reintentos y recuperación | Código determinista (`tenacity`, `_query_with_retry()`) | El modelo observa el error y decide qué probar |
 | Condición de parada | La última línea de la función | El modelo decide cuándo ha terminado |
 
 **El matiz:** el modelo *sí* decide algo — en el Step 4 elige qué variables consultar, y eso cambia qué datos se piden a PI. Pero cambia el *contenido* de un paso que se iba a ejecutar igualmente, no el *orden* ni la *existencia* de los pasos. Eso es selección de datos dentro de una ruta fija, no autonomía.
+
+**La excepción.** Hay un paso, y sólo uno, en el que el modelo dirige: la **búsqueda** del
+reanálisis, cuando la sospecha de quien revisa señala un activo que no está en el contexto. Ahí
+elige qué buscar y cuándo parar, con un presupuesto de vueltas y de reloj. No elige el alcance: la
+planta, las ramas válidas y el número de resultados los fija el código, y lo que recibe no es el
+servidor MCP sino una función envuelta de sólo lectura — entre las tools de `afkg-graph-mcp` hay
+una de escritura sobre una base compartida. Tampoco decide si el paso se ejecuta, ni cuántas cosas
+se buscan, ni qué entra después en el contexto. Está descrito entero en `AGENTS.md`.
 
 El patrón es **encadenamiento de prompts** (*prompt chaining*), con una puerta de código entre las dos llamadas que valida, deduplica y filtra. Es el patrón adecuado aquí: la tarea está bien definida y su secuencia se conoce de antemano, así que no hay razón para pagar la latencia, el coste y la impredecibilidad de un bucle autónomo.
 
@@ -740,19 +748,20 @@ C:\MCPServer\rca-agent\logs\service_error.log
 | 5 | Obtener datos históricos de PI vía `aveva-pi-mcp` | ✅ Completado |
 | 6 | El modelo produce diagnóstico y recomendaciones | ✅ Completado |
 | ↻ | **Reanálisis** — el operario descarta con evidencia y el workflow vuelve a entrar por el Step 4 con ese feedback | ✅ Completado |
+| ↳ | **Búsqueda** — si la sospecha señala un activo que no está en el contexto, se localiza en el AF y se añade. Único paso en el que el modelo recibe una herramienta | ✅ Completado |
 
 **Validación:** ciclo completo el 2026-08-20 y repetido el 2026-09-23 contra el AF, PI y el modelo reales, con la alerta de `Hydraulic Efficiency` sobre `PS20102 A03 PS02 Pump 02`: 206 s, 3 llamadas al modelo, 159 variables ofrecidas y 24 elegidas. El modelo pidió ampliar la ventana de 24 h a 7 días y se le concedió; volvió a pedir y se le denegó por presupuesto. Validación real pero no exhaustiva: falta ejercitarlo con otros KPIs y tipos de activo.
 
 ### Pendiente
 
-1. **El paso de búsqueda del reanálisis.** Es lo único que falta de la Fase 3.
-   Cuando la sospecha del operario señala un activo de otro sistema que tampoco
-   está en `AF_PLANT_CONTEXT_ELEMENTS` —«mirad la conductividad de la entrada de
-   planta»— el modelo no puede pedir esa variable ni queriendo: el Step 2 no
-   llega ahí. Hace falta traducir lo que escribió la persona a vocabulario del
-   AF y buscarlo, acotado a la planta y enseñando siempre qué se ha mirado.
-   El riesgo no es no encontrarla: es encontrar **la equivocada** y que el
-   diagnóstico cite con confianza una variable de otra parte de la planta.
+1. **Ejercitar la búsqueda de punta a punta contra el AF y el modelo reales.**
+   El paso funciona, está probado con dobles y la pantalla ya cuenta qué fue de
+   cada sospecha. Lo que falta es verlo contra el grafo de verdad, y el riesgo
+   que hay que vigilar ahí no es no encontrar la variable: es encontrar **la
+   equivocada** y que el diagnóstico cite con confianza una variable de otra
+   parte de la planta. Conviene empezar por el caso que ya se sabe cómo acaba:
+   «la conductividad de la entrada» no existe en el WWTP, así que tiene que
+   terminar honestamente en *no se mide eso*.
 2. **Relanzar un análisis fallido.** Hoy un incidente en `fallido` es un callejón
    sin salida, y la mitad de los motivos de fallo son cortes externos que un
    reintento resolvería.

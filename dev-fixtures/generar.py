@@ -246,7 +246,7 @@ def veredicto(minutos_atras, indice, cual, evidencia="", sospecha="", iteracion=
 def incidente(corr, activo, subsistema, kpi, valor, limite, tipo, estado, hace_min,
               diagnostico=None, veredictos=None, motivo=None, intentos=None,
               movimiento_min=None, contenedor_viejo=False, pasadas=None,
-              fallidos=None):
+              fallidos=None, busquedas=None):
     """Un incidente completo.
 
     'movimiento_min' es cuando fue el ultimo movimiento, que es lo que mira el
@@ -259,6 +259,12 @@ def incidente(corr, activo, subsistema, kpi, valor, limite, tipo, estado, hace_m
     'fallidos' son intentos de reanalisis que no salieron. Se anotan aparte a
     proposito: un reanalisis que falla NO puede tapar el diagnostico anterior,
     asi que el incidente sigue en 'finalizado' y el fallo queda aqui.
+
+    'busquedas' es lo que la busqueda del reanalisis hizo con las sospechas,
+    una lista por pasada. Va dentro de 'traces' y no en un campo propio porque
+    es ahi donde lo escribe el workflow de verdad: la pantalla lo DERIVA de los
+    traces (incidents.estado_de_sospechas), y un fixture que lo pusiera en otro
+    sitio pintaria bien enseñando algo que en produccion no existe.
 
     'contenedor_viejo' escribe el campo 'diagnostico' suelto en vez de la lista
     'diagnosticos'. Es como estan los DOS incidentes reales que hay en
@@ -296,6 +302,8 @@ def incidente(corr, activo, subsistema, kpi, valor, limite, tipo, estado, hace_m
     else:
         lista = pasadas if pasadas else ([diagnostico] if diagnostico else [])
         registro["diagnosticos"] = [dict(d, iteracion=n) for n, d in enumerate(lista, 1)]
+    if busquedas:
+        registro["traces"] = [dict(b, iteracion=n) for n, b in enumerate(busquedas, 1)]
     if fallidos:
         registro["intentos_fallidos"] = [
             {"en": sello(m), "motivo": motivo_f} for m, motivo_f in fallidos
@@ -438,6 +446,48 @@ FIXTURES = [
                             "Puede que el problema este en la aspiracion."),
               ],
               movimiento_min=RECIENTE + 10),
+
+    # LA BUSQUEDA DEL REANALISIS: las cuatro suertes que puede correr una
+    # sospecha, en un mismo expediente. Es el unico fixture donde se ve, y hace
+    # falta que se vea: quien escribe una corazonada tiene que poder saber si se
+    # miro, y que aparezca una "pendiente" en un reanalisis posterior sin haber
+    # avisado antes seria inexplicable.
+    incidente("1a2b3c4d5e6f", "PS20104 A02 PS03 Pump 07", "Pumping Station 03",
+              "Hydraulic Efficiency", 39.8, 48.0, "Low", "finalizado", RECIENTE + 55,
+              pasadas=[DIAG_OBSTRUCCION, DIAG_ASPIRACION],
+              veredictos=[
+                  veredicto(RECIENTE + 40, 0, "descartada",
+                            "Rodete inspeccionado, sin obstruccion.",
+                            "Yo miraria la turbidez del agua de entrada."),
+                  veredicto(RECIENTE + 38, 1, "descartada",
+                            "La aspiracion esta correcta, medida con manometro.",
+                            "Puede ser la conductividad de la entrada, por un vertido."),
+                  # La tercera sospecha existe y esta descartada igual que las
+                  # otras dos: lo que la deja PENDIENTE es el tope por pasada.
+                  # Una sospecha pendiente solo puede venir de una causa
+                  # descartada -- es lo unico que ve la puerta --, y un fixture
+                  # que la colgara de una causa sin descartar pintaria una
+                  # situacion que en produccion no se da.
+                  veredicto(RECIENTE + 36, 2, "descartada",
+                            "Holguras medidas en la ultima parada, dentro de tolerancia.",
+                            "Y el nivel del pozo de gruesos, que baja mucho de madrugada."),
+              ],
+              busquedas=[{
+                  "busqueda_resultado": [
+                      {"causa": "1:0", "que_busca": "la turbidez del agua de entrada",
+                       "acierto": {"tipo": "variable", "nombre": "Turbidity inlet",
+                                   "donde": r"WWTP\Operational\1 - Intake"},
+                       "motivo": "encontrado"},
+                      # Conductivity NO existe en el WWTP: comprobado contra el
+                      # AF real el 2026-09-28. Este desenlace no es artificial.
+                      {"causa": "1:1", "que_busca": "la conductividad de la entrada",
+                       "acierto": None, "motivo": "no_existe"},
+                  ],
+                  "sospechas_pendientes": [
+                      {"causa": "1:2", "sospecha": "Y el nivel del pozo de gruesos, que baja mucho de madrugada."},
+                  ],
+              }],
+              movimiento_min=RECIENTE + 30),
 
     # TODAS DESCARTADAS con presupuesto intacto: ya NO cierra. Se queda en
     # activos ofreciendo el reanalisis, que es cuando mas tiene que aportar --

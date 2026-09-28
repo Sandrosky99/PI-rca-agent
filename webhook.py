@@ -111,8 +111,16 @@ async def _ejecutar_analisis(payload: dict, registro: dict,
         # Como la llamada ya tiene su propio LLM_TIMEOUT_SECONDS, ese rezagado
         # dura como mucho un par de minutos. La plaza del semáforo sí se libera
         # al instante, que es lo que importa para los que esperan turno.
+        # Lo ya buscado en pasadas anteriores se DERIVA del expediente, no se
+        # arrastra por parametro desde el disparador: asi un reanalisis 2 hereda
+        # lo que encontro el 1 sin repetir la busqueda, y una sospecha que acabo
+        # en "no existe" no se vuelve a intentar.
         diagnostico = await asyncio.wait_for(
-            workflow.run_rca_analysis(payload, trace, revision),
+            workflow.run_rca_analysis(
+                payload, trace, revision,
+                ya_atendidas=incidents.sospechas_atendidas(registro),
+                aciertos_previos=incidents.aciertos_anadidos(registro),
+            ),
             timeout=config.ANALYSIS_TIMEOUT_SECONDS,
         )
     except (asyncio.TimeoutError, TimeoutError):
@@ -652,6 +660,12 @@ def _con_estado_de_causas(registro: dict) -> dict:
                     "quedan": incidents.quedan_reanalisis(registro),
                 },
                 estadoCausas=incidents.estado_de_causas(registro),
+                # Que fue de cada sospecha, y que se anadio al expediente por
+                # ellas. Lo compone el servidor por lo mismo que 'causas': se
+                # deduce de los traces, y ese calculo no puede vivir en dos
+                # sitios. La pantalla escribe la frase; el dato sale de aqui.
+                sospechas=incidents.estado_de_sospechas(registro),
+                anadido=incidents.aciertos_anadidos(registro),
                 cierre=etiqueta,
                 cerrado=incidents.esta_cerrado(registro))
 
