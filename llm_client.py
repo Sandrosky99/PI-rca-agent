@@ -85,10 +85,30 @@ def generate(system_prompt: str, user_message: str) -> str:
 
 
 def _is_transient_gemini_error(exc: BaseException) -> bool:
-    """5xx (sobrecarga, mantenimiento...) es reintentable; 4xx (auth, payload
-    inválido) no lo es -- reintentar no lo arregla."""
+    """5xx (sobrecarga, mantenimiento...) es reintentable, y el 429 también.
+
+    El resto de 4xx no: auth, payload inválido o modelo inexistente no se
+    arreglan repitiendo la misma petición.
+
+    El 429 es la excepción, y es EL error reintentable por definición: dice
+    "ahora mismo no, vuelve en un momento". Estaba fuera porque la regla era
+    "4xx no se reintenta" -- cierta para todos los demás --, y eso dejaba a los
+    dos proveedores comportándose distinto ante el mismo error: la rama de
+    Anthropic sí reintenta su RateLimitError.
+
+    Costó un análisis real (2026-09-29): el paso de búsqueda subió las llamadas
+    por reanálisis de 2-3 a 8, ocho en 45 s agotaron el límite por minuto de la
+    cuenta, y el 429 llegó justo en el Step 6 -- con el diagnóstico a una
+    llamada de distancia. La ventana de reintentos son 90 s, de sobra para un
+    límite por minuto.
+
+    Si la cuota agotada fuera diaria, reintentar 90 s se pierde y el análisis
+    falla igual. Es el mismo precio que ya se paga con cualquier corte largo.
+    """
     from google.genai import errors
-    return isinstance(exc, errors.ServerError)
+    if isinstance(exc, errors.ServerError):
+        return True
+    return isinstance(exc, errors.ClientError) and getattr(exc, "code", None) == 429
 
 
 def _is_transient_anthropic_error(exc: BaseException) -> bool:

@@ -156,6 +156,38 @@ except llm_client.LLMGenerationError as exc:
     check("dice el motivo de parada", "max_tokens" in str(exc), str(exc))
     check("y que hacer", "ANTHROPIC_THINKING" in str(exc), str(exc))
 
+print("\n=== 13. Un 429 se reintenta; el resto de 4xx no ===")
+# El 429 dice "ahora mismo no, vuelve en un momento": es EL error reintentable
+# por definicion. Estaba fuera porque la regla era "4xx no se reintenta" --
+# cierta para todos los demas -- y eso dejaba a los dos proveedores
+# comportandose distinto ante lo mismo: la rama de Anthropic si reintenta su
+# RateLimitError.
+#
+# Costo un analisis real (2026-09-29): el paso de busqueda subio las llamadas
+# por reanalisis de 2-3 a 8, ocho en 45 s agotaron el limite por minuto, y el
+# 429 llego en el Step 6 -- con el diagnostico a una llamada de distancia.
+from google.genai import errors as _gerr
+
+
+def _gemini(clase, code):
+    return clase(code, {"error": {"code": code, "status": "RESOURCE_EXHAUSTED"}}, None)
+
+
+check("503 se reintenta", llm_client._is_transient_gemini_error(_gemini(_gerr.ServerError, 503)))
+check("429 TAMBIEN", llm_client._is_transient_gemini_error(_gemini(_gerr.ClientError, 429)))
+check("400 no", not llm_client._is_transient_gemini_error(_gemini(_gerr.ClientError, 400)))
+check("401 tampoco", not llm_client._is_transient_gemini_error(_gemini(_gerr.ClientError, 401)))
+check("y algo que no es del SDK, tampoco",
+      not llm_client._is_transient_gemini_error(ValueError("x")))
+
+# Los dos proveedores, ante un limite de ritmo, hacen lo mismo.
+import anthropic as _anth
+check("Anthropic ya lo hacia", "RateLimitError" in
+      (RAIZ / "llm_client.py").read_text(encoding="utf-8"))
+# Y la ventana de reintentos cubre de sobra un limite por minuto.
+check("la ventana aguanta mas de un minuto",
+      config.LLM_RETRY_WINDOW_SECONDS >= 60, config.LLM_RETRY_WINDOW_SECONDS)
+
 print("\n" + "=" * 62)
 if fallos:
     print(f"FALLOS: {len(fallos)} -> {fallos}")
