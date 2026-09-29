@@ -671,7 +671,26 @@ function chipEstado(x){
   //
   // Sin veredictos si manda el estado: ahi "pendiente de revisar" es exacto, y
   // el cierre que se deduciria seria una conclusion que nadie ha tomado.
-  const hayVeredictos = x.cierre && x.cierre !== "sin_veredicto";
+  //
+  // "Ya hay veredictos" solo puede pasar en FINALIZADO, y eso hay que decirlo
+  // aqui. La condicion no miraba los veredictos: los deducia de que la etiqueta
+  // no fuera 'sin_veredicto'. El atajo funcionaba mientras la unica etiqueta que
+  // convivia con un incidente abierto saliera de los veredictos -- la de
+  // FINALIZADO --, pero FALLIDO e INTERRUMPIDO la sacan del ESTADO, no de que
+  // alguien haya revisado nada.
+  //
+  // Se vio el 2026-09-29, al dar etiqueta de cierre a INTERRUMPIDO para que
+  // venciera a las 12 h: cuatro incidentes bajo la pastilla "interrumpido"
+  // aparecian marcados "Fallo del análisis", que es el nombre de OTRA pastilla
+  // del mismo filtro. Las mismas palabras para dos conjuntos distintos.
+  //
+  // FALLIDO ya lo sufria y no se notaba, porque su pastilla de estado se llama
+  // igual que su etiqueta de cierre y comparten color. Con este arreglo sigue
+  // viendose exactamente igual; el que cambia es INTERRUMPIDO, que pasa a
+  // decir "interrumpido" en gris -- que es lo que es: no un diagnostico que
+  // fallo, sino un proceso que murio debajo.
+  const hayVeredictos = x.estado === "finalizado"
+    && x.cierre && x.cierre !== "sin_veredicto";
   return (x.cerrado || hayVeredictos) && x.cierre
     ? `<span class="chip c-${esc(x.cierre)}">${esc(CIERRES[x.cierre] || x.cierre)}</span>`
     : chip(x.estado);

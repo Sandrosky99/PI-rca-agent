@@ -520,6 +520,36 @@ check("usa la palabra del resto de la pantalla",
       "confirmada" in cuerpo and "aceptada" not in cuerpo, cuerpo[-300:])
 check("y esa palabra es la del veredicto", "Confirmada por el operario" in html)
 
+print("\n=== 8t. La marca de la fila no puede contradecir a su pastilla ===")
+# En activos se filtra por ESTADO, asi que la marca de una fila abierta tiene que
+# decir lo que dice su pastilla. Si no, el mismo nombre etiqueta dos conjuntos
+# distintos: se vio con cuatro incidentes bajo la pastilla "interrumpido"
+# marcados "Fallo del analisis", que es el nombre de OTRA pastilla.
+i = html.index("function chipEstado(x){")
+fn = html[i:html.index("async function pedir", i)]
+# La condicion tiene que MIRAR el estado, no deducir los veredictos de que la
+# etiqueta no sea 'sin_veredicto': FALLIDO e INTERRUMPIDO sacan su etiqueta del
+# estado, no de que alguien haya revisado nada.
+check("la marca de cierre exige estado finalizado",
+      'x.estado === "finalizado"' in fn, fn[-500:])
+check("y sigue exigiendo que haya etiqueta distinta de sin_veredicto",
+      'x.cierre !== "sin_veredicto"' in fn)
+check("un incidente cerrado sigue enseñando su cierre", "x.cerrado ||" in fn)
+
+# La pastilla de estado de interrumpido existe y es NEUTRA: no es un diagnostico
+# que fallo, es un proceso que murio debajo.
+check("interrumpido tiene estilo propio y neutro",
+      ".e-pausado,.e-interrumpido{background:var(--neutro-fondo)" in html)
+# Y la de fallido comparte color con su etiqueta de cierre, por eso el arreglo
+# no le cambia el aspecto.
+check("fallido se ve igual por cualquiera de las dos vias",
+      ".e-fallido{background:var(--malo-fondo); color:var(--malo)}" in html
+      and ".c-fallo_del_analisis{background:var(--malo-fondo); color:var(--malo)}" in html)
+
+# Y el nombre de la pastilla de estado de cada uno sigue siendo el suyo.
+check("las pastillas no se llaman igual",
+      'fallido:     "fallo del análisis"' in html and 'interrumpido:"interrumpido"' in html)
+
 print("\n" + "=" * 62)
 if fallos:
     print(f"FALLOS: {len(fallos)} -> {fallos}")
