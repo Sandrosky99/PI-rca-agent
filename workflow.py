@@ -1082,15 +1082,23 @@ _BUSQUEDA_PROMPT = (
     "Framework, nada mas: no diagnostiques, no propongas causas, no elijas "
     "variables para analizar.\n\n"
     "LO QUE HAY QUE LOCALIZAR:\n\n{objetivos}\n\n"
+    "{ejemplos}"
     "{historial}"
     "{catalogo}"
     "Responde con un unico objeto JSON con una de estas tres formas:\n\n"
     "1) Para buscar por nombre en el Asset Framework de la planta:\n"
     "   {{\"accion\": \"buscar\", \"termino\": \"<texto>\"}}\n"
-    "   El termino casa por trozo de nombre y no distingue mayusculas, asi que "
-    "conviene que sea corto y en INGLES, que es el idioma del Asset Framework "
-    "de esta planta: \"Turbidity\" localiza mas que \"turbidez de entrada\". Si "
-    "una busqueda no devuelve nada, prueba otro termino antes de rendirte.\n\n"
+    "   USA UNA SOLA PALABRA, y en INGLES, que es el idioma del Asset Framework "
+    "de esta planta.\n"
+    "   El termino tiene que aparecer TAL CUAL dentro del nombre del elemento: "
+    "letra a letra y seguido. No se buscan palabras sueltas ni se reordenan. Por "
+    "eso \"pH primary\" no encuentra NADA aunque exista \"PH213 Primary Line 1 "
+    "Outlet pH\" -- ahi \"pH\" y \"Primary\" no van juntos en ese orden --, "
+    "mientras que \"pH\" a secas si lo encuentra.\n"
+    "   Busca ancho y elige tu: mira la columna \"en\" de cada resultado para "
+    "quedarte con el del sitio correcto, porque los resultados pueden casar "
+    "solo PARTE de lo que pediste. Si una busqueda no devuelve nada, prueba con "
+    "OTRA palabra, no con la misma acompañada.\n\n"
     "2) Cuando uno de los resultados del catalogo es lo que se buscaba:\n"
     "   {{\"accion\": \"elegir\", \"objetivo\": \"<identificador>\", \"resultado\": <numero>}}\n\n"
     "3) Cuando estes razonablemente seguro de que eso no existe en esta planta:\n"
@@ -1110,8 +1118,31 @@ def _catalogo_para_el_modelo(catalogo: dict[int, dict]) -> str:
     return ("RESULTADOS ENCONTRADOS HASTA AHORA:\n\n" + "\n".join(filas) + "\n\n")
 
 
+def _ejemplos_de_nombres(af_context: dict, cuantos: int = 3) -> list[str]:
+    """Unos cuantos nombres reales de esta planta, para el prompt del bucle.
+
+    El modelo buscaba a ciegas: el prompt de la puerta si le enseña las
+    variables disponibles, el del bucle no le enseñaba ni un nombre. Sin ver
+    "OX313 Biological Line 1 Aerobic Area Oxygen" no hay forma de que deduzca
+    que aqui los elementos llevan el tag delante y la zona detras.
+
+    Salen del af_context, asi que son de esta planta y de este caso. Gratis.
+    """
+    nombres = []
+    for bloque in ("main_asset_context", "nearby_elements_context", "plant_context"):
+        for grupo in af_context.get(bloque) or []:
+            # El breadcrumb lleva el camino; interesa el nombre del elemento.
+            nombre = (grupo.get("element") or "").split(" > ")[-1].strip()
+            if nombre and nombre not in nombres:
+                nombres.append(nombre)
+            if len(nombres) >= cuantos:
+                return nombres
+    return nombres
+
+
 async def buscar_lo_que_falta(objetivos: list[dict], session,
-                              trace: dict | None = None) -> list[dict]:
+                              trace: dict | None = None,
+                              ejemplos: list[str] | None = None) -> list[dict]:
     """El bucle de la busqueda. UNICO paso agentico del proyecto.
 
     El workflow global no cambia: sigue siendo una secuencia fija de pasos. Lo
@@ -1140,6 +1171,31 @@ async def buscar_lo_que_falta(objetivos: list[dict], session,
     resueltos: dict[str, tuple[dict | None, str]] = {}
     por_clave = {o["causa"]: o for o in objetivos}
 
+    def apuntar(aciertos: list[dict]) -> int:
+        nuevos = 0
+        for a in aciertos:
+            firma = (a["tipo"], a["nombre"], a["donde"])
+            if firma in vistos:
+                continue
+            vistos.add(firma)
+            catalogo[len(catalogo) + 1] = a
+            nuevos += 1
+        return nuevos
+
+    # La primera busqueda la hace el CODIGO, antes de gastar una vuelta.
+    #
+    # 'que_busca' ya existe -- lo escribio la puerta -- asi que no hay ninguna
+    # razon para pagar una llamada al modelo solo para que lo repita. Con esto el
+    # caso normal pasa de "buscar y luego elegir" a una sola vuelta: elegir.
+    #
+    # Importa por el ritmo, no por el reloj: un reanalisis con busqueda hacia
+    # hasta 9 llamadas al modelo en menos de un minuto, y eso agoto el limite del
+    # proveedor en la segunda ejecucion real. Una consulta al grafo cuesta 0,04 s
+    # y no cuenta para ninguna cuota.
+    for o in objetivos:
+        cuantos = apuntar(await graph_client.buscar_en_la_planta(session, o["que_busca"]))
+        historial.append('ya se busco "%s" -> %d resultado(s)' % (o["que_busca"], cuantos))
+
     for vuelta in range(config.MAX_ITERACIONES_BUSQUEDA):
         quedan = [o for o in objetivos if o["causa"] not in resueltos]
         if not quedan:
@@ -1147,6 +1203,9 @@ async def buscar_lo_que_falta(objetivos: list[dict], session,
 
         mensaje = _BUSQUEDA_PROMPT.format(
             objetivos="\n".join('  [%s] "%s"' % (o["causa"], o["que_busca"]) for o in quedan),
+            ejemplos=("ASI SE LLAMAN LAS COSAS EN ESTA PLANTA -- unos ejemplos "
+                      "reales:\n\n" + "\n".join("  " + e for e in ejemplos)
+                      + "\n\n") if ejemplos else "",
             historial=("LO QUE YA HAS PROBADO:\n\n" + "\n".join("  " + h for h in historial)
                        + "\n\n") if historial else "",
             catalogo=_catalogo_para_el_modelo(catalogo),
@@ -1174,16 +1233,22 @@ async def buscar_lo_que_falta(objetivos: list[dict], session,
                 historial.append("(pediste buscar sin decir que)")
                 continue
             aciertos = await graph_client.buscar_en_la_planta(session, termino)
-            nuevos = 0
-            for a in aciertos:
-                firma = (a["tipo"], a["nombre"], a["donde"])
-                if firma in vistos:
-                    continue
-                vistos.add(firma)
-                catalogo[len(catalogo) + 1] = a
-                nuevos += 1
+            nuevos = apuntar(aciertos)
+            nota = ""
+            if aciertos and not nuevos:
+                nota = ", ninguno nuevo"
+            elif not aciertos and " " in termino:
+                # El aviso lo da el CODIGO porque es un hecho suyo, no una
+                # opinion: el termino se busca como fragmento contiguo, asi que
+                # varias palabras casan solo si van juntas y en ese orden. En la
+                # primera ejecucion real el modelo gasto sus cinco vueltas en
+                # "pH primary", "pH line", "pH primary outlet"... y ninguna casaba
+                # con "PH213 Primary Line 1 Outlet pH", que era justo lo que
+                # buscaba. Con "pH" a secas lo habria encontrado.
+                nota = (" -- son varias palabras, y solo casan si aparecen juntas "
+                        "y en ese orden dentro del nombre; prueba UNA sola")
             historial.append('buscaste "%s" -> %d resultado(s)%s' % (
-                termino, len(aciertos), ", ninguno nuevo" if aciertos and not nuevos else ""))
+                termino, len(aciertos), nota))
             continue
 
         if que in ("elegir", "rendirse"):
@@ -1269,7 +1334,8 @@ async def ampliar_contexto(
                 # tiene por que perderse por un objetivo nuevo que se atasco.
                 try:
                     hallazgos = await asyncio.wait_for(
-                        buscar_lo_que_falta(objetivos, session, trace),
+                        buscar_lo_que_falta(objetivos, session, trace,
+                                            _ejemplos_de_nombres(af_context)),
                         timeout=config.BUSQUEDA_TIMEOUT_SECONDS,
                     )
                 except (asyncio.TimeoutError, TimeoutError):

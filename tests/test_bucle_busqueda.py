@@ -94,7 +94,10 @@ r = correr([OBJ1], [{"accion": "buscar", "termino": "Turbidity"},
 check("un resultado por objetivo", len(r) == 1, r)
 check("encontrado", r[0]["motivo"] == "encontrado", r)
 check("y trae el sitio, no una ruta", r[0]["acierto"] == TURBIDEZ, r[0]["acierto"])
-check("se busco lo que dijo", buscados == ["Turbidity"], buscados)
+# El primer termino NO lo pone el modelo: lo pone el codigo con el 'que_busca'
+# que ya escribio la puerta, antes de gastar una vuelta.
+check("el codigo busca primero, con lo que dijo la puerta",
+      buscados == ["la turbidez de entrada", "Turbidity"], buscados)
 
 print("\n=== 2. Rendirse es un desenlace VALIDO ===")
 # Conductivity no existe en WWTP: comprobado contra el AF real. Que la planta no
@@ -372,6 +375,78 @@ check("uno inventado se cae igual", r[0]["motivo"] == "sin_presupuesto", r)
 # texto que escribio la persona. Lo que cambia es que ya no los exigimos de
 # vuelta.
 check("el prompt sigue presentandolos con corchetes", "[1:0]" in prompts[0])
+
+print("\n=== 18. EL TERMINO ES UN FRAGMENTO CONTIGUO, Y HAY QUE DECIRLO ===")
+# Segunda ejecucion real (2026-09-29): la puerta acerto, el bucle arranco, y
+# gasto sus CINCO vueltas en "pH primary", "pH line", "pH primary effluent",
+# "pH primary outlet" y "clarifier pH". Cero resultados en las cinco.
+#
+# Y el elemento existia: PH213 Primary Line 1 Outlet pH. Medido contra el AF:
+#   "pH primary"  -> 0      "Outlet pH"   -> 2  (con PH213)
+#   "pH"          -> 8      "Primary Line"-> 4  (con PH213)
+# El termino tiene que aparecer letra a letra y SEGUIDO dentro del nombre; el
+# modelo compuso las palabras en SU orden. El prompt decia "casa por trozo de
+# nombre", pero su ejemplo se leia como "traduce al ingles y se breve".
+check("dice que una sola palabra", "UNA SOLA PALABRA" in workflow._BUSQUEDA_PROMPT)
+check("explica que es contiguo",
+      "letra a letra y seguido" in workflow._BUSQUEDA_PROMPT)
+check("con el ejemplo que fallo de verdad",
+      "pH primary" in workflow._BUSQUEDA_PROMPT
+      and "PH213 Primary Line 1 Outlet pH" in workflow._BUSQUEDA_PROMPT)
+check("y le dice que elija mirando donde vive",
+      'columna' in workflow._BUSQUEDA_PROMPT and '"en"' in workflow._BUSQUEDA_PROMPT)
+
+# El aviso lo da el CODIGO, que es quien sabe el hecho: varias palabras y cero
+# resultados es casi siempre esto.
+correr([OBJ1], [{"accion": "buscar", "termino": "pH primary"},
+                {"accion": "buscar", "termino": "Turbidity"},
+                {"accion": "elegir", "objetivo": "1:0", "resultado": 1}])
+check("tras un termino de varias palabras sin resultados, se avisa",
+      "prueba UNA sola" in prompts[1], prompts[1][:900])
+# Y no se avisa cuando no toca: una sola palabra sin resultados es informacion
+# distinta -- puede que la planta no lo mida.
+correr([OBJ1], [{"accion": "buscar", "termino": "Conductivity"},
+                {"accion": "buscar", "termino": "Turbidity"},
+                {"accion": "elegir", "objetivo": "1:0", "resultado": 1}])
+check("con una sola palabra no se avisa de nada", "prueba UNA sola" not in prompts[1])
+
+print("\n=== 19. SI LA BUSQUEDA PREVIA YA LO ENCUENTRA, UNA SOLA VUELTA ===")
+# 'que_busca' existe antes de la primera llamada al modelo -- lo escribio la
+# puerta --, asi que pagar una vuelta para que el modelo lo repita no tiene
+# sentido. Importa por el RITMO, no por el reloj: un reanalisis con busqueda
+# llegaba a 9 llamadas en menos de un minuto y eso agoto el limite del proveedor
+# en la segunda ejecucion real.
+AF_FALSO["la turbidez de entrada"] = [TURBIDEZ]
+try:
+    r = correr([OBJ1], [{"accion": "elegir", "objetivo": "1:0", "resultado": 1}])
+    check("resuelto", r[0]["motivo"] == "encontrado", r)
+    check("en UNA llamada al modelo", len(prompts) == 1, len(prompts))
+    check("y el catalogo ya venia lleno", "Turbidity inlet" in prompts[0], prompts[0][-500:])
+    check("el historial dice que ya se busco", "ya se busco" in prompts[0])
+finally:
+    del AF_FALSO["la turbidez de entrada"]
+
+print("\n=== 20. Y ve como se llaman las cosas en esta planta ===")
+# Buscaba a ciegas: el prompt de la puerta si le enseña las variables
+# disponibles, el del bucle no le enseñaba ni un nombre. Sin ver
+# "OX313 Biological Line 1 Aerobic Area Oxygen" no hay forma de deducir que aqui
+# el tag va delante y la zona detras.
+ctx = {"main_asset_context": [{"element": "Linea 1 > OX313 Biological Line 1 Aerobic Area Oxygen",
+                               "attributes": []}],
+       "nearby_elements_context": [{"element": "SS324 Biological Line 2 Suspended Solids",
+                                    "attributes": []}],
+       "plant_context": []}
+ej = workflow._ejemplos_de_nombres(ctx)
+check("salen del af_context", ej[0] == "OX313 Biological Line 1 Aerobic Area Oxygen", ej)
+check("sin el camino delante", " > " not in ej[0], ej)
+check("varios", len(ej) == 2, ej)
+
+guion.clear(); guion.extend([{"accion": "rendirse", "objetivo": "1:0"}])
+prompts.clear()
+asyncio.run(workflow.buscar_lo_que_falta([OBJ1], None, None, ej))
+check("y llegan al prompt", "OX313 Biological Line 1 Aerobic Area Oxygen" in prompts[0])
+check("presentados como ejemplos de la planta",
+      "ASI SE LLAMAN LAS COSAS EN ESTA PLANTA" in prompts[0])
 
 print("\n" + "=" * 62)
 if fallos:

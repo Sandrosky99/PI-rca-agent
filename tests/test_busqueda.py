@@ -206,8 +206,11 @@ print("\n=== 8. Solo se llama a graph_search ===")
 buscar("pH")
 check("ninguna otra tool", all("node_type" in p for p in pedidos), pedidos)
 fuente = (RAIZ / "graph_client.py").read_text(encoding="utf-8")
-i = fuente.index("async def buscar_en_la_planta")
-cuerpo = fuente[i:fuente.index("async def ", i + 10)]
+# Desde _buscar_palabra hasta el final de buscar_en_la_planta: la consulta vive
+# en la primera y el cruce de palabras en la segunda, y las dos son lo que el
+# modelo alcanza a traves de la funcion envuelta.
+i = fuente.index("async def _buscar_palabra")
+cuerpo = fuente[i:fuente.index("async def traer_al_contexto")]
 # El nombre SI sale en el docstring, explicando por que existe la funcion. Lo que
 # no puede haber es una llamada: el unico call_tool de aqui es a graph_search.
 llamadas = [x.split(chr(34))[1] for x in cuerpo.split("call_tool(")[1:]]

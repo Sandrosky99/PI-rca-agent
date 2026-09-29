@@ -289,36 +289,18 @@ def _es_proceso(path: str) -> bool:
     return not (set(_segmentos(path)) & set(config.AF_RAMAS_NO_PROCESO))
 
 
-async def buscar_en_la_planta(session: ClientSession, termino: str) -> list[dict]:
-    """Busca en el AF de esta planta. Es la UNICA herramienta que recibe el modelo.
+# Tope de palabras por termino. Mas de cinco no afina, solo gasta consultas.
+_TOPE_PALABRAS = 5
 
-    No se le pasa el servidor MCP, se le pasa esto. La diferencia importa: entre
-    las tools de afkg-graph-mcp esta refresh_graph, que es de ESCRITURA -- su
-    ultima pasada real inserto 1.087 nodos, actualizo 1.280 y borro 1.457 sobre
-    un Neo4j que comparten las demas demos. Darle el servidor seria darle eso, y
-    no hace falta que se le ocurra usarlo mal: basta con que lo llame "para
-    asegurarse de que el grafo esta al dia".
 
-    Asi que el modelo es agentico en la DECISION -- que buscar, cuando parar --
-    pero no en el ALCANCE: la planta la fija el codigo, las ramas que no son
-    proceso se descartan aqui, y el numero de resultados tambien.
+async def _buscar_palabra(session: ClientSession, palabra: str) -> dict:
+    """Una consulta al grafo por una sola palabra. {clave: acierto}, SIN tope.
 
-    Busca elementos Y atributos porque un operario puede nombrar cualquiera de
-    los dos: "el pH de salida del primario" es un elemento (PH213...), pero "la
-    turbidez de entrada" es un atributo de otro elemento (1 - Intake|Turbidity
-    inlet). Cual sea no lo sabe quien escribe la sospecha.
-
-    Devuelve una lista de {tipo, nombre, donde, descripcion}, sin piApiPath: lo
-    que el modelo elige es un SITIO, y las rutas las resuelve el codigo despues.
-    Asi no puede copiar mal una ruta ni inventarsela.
+    El tope se aplica al final, despues de cruzar las palabras: recortar aqui
+    podria tirar justo el resultado que sobrevive al cruce.
     """
-    termino = (termino or "").strip()[:_TOPE_TERMINO]
-    if not termino:
-        return []
-
     planta = (config.AF_PLANT_ROOT + SEPARADOR_AF) if config.AF_PLANT_ROOT else None
-    salida: list[dict] = []
-    vistos: set[str] = set()
+    salida: dict = {}
 
     for tipo in ("Element", "Attribute"):
         # El filtro de planta del servidor solo sirve para elementos: el 'path'
@@ -328,7 +310,7 @@ async def buscar_en_la_planta(session: ClientSession, termino: str) -> list[dict
         # Para atributos se acota aqui abajo, contra su piApiPath.
         result = await session.call_tool(
             "graph_search",
-            {"node_type": tipo, "name_contains": termino,
+            {"node_type": tipo, "name_contains": palabra,
              "path_contains": planta if tipo == "Element" else None, "limit": 200},
         )
         texto = "".join(getattr(c, "text", "") for c in result.content)
@@ -348,23 +330,106 @@ async def buscar_en_la_planta(session: ClientSession, termino: str) -> list[dict
             if not _es_proceso(donde):
                 continue
             clave = donde + "|" + (nodo.get("name") or "")
-            if clave in vistos:
+            if clave in salida:
                 continue
-            vistos.add(clave)
-            salida.append({
+            salida[clave] = {
                 "tipo": "elemento" if tipo == "Element" else "variable",
                 "nombre": nodo.get("name") or "",
                 "donde": donde,
                 "descripcion": nodo.get("description") or "",
-            })
-            if len(salida) >= _TOPE_RESULTADOS:
-                log.info("Busqueda '%s': se alcanzo el tope de %d resultados.",
-                         termino, _TOPE_RESULTADOS)
-                return salida
-
-    log.info("Busqueda '%s': %d resultado(s).", termino, len(salida))
+            }
     return salida
 
+
+async def buscar_en_la_planta(session: ClientSession, termino: str) -> list[dict]:
+    """Busca en el AF de esta planta. Es la UNICA herramienta que recibe el modelo.
+
+    No se le pasa el servidor MCP, se le pasa esto. La diferencia importa: entre
+    las tools de afkg-graph-mcp esta refresh_graph, que es de ESCRITURA -- su
+    ultima pasada real inserto 1.087 nodos, actualizo 1.280 y borro 1.457 sobre
+    un Neo4j que comparten las demas demos. Darle el servidor seria darle eso, y
+    no hace falta que se le ocurra usarlo mal: basta con que lo llame "para
+    asegurarse de que el grafo esta al dia".
+
+    Asi que el modelo es agentico en la DECISION -- que buscar, cuando parar --
+    pero no en el ALCANCE: la planta la fija el codigo, las ramas que no son
+    proceso se descartan aqui, y el numero de resultados tambien.
+
+    EL TERMINO SE DESCOMPONE EN PALABRAS, y eso es lo que hace que esto funcione.
+    graph_search casa por fragmento CONTIGUO del nombre, asi que "pH primary" no
+    encuentra nada aunque exista "PH213 Primary Line 1 Outlet pH". En la segunda
+    ejecucion real (2026-09-29) el modelo gasto sus cinco vueltas en variantes de
+    eso y no encontro un elemento que estaba ahi. Medido despues, palabra a
+    palabra:
+
+        pH -> 8 (con PH213)    primary -> 8 (con PH213)    outlet -> 8 (con PH213)
+        clarifier -> 0         primario -> 0               salida -> 0
+
+    Todas las que uso habrian funcionado por separado. Fallo por juntarlas.
+
+    Asi que se consulta cada palabra y se CRUZAN los resultados. Las palabras que
+    no devuelven nada se IGNORAN en vez de vaciar el cruce: que una palabra no
+    aparezca en esta planta no significa que no exista lo que se busca --
+    significa que esa palabra no es del vocabulario de aqui. Es lo que permite
+    que "pH a la salida del primario", en castellano, encuentre PH213: "salida" y
+    "primario" dan cero, se ignoran, y queda "pH".
+
+    Se puede hacer porque una consulta al grafo cuesta 0,04 s y una vuelta del
+    modelo entre 5 y 15 -- ademas de contar para el limite de ritmo del
+    proveedor, que es lo que tumbo aquel analisis. El trabajo va donde es barato.
+
+    Busca elementos Y atributos porque un operario puede nombrar cualquiera de
+    los dos: "el pH de salida del primario" es un elemento (PH213...), pero "la
+    turbidez de entrada" es un atributo de otro elemento (1 - Intake|Turbidity
+    inlet). Cual sea no lo sabe quien escribe la sospecha.
+
+    Devuelve una lista de {tipo, nombre, donde, descripcion}, sin piApiPath: lo
+    que el modelo elige es un SITIO, y las rutas las resuelve el codigo despues.
+    Asi no puede copiar mal una ruta ni inventarsela.
+    """
+    termino = (termino or "").strip()[:_TOPE_TERMINO]
+    palabras = termino.split()[:_TOPE_PALABRAS]
+    if not palabras:
+        return []
+
+    por_palabra = []
+    for palabra in palabras:
+        encontrados = await _buscar_palabra(session, palabra)
+        if encontrados:
+            por_palabra.append((palabra, encontrados))
+        else:
+            log.info("Busqueda '%s': la palabra '%s' no existe en esta planta; se ignora.",
+                     termino, palabra)
+
+    if not por_palabra:
+        log.info("Busqueda '%s': 0 resultado(s).", termino)
+        return []
+
+    # El cruce, en el orden en que se escribieron las palabras.
+    comunes = set(por_palabra[0][1])
+    for _, encontrados in por_palabra[1:]:
+        comunes &= set(encontrados)
+
+    if comunes:
+        base = por_palabra[0][1]
+        salida = [base[c] for c in base if c in comunes]
+    else:
+        # Cruzar puede pasarse de estrecho: dos palabras que existen pero en
+        # sitios distintos dejan el cruce vacio. Antes de devolver nada, se da
+        # lo de la palabra MAS SELECTIVA -- la que menos cosas encontro, que es
+        # la que mas informacion aporta. La vuelta no se pierde.
+        palabra, base = min(por_palabra, key=lambda x: len(x[1]))
+        salida = list(base.values())
+        log.info("Busqueda '%s': ninguna coincidencia con todas las palabras; "
+                 "se devuelve lo de '%s' (%d).", termino, palabra, len(salida))
+
+    if len(salida) > _TOPE_RESULTADOS:
+        log.info("Busqueda '%s': %d resultado(s), se recorta al tope de %d.",
+                 termino, len(salida), _TOPE_RESULTADOS)
+        salida = salida[:_TOPE_RESULTADOS]
+    else:
+        log.info("Busqueda '%s': %d resultado(s).", termino, len(salida))
+    return salida
 
 
 async def traer_al_contexto(session: ClientSession, acierto: dict,
