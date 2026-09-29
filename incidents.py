@@ -1134,10 +1134,32 @@ def cierre(registro: dict) -> tuple[str | None, bool]:
     estado = registro.get("estado")
     if estado in _EN_CURSO:
         return None, False                       # está en marcha; no ha terminado
-    if estado == FALLIDO:
+
+    # FALLIDO e INTERRUMPIDO comparten etiqueta a propósito. La diferencia --
+    # el análisis se cortó solo, o murió el proceso debajo -- importa para
+    # depurar y la conserva el campo 'estado'; para quien mira la pantalla los
+    # dos dicen lo mismo: no hay diagnóstico y nadie lo va a terminar.
+    #
+    # Que INTERRUMPIDO esté aquí es un arreglo del 2026-09-29. Antes caía en el
+    # `return None, False` de abajo, y eso NO es "no ha cerrado todavía": con
+    # etiqueta None, esta_cerrado() contesta antes de llegar a mirar el reloj,
+    # así que un interrumpido no vencía nunca -- ni a las 20 h ni a las 200. Se
+    # quedaba en activos ocupando sitio en la ventana de prioridad sin pedir
+    # nada, que es lo contrario de para lo que sirve esa pestaña.
+    #
+    # El comentario que había daba por supuesto que "se recogen solos cuando PI
+    # vuelve a notificar" -- cierto sólo si la alerta se repite. Si la condición
+    # se corrigió, PI no vuelve a avisar y el expediente se queda ahí para
+    # siempre. Lo destapó mirar la pantalla, no una prueba.
+    #
+    # El diseño ya decía esto: DISENO-INTERACCION-HUMANA.md §"Qué se ve en
+    # activos" da 12 h a `fallido` e `interrumpido`, y el README ya listaba
+    # "fallo del análisis" como su cierre. El código era lo que no lo cumplía.
+    if estado in (FALLIDO, INTERRUMPIDO):
         return FALLO_DEL_ANALISIS, False         # se ve 12 h y luego cierra
     if estado != FINALIZADO:
-        # PAUSADO e INTERRUMPIDO se recogen solos cuando PI vuelve a notificar.
+        # Sólo queda PAUSADO, que no sale en ninguna de las dos pestañas: no es
+        # información de un incidente sino del sistema entero. Ver esta_cerrado().
         return None, False
 
     # TODAS las pasadas, no solo la vigente: un reanalisis trae causas nuevas y
