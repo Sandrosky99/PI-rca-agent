@@ -1069,7 +1069,11 @@ def marcar_fallo(incidente_id: str, motivo: str, trace: dict | None = None) -> d
     'intentos_fallidos' es de SOLO ANADIR, como los veredictos: que un
     reanalisis fallara dos veces seguidas es informacion, no ruido.
     """
-    previo = leer_por_id(incidente_id) or {}
+    # El expediente COMPLETO, no leer_por_id(): esa poda los traces a sus campos
+    # ligeros para no arrastrar los prompts hasta la pantalla, y aqui hacen
+    # falta enteros -- sin ellos, apilar la pasada que acaba de fallar borraria
+    # los prompts de todas las anteriores. Mismo motivo que en mark().
+    previo = _leer(_directorio() / f"{incidente_id}.json") or {}
     if not iteraciones(previo):
         return mark(incidente_id, FALLIDO, trace=trace, motivo=motivo)
 
@@ -1087,7 +1091,26 @@ def marcar_fallo(incidente_id: str, motivo: str, trace: dict | None = None) -> d
                              + [{"en": ahora, "motivo": motivo}],
     }
     if trace:
-        cambios["trace"] = trace
+        # Se APILA en 'traces', igual que en mark(). Escribirlo en el campo
+        # suelto 'trace' -- que es lo que se hacia hasta el 2026-09-29 -- lo
+        # dejaba donde nadie lo lee: traces() prefiere la lista y el suelto se
+        # ignora en cuanto existe.
+        #
+        # No es solo perder unos prompts. Lo que la pasada fallida trae dentro
+        # es lo que se buscó y con qué resultado, y de ahí sale que un
+        # reanálisis posterior NO repita la búsqueda (ver busquedas() y
+        # sospechas_atendidas()). Esa garantía estaba escrita en su docstring
+        # -- "webhook persiste el trace tanto si el análisis acaba bien como si
+        # falla" -- y era falsa justo en la rama del reanálisis fallido, que es
+        # la única donde hacía falta.
+        #
+        # Lo destapó una ejecución real: Gemini devolvió 429 en el Step 6
+        # después de que la búsqueda hubiera gastado sus cinco vueltas, y el
+        # expediente quedó sin rastro de que se hubiera buscado nada.
+        anteriores = traces(previo)
+        cambios["traces"] = anteriores + [dict(trace, iteracion=len(anteriores) + 1)]
+        if "trace" in previo:
+            cambios["trace"] = _BORRAR
     log.warning("Reanalisis fallido; se conserva el diagnostico anterior: %s",
                 motivo, extra={"incidentId": incidente_id})
     return _actualizar(incidente_id, cambios)
