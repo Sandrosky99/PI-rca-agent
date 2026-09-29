@@ -250,6 +250,44 @@ check("el peor caso cabe en el tope del analisis",
       peor <= config.ANALYSIS_TIMEOUT_SECONDS,
       "peor=%d tope=%d" % (peor, config.ANALYSIS_TIMEOUT_SECONDS))
 
+print("\n=== 13. LA CLAVE VUELVE CON LOS CORCHETES QUE LE PUSIMOS ===")
+# Esto no lo cogio ninguna prueba: lo cogio la primera ejecucion real
+# (2026-09-29). El prompt presenta cada sospecha como "[1:1] mirad el pH...", y
+# el modelo copio el identificador tal cual -- corchetes incluidos -- con un
+# acierto impecable. El codigo comparaba contra "1:1", no casaba, y tiraba la
+# decision: cero objetivos, ninguna busqueda, y en el expediente nada que
+# explicara por que.
+#
+# El fallo era nuestro: le enseñamos el identificador de una forma y le exigimos
+# otra. Y la prueba no lo vio porque el doble lo escribi yo devolviendo "1:0" --
+# codificaba mi suposicion, no lo que hace el modelo.
+responder({"decisiones": [{"sospecha": "[1:0]", "senala_fuera": True,
+                           "que_busca": "la conductividad de la entrada",
+                           "por_que": "No hay conductividad en la lista."}]})
+obj, pend = puerta([causa(0, CONDUCT)])
+check("con corchetes SI se atiende", [o["causa"] for o in obj] == ["1:0"], obj)
+
+responder({"decisiones": [{"sospecha": " 1:0 ", "senala_fuera": True, "que_busca": "x"}]})
+check("y con espacios tambien", len(puerta([causa(0, CONDUCT)])[0]) == 1)
+
+# Lo que NO cambia: la clave sigue teniendo que ser una de las que emitio este
+# codigo. Limpiar el adorno no relaja nada.
+responder({"decisiones": [{"sospecha": "[9:9]", "senala_fuera": True, "que_busca": "x"}]})
+check("una clave inventada se cae aunque venga con corchetes",
+      puerta([causa(0, CONDUCT)])[0] == [])
+
+print("\n=== 14. La puerta deja rastro de lo que decidio ===")
+# Puede suprimir el paso entero. Hasta el 2026-09-29 lo hacia sin escribir nada,
+# asi que para saber por que hubo que REPRODUCIR la llamada con las mismas
+# entradas. Una decision del modelo que cambia lo que se hace es auditable.
+tr = {}
+responder({"decisiones": [{"sospecha": "1:0", "senala_fuera": False, "que_busca": "",
+                           "por_que": "Ya esta disponible."}]})
+asyncio.run(workflow.sospechas_que_senalan_fuera([causa(0, CONDUCT)], AF, frozenset(), tr))
+check("guarda el prompt y la respuesta", "puerta_busqueda" in tr, list(tr))
+check("con la sospecha dentro del prompt", CONDUCT[:30] in tr["puerta_busqueda"]["prompt"])
+check("y el por que del modelo", "Ya esta disponible" in tr["puerta_busqueda"]["respuesta"])
+
 print("\n" + "=" * 62)
 if fallos:
     print(f"FALLOS: {len(fallos)} -> {fallos}")

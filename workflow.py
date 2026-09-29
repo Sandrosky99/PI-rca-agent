@@ -836,9 +836,30 @@ def clave_de_causa(causa: dict) -> str:
     return "%s:%s" % (causa.get("iteracion"), causa.get("indice"))
 
 
+def _clave_limpia(valor) -> str:
+    """La clave tal como la devuelve el modelo, sin los adornos que le pusimos.
+
+    Los prompts presentan cada identificador entre corchetes -- "[1:1] mirad el
+    pH..." -- porque asi se separa de un vistazo del texto que escribio la
+    persona. El modelo copia lo que ve, corchetes incluidos, y eso es exactamente
+    lo que hizo en la primera ejecucion real (2026-09-29): contesto
+    {"sospecha": "[1:1]", "senala_fuera": true, ...} con un acierto impecable, y
+    el codigo lo tiro porque comparaba contra "1:1".
+
+    No es que el modelo se equivocara: le enseñamos el identificador de una forma
+    y le exigimos otra. Quitar el adorno es nuestro trabajo, no suyo.
+
+    Esto NO relaja la garantia. La clave sigue teniendo que ser una de las que
+    emitio este codigo: "[9:9]" se limpia a "9:9" y se cae igual por no estar en
+    la lista. Lo unico que cambia es que deja de caerse lo que si era valido.
+    """
+    return str(valor or "").strip().strip("[]").strip()
+
+
 async def sospechas_que_senalan_fuera(
     revision: list[dict], af_context: dict,
     ya_atendidas: frozenset[str] = frozenset(),
+    trace: dict | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """La PUERTA de la busqueda: decide QUE sospechas piden buscar algo.
 
@@ -895,6 +916,15 @@ async def sospechas_que_senalan_fuera(
     )
     try:
         respuesta = await _generar(mensaje)
+        if trace is not None:
+            # La puerta puede suprimir el paso entero, y hasta el 2026-09-29 lo
+            # hacia sin dejar nada en el expediente: cuando decia que no -- que
+            # es lo normal -- no quedaba por que. Para averiguar que habia
+            # pasado en la primera ejecucion real hubo que REPRODUCIR la llamada
+            # con las mismas entradas. Una decision del modelo que cambia lo que
+            # se hace tiene que ser auditable, igual que las demas
+            # (base/software-spec 1.5).
+            trace["puerta_busqueda"] = {"prompt": mensaje, "respuesta": respuesta}
         decision = json.loads(_extract_json_payload(respuesta))
     except (llm_client.LLMGenerationError, json.JSONDecodeError, ValueError) as exc:
         log.warning("Puerta de la busqueda: no se pudo decidir (%s); no se busca.", exc)
@@ -907,7 +937,7 @@ async def sospechas_que_senalan_fuera(
     for d in decision.get("decisiones") or []:
         if not isinstance(d, dict):
             continue
-        clave = str(d.get("sospecha") or "")
+        clave = _clave_limpia(d.get("sospecha"))
         if clave not in esperadas or clave in por_clave:
             # Inventada o repetida. Que se caiga es justo el motivo de que la
             # lista la indexe este codigo y no el modelo.
@@ -933,6 +963,12 @@ async def sospechas_que_senalan_fuera(
         log.info("Puerta de la busqueda: %d objetivo(s) -- %s. %d pendiente(s).",
                  len(objetivos), "; ".join(o["que_busca"] for o in objetivos),
                  len(pendientes))
+    else:
+        # Que NO haya objetivos es lo normal, pero tiene que verse: es la
+        # diferencia entre "la sospecha hablaba de algo que ya teniamos" y "el
+        # modelo contesto algo que no supimos leer".
+        log.info("Puerta de la busqueda: ninguna de las %d sospecha(s) pide buscar nada.",
+                 len(sospechas))
     return objetivos, pendientes
 
 
@@ -1048,7 +1084,7 @@ async def buscar_lo_que_falta(objetivos: list[dict], session,
             continue
 
         if que in ("elegir", "rendirse"):
-            clave = str(accion.get("objetivo") or "")
+            clave = _clave_limpia(accion.get("objetivo"))
             if clave not in por_clave or clave in resueltos:
                 # Identificador inventado o ya resuelto. Se cae, igual que en la
                 # puerta: los identificadores los pone este codigo.
@@ -1119,7 +1155,7 @@ async def ampliar_contexto(
 
     try:
         objetivos, pendientes = await sospechas_que_senalan_fuera(
-            revision, af_context, ya_atendidas)
+            revision, af_context, ya_atendidas, trace)
         if not objetivos and not aciertos_previos:
             return [], False, [], pendientes
 

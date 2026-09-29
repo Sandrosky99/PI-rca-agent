@@ -355,6 +355,24 @@ check("un expediente sin nada de esto no rompe",
       incidents.estado_de_sospechas({}) == {}
       and incidents.estado_de_sospechas({"traces": [{}]}) == {})
 
+print("\n=== 17. El bucle presenta los objetivos igual, y le pasa lo mismo ===")
+# _BUSQUEDA_PROMPT lista cada objetivo como '[1:0] "la turbidez"'. El mismo
+# adorno, el mismo riesgo: el modelo copia lo que ve. Se arreglo a la vez que la
+# puerta, cuando la ejecucion real del 2026-09-29 lo destapo alli.
+r = correr([OBJ1], [{"accion": "buscar", "termino": "Turbidity"},
+                    {"accion": "elegir", "objetivo": "[1:0]", "resultado": 1}])
+check("elegir con corchetes funciona", r[0]["motivo"] == "encontrado", r)
+r = correr([OBJ1], [{"accion": "rendirse", "objetivo": " 1:0 "}])
+check("rendirse con espacios tambien", r[0]["motivo"] == "no_existe", r)
+# Y un objetivo inventado sigue cayendose, con corchetes o sin ellos.
+r = correr([OBJ1], [{"accion": "elegir", "objetivo": "[9:9]", "resultado": 1}]
+                   * config.MAX_ITERACIONES_BUSQUEDA)
+check("uno inventado se cae igual", r[0]["motivo"] == "sin_presupuesto", r)
+# El prompt sigue usando corchetes a proposito: separan el identificador del
+# texto que escribio la persona. Lo que cambia es que ya no los exigimos de
+# vuelta.
+check("el prompt sigue presentandolos con corchetes", "[1:0]" in prompts[0])
+
 print("\n" + "=" * 62)
 if fallos:
     print(f"FALLOS: {len(fallos)} -> {fallos}")
