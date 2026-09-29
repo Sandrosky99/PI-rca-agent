@@ -36,6 +36,8 @@ Flujo completo del workflow:
 import asyncio
 import json
 import logging
+import re
+import unicodedata
 from datetime import datetime
 
 import pytz
@@ -721,6 +723,107 @@ MAX_CAUSAS_ABIERTAS = 3
 # para que las lea una persona -- de ahi sale que conviene añadir al contexto
 # fijo de planta --, y una lista larga no se lee: se ignora.
 MAX_VARIABLES_QUE_FALTAN = 4
+
+
+# Palabras que no distinguen una causa de otra: conectores y verbos de relleno.
+# NO se quita vocabulario del dominio -- "difusores", "oxigeno" o "entrada" son
+# precisamente lo que hay que comparar.
+_PALABRAS_VACIAS = frozenset("""
+de del la las el los un una unos unas y o en por para con que se lo a al es su
+sus mas menos como sobre entre desde hasta ser esta este esa ese debido puede
+donde cuando muy ya han ha hay les le sido siendo tras segun mediante
+""".split())
+
+
+def _fichas(texto: str) -> set:
+    """Las palabras con contenido de una causa, sin tildes ni mayusculas.
+
+    Sin tildes porque el modelo escribe "aireación" donde una pasada anterior
+    escribio "aireacion", y eso no puede decidir si dos causas son la misma.
+    """
+    plano = unicodedata.normalize("NFKD", (texto or "").lower())
+    plano = "".join(ch for ch in plano if not unicodedata.combining(ch))
+    return {p for p in re.findall(r"[a-z0-9]+", plano)
+            if len(p) > 2 and p not in _PALABRAS_VACIAS}
+
+
+def _contencion(a: set, b: set) -> float:
+    """Que parte de la mas corta esta contenida en la otra. 0 si alguna esta vacia."""
+    if not a or not b:
+        return 0.0
+    return len(a & b) / min(len(a), len(b))
+
+
+def autorizar_causas(diagnosis: dict, revision: list[dict],
+                     causas_nuevas: int, trace: dict | None = None) -> None:
+    """La puerta de las causas de un reanalisis. Modifica 'diagnosis' en el sitio.
+
+    Hace dos cosas que hasta el 2026-09-29 solo se PEDIAN en el prompt:
+
+      1. Quita las que repiten una causa que ya esta en el expediente.
+      2. Recorta a las que caben (MAX_CAUSAS_ABIERTAS menos las que siguen
+         abiertas).
+
+    Las dos se le decian al modelo con todas las letras -- "No las repitas en tu
+    respuesta", "Devuelve una sola causa nueva" -- y en la primera ejecucion real
+    hizo las dos cosas: devolvio DOS causas teniendo una de presupuesto, y una de
+    ellas era la colmatacion de los difusores, que seguia abierta desde la pasada
+    anterior con otras palabras. Pedirselo no es autorizarlo.
+
+    Que importa que se cuele: el operario acaba con dos tarjetas para la misma
+    hipotesis, tiene que juzgarla dos veces, y puede dejarlas en estados
+    contrarios. La causa abierta ya esta ahi con su identidad y su historial; la
+    copia no añade nada que revisar.
+
+    Se compara contra las ABIERTAS y contra las DESCARTADAS. Lo segundo importa
+    mas: reproponer algo que una persona refuto abriendo la tapa es exactamente
+    lo que el reanalisis existe para no hacer.
+
+    El orden no es casual: primero se quitan las repetidas y despues se recorta.
+    Al reves, el recorte podria quedarse con la copia y tirar la buena.
+
+    Nada de esto es silencioso: queda en el log y en el trace.
+    """
+    causas = diagnosis.get("root_causes")
+    if not isinstance(causas, list) or not revision:
+        return
+
+    anteriores = [(c.get("estado"), c.get("cause") or "") for c in revision
+                  if c.get("cause")]
+    umbral = config.UMBRAL_CAUSA_REPETIDA_PCT / 100
+    quitadas = []
+    supervivientes = []
+
+    for causa in causas:
+        fichas = _fichas(causa.get("cause") if isinstance(causa, dict) else "")
+        parecida, cuanto, estado = None, 0.0, ""
+        for est, texto in anteriores:
+            grado = _contencion(fichas, _fichas(texto))
+            if grado > cuanto:
+                parecida, cuanto, estado = texto, grado, est
+        if parecida is not None and cuanto >= umbral:
+            quitadas.append({"causa": causa.get("cause", ""), "repite": parecida,
+                             "estado_anterior": estado, "parecido": round(cuanto, 2),
+                             "motivo": "repetida"})
+            log.warning("Reanalisis: se descarta una causa que repite otra %s "
+                        "(parecido %.0f%%): %r", estado, cuanto * 100,
+                        causa.get("cause", "")[:90])
+            continue
+        supervivientes.append(causa)
+
+    sobran = supervivientes[causas_nuevas:] if causas_nuevas >= 0 else []
+    for causa in sobran:
+        quitadas.append({"causa": causa.get("cause", ""), "motivo": "sin_presupuesto"})
+        log.warning("Reanalisis: el modelo devolvio mas causas de las %d que caben; "
+                    "se descarta %r", causas_nuevas, causa.get("cause", "")[:90])
+    supervivientes = supervivientes[:causas_nuevas]
+
+    if quitadas:
+        diagnosis["root_causes"] = supervivientes
+        if trace is not None:
+            trace["causas_no_autorizadas"] = quitadas
+        log.info("Reanalisis: %d causa(s) autorizada(s) de %d propuesta(s).",
+                 len(supervivientes), len(causas))
 
 
 def bloque_feedback(revision: list[dict]) -> tuple[str, int]:
@@ -2151,6 +2254,11 @@ async def run_rca_analysis(notification_payload: dict, trace: dict | None = None
             adjustments, config.MAX_HISTORY_ADJUSTMENTS, anterior, lookback_hours,
             interval[0], interval[1], reason,
         )
+
+    # La respuesta del modelo es entrada no confiable tambien aqui: hasta ahora
+    # el tope de causas nuevas y el "no repitas las que siguen abiertas" solo
+    # vivian en el prompt, y la primera ejecucion real se salto los dos.
+    autorizar_causas(diagnosis, revision or [], causas_nuevas, trace)
 
     log.info("=" * 60)
     log.info("WORKFLOW RCA: DIAGNÓSTICO FINAL")

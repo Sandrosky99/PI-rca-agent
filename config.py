@@ -451,6 +451,27 @@ MAX_SELECTED_VARIABLES: int = _entero("MAX_SELECTED_VARIABLES", 40)
 # gasta mejor que uno que no se ve.
 MAX_REANALISIS: int = _entero("MAX_REANALISIS", 2)
 
+# Cuándo dos causas son la misma, en porcentaje.
+#
+# Se compara por CONTENCIÓN: qué parte de las palabras con contenido de la más
+# corta aparece en la más larga. No por Jaccard, y no es indiferente -- medido
+# el 2026-09-29 sobre el primer reanálisis real (OX313, dos pasadas, cinco
+# causas):
+#
+#   par                                        jaccard   contención
+#   "colmatación de los difusores..." x2          0,38         1,00   <- repetida
+#   carga orgánica en la entrada / MLSS           0,14         0,38   distintas
+#   el resto de pares                            <=0,10       <=0,40
+#
+# Jaccard deja 0,38 contra 0,14: separa, pero por poco, y se estrecha en cuanto
+# la repetición viene con más palabras alrededor -- que es justo lo que hace un
+# modelo al reformular. La contención dio 1,00 contra 0,40, un hueco donde 80
+# cae holgado por los dos lados.
+#
+# Es UNA medida sobre UN caso. Si aparecen falsos positivos, esta es la perilla;
+# el log dice siempre qué se descartó y por qué parecido.
+UMBRAL_CAUSA_REPETIDA_PCT: int = _entero("UMBRAL_CAUSA_REPETIDA_PCT", 80)
+
 
 # =============================================================================
 # La búsqueda de la sospecha (Fase 3, §5 ter del documento de diseño)
