@@ -40,14 +40,34 @@ evaluación antes de adoptar un cambio de forma general.
 
 Lo que hace falta para reproducir o auditar un diagnóstico concreto:
 
-| Parámetro | Dónde está |
+Todo lo del trace vive en `incidents/<id>.json` → **`traces[]`**, una entrada por
+pasada del análisis. Era un objeto suelto (`trace`) hasta el 2026-09-28; los
+expedientes anteriores conservan esa forma y **no se migran** (base §1.7), así que
+se leen como la pasada 1.
+
+| Parámetro | Dónde está, dentro de `traces[n]` |
 |---|---|
-| System prompt | `workflow.SYSTEM_PROMPT`, y copiado en `incidents/<id>.json` → `trace.system_prompt` |
-| Prompt del Step 3 | `incidents/<id>.json` → `trace.step3_prompt` |
-| Respuesta del Step 4 | `incidents/<id>.json` → `trace.step4_response` |
-| Prompts y respuestas del Step 6 | `incidents/<id>.json` → `trace.step6_prompts` / `trace.step6_responses` |
-| Modelo y proveedor | `incidents/<id>.json` → `diagnostico._ai_generated` |
-| Payload original | `incidents/<id>.json` → `payload` |
+| System prompt | `workflow.SYSTEM_PROMPT`, y copiado en `system_prompt` |
+| Prompt del Step 3 | `step3_prompt` |
+| Respuesta del Step 4 | `step4_response` |
+| Prompts y respuestas del Step 6 | `step6_prompts` / `step6_responses` |
+| Por qué se buscó, o por qué no | `puerta_busqueda` (su prompt y su respuesta) |
+| Las vueltas del bucle de búsqueda | `busqueda` (prompt y respuesta de cada una) |
+| Qué se buscó y con qué desenlace | `busqueda_resultado` |
+| Sospechas que no se llegaron a atender | `sospechas_pendientes` |
+| Causas que el código no autorizó | `causas_no_autorizadas` (repetidas o fuera de presupuesto) |
+| Modelo y proveedor | `diagnostico._ai_generated` (fuera del trace) |
+| Payload original | `payload` (fuera del trace) |
+
+Los cinco campos de búsqueda son de la Fase 3 y existen por lo mismo que los
+demás: son **decisiones del modelo que cambian lo que se hace**. La puerta puede
+suprimir el paso entero, y hasta el 2026-09-29 lo hacía sin dejar constancia —
+averiguar por qué obligó a reproducir la llamada con las mismas entradas.
+
+Un trace se guarda **también cuando la pasada falla**. No es un detalle de
+completitud: de `busqueda_resultado` sale que un reanálisis posterior no repita
+una búsqueda ya hecha, y una pasada que buscó y luego murió es exactamente el
+caso donde eso importa.
 
 **Temperature no se fija** en ninguna de las dos rutas: se usa el valor por defecto del
 proveedor. La reproducción exacta no está garantizada; la auditoría de *qué se envió y qué

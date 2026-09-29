@@ -68,7 +68,7 @@ Merece la pena tener clara la distinción antes de leer el código, porque los n
 | Criterio | Este sistema | Lo que haría un agente |
 |---|---|---|
 | Quién decide el siguiente paso | `run_rca_analysis()`: los 6 steps están escritos en orden en el cuerpo de la función | El modelo, en cada vuelta de un bucle |
-| Llamadas al modelo | **Las fija el código**, no el modelo: 2 en posiciones fijas (Steps 4 y 6), más una repetición del Step 6 por cada ampliación de ventana concedida (`MAX_HISTORY_ADJUSTMENTS`, 1 por defecto) | Un número indeterminado |
+| Llamadas al modelo | **Las fija el código**, no el modelo: 2 en posiciones fijas (Steps 4 y 6), más una repetición del Step 6 por cada ampliación de ventana concedida (`MAX_HISTORY_ADJUSTMENTS`, 1 por defecto). Un reanálisis cuya sospecha señale fuera añade la puerta de la búsqueda (1) y el bucle (hasta `MAX_ITERACIONES_BUSQUEDA`), que también son un tope del código | Un número indeterminado |
 | Acceso a herramientas | **Una, y envuelta por nosotros.** `llm_client.generate()` nunca pasa un parámetro `tools`; el único paso que le ofrece algo es la búsqueda del reanálisis, y recibe una función de sólo lectura acotada a esta planta, no el servidor MCP | El modelo recibe las tools y decide cuál invocar |
 | Quién llama a los MCP servers | El código Python (`graph_client.py`, `pi_client.py`) | El modelo, vía *tool use* |
 | Reintentos y recuperación | Código determinista (`tenacity`, `_query_with_retry()`) | El modelo observa el error y decide qué probar |

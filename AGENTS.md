@@ -40,7 +40,7 @@ que no existe:
 | | Este sistema | Lo que haría un agente |
 |---|---|---|
 | Quién decide el siguiente paso | `run_rca_analysis()`: los 6 steps están escritos en orden en el cuerpo de la función | El modelo, en cada vuelta de un bucle |
-| Llamadas al LLM | **Las fija el código**, no el modelo: 2 en posiciones fijas (Steps 4 y 6), más una repetición del Step 6 por cada ampliación de ventana concedida (`MAX_HISTORY_ADJUSTMENTS`, 1 por defecto) | Un número indeterminado |
+| Llamadas al LLM | **Las fija el código**, no el modelo: 2 en posiciones fijas (Steps 4 y 6), más una repetición del Step 6 por cada ampliación de ventana concedida (`MAX_HISTORY_ADJUSTMENTS`, 1 por defecto). Un reanálisis cuya sospecha señale fuera añade la puerta de la búsqueda (1) y el bucle (hasta `MAX_ITERACIONES_BUSQUEDA`), que también son un tope del código | Un número indeterminado |
 | Acceso a herramientas | **Una, y envuelta por nosotros.** `llm_client.generate()` nunca pasa `tools`; el único paso que le ofrece algo es la búsqueda del reanálisis, y lo que recibe no es el servidor MCP sino `graph_client.buscar_en_la_planta()` — sólo lectura, acotada a esta planta, 8 resultados y sin rutas. Ver *La excepción* más abajo | El modelo recibe las tools y decide cuál invocar |
 | Quién llama a los MCP servers | El código Python (`graph_client.py`, `pi_client.py`) | El modelo, vía tool use |
 | Reintentos y recuperación | Código determinista (`tenacity`, `_query_with_retry()`) | El modelo observa el error y decide |
@@ -67,6 +67,16 @@ Lo que seguiría decidiendo el código, que es lo que lo mantiene acotado:
 - **El alcance de la búsqueda.** La planta, las ramas que no son proceso y el tope de resultados
   los fija `buscar_en_la_planta()`. Y no devuelve `piApiPath`: el modelo elige un **sitio**, y la
   ruta la resuelve el código después.
+- **Cómo se busca.** El término se **descompone en palabras** y se cruzan los resultados, ignorando
+  las que no existen en esta planta. `graph_search` casa por fragmento *contiguo* del nombre, así
+  que «pH primary» no encuentra nada aunque exista `PH213 Primary Line 1 Outlet pH`; palabra a
+  palabra, `pH`, `primary` y `outlet` lo encuentran las tres. Ignorar las que dan cero es lo que
+  permite que una sospecha escrita en castellano funcione: de «pH a la salida del primario»
+  sobrevive `pH`, que basta. Se puede hacer porque una consulta al grafo cuesta **0,04 s** y una
+  vuelta del modelo entre 5 y 15 — y además cuenta para la cuota del proveedor.
+- **La primera búsqueda.** La hace el código con el `que_busca` de la puerta, **antes** de gastar
+  una vuelta: el modelo recibe el catálogo ya montado y el caso normal se resuelve en una sola
+  llamada, la de elegir.
 - **Qué entra en el contexto.** Lo decide `traer_al_contexto()` a partir del tipo — un instrumento
   viene solo, un activo viene con su subárbol — con su propio tope de atributos.
 - **Qué herramienta recibe.** No el servidor MCP: entre las tools de `afkg-graph-mcp` está
@@ -676,7 +686,9 @@ se pisa.
 diagnosticos:      [ {iteracion, root_causes, _ai_generated,
                       que_cambia, variables_que_faltan} ]
 traces:            [ {iteracion, system_prompt, step3_prompt,
-                      step4_response, step6_prompts, step6_responses} ]
+                      step4_response, step6_prompts, step6_responses,
+                      puerta_busqueda, busqueda, busqueda_resultado,
+                      sospechas_pendientes, causas_no_autorizadas} ]
 intentos_fallidos: [ {en, motivo} ]
 revision:            {veredictos: [{en, iteracion, causa, veredicto,
                                     evidencia, sospecha}], reclasificacion}
@@ -687,11 +699,30 @@ revision:            {veredictos: [{en, iteracion, causa, veredicto,
 esto: con dos pasadas, emparejar por el índice haría que el veredicto de la
 causa 0 de la primera marcase también la causa 0 de la segunda.
 
-**`traces` era el fallo más silencioso de los tres.** Hasta el 2026-09-28
-`mark()` escribía el trace entero en cada pasada, así que un reanálisis borraba
-los prompts de la anterior. El diagnóstico sí se conservaba; su procedencia no,
-y base/software-spec §1.5 pide conservar el prompt que llevó a un artefacto
-generado por IA. Lo destapó una prueba de punta a punta, no una suite.
+**`traces` era el fallo más silencioso de los tres, y apareció dos veces.**
+Hasta el 2026-09-28 `mark()` escribía el trace entero en cada pasada, así que un
+reanálisis borraba los prompts de la anterior. El diagnóstico sí se conservaba;
+su procedencia no, y base/software-spec §1.5 pide conservar el prompt que llevó
+a un artefacto generado por IA.
+
+El mismo fallo seguía vivo en `marcar_fallo()` hasta el 2026-09-29: escribía el
+campo **suelto** `trace` en vez de apilar en `traces`, y `traces()` ignora el
+suelto en cuanto existe la lista. Se guardaba donde nadie lo lee. Y ahí duele
+más que unos prompts: lo que trae dentro una pasada fallida es **qué se buscó y
+con qué resultado**, y de eso sale que un reanálisis posterior no repita la
+búsqueda (`busquedas()`, `sospechas_atendidas()`). Lo destapó una ejecución real
+en la que Gemini devolvió 429 en el Step 6 después de que la búsqueda hubiera
+gastado sus vueltas: el expediente quedó sin rastro de haber buscado nada.
+
+Los dos los destaparon pruebas de punta a punta, no suites. El patrón que dejan:
+**cualquier campo del trace que alimente una decisión posterior tiene que
+sobrevivir también al camino del fallo**, que es justo el que menos se recorre.
+
+Los cinco campos de búsqueda del esquema de arriba son de la Fase 3:
+`puerta_busqueda` (por qué se buscó o no), `busqueda` (las vueltas del bucle),
+`busqueda_resultado` (qué se encontró), `sospechas_pendientes` (las que no
+cupieron en la pasada) y `causas_no_autorizadas` (las que el código quitó por
+repetidas o por presupuesto).
 
 **`variables_que_faltan`** sale del `missing_variables` del Step 4, que hasta
 entonces viajaba al Step 6 como limitación declarada y se perdía. Ahora llega a
@@ -1066,24 +1097,43 @@ Se aplica también a Gemini, que no lo exige. Eso **baja** su techo efectivo, y 
 acotado por llamada y mismo comportamiento en ambas rutas, que es para lo que existe `llm_client`.
 Si truncara, se vería como un `JSONDecodeError` en el log, no en silencio.
 
-**⚠️ Asimetría de razonamiento entre proveedores (verificado 2026-09-03).** Los dos proveedores
-**no** están en igualdad de condiciones, y conviene saberlo antes de comparar su calidad:
+**Asimetría de razonamiento entre proveedores — CERRADA el 2026-09-28.** Durante casi un mes los
+dos proveedores **no** estuvieron en igualdad de condiciones. Se deja escrito porque explica de qué
+condiciones salió el único diagnóstico real que había:
 
 | | Razonamiento |
 |---|---|
 | `gemini-2.5-flash` | **Activado por defecto.** Se configura con `thinking_level` (`low`/`medium`/`high`) y no puede apagarse del todo; lo más bajo es `low`. Los tokens de pensamiento se facturan como salida. El código no fija el parámetro, así que usa el default: **activado**. |
-| `claude-opus-4-8` | **Desactivado.** `_generate_anthropic()` no pasa `thinking`, y en Opus 4.8 omitirlo significa ejecutar sin razonar. |
+| `claude-opus-4-8` | Estaba **desactivado**: `_generate_anthropic()` no pasaba `thinking`, y en Opus 4.8 omitirlo significa ejecutar sin razonar. Desde el 2026-09-28 pasa `thinking: {type: "adaptive"}` (`ANTHROPIC_THINKING`, encendido por defecto). |
 
-Consecuencia práctica: **el único diagnóstico real que existe (2026-08-20) se produjo con
-razonamiento**, porque lo hizo Gemini. Cambiar a `anthropic` tal como está el código daría
-diagnósticos sin razonar, y sería fácil atribuir el empeoramiento al modelo en vez de a la
-configuración. Activar `thinking: {type: "adaptive"}` en la ruta de Anthropic *corregiría* esta
-asimetría en vez de crearla — pero sin la evaluación del punto 8 no habría forma de medir si mejora.
+Consecuencia práctica de entonces: **los diagnósticos reales que existen se produjeron con
+razonamiento**, porque los hizo Gemini. Cambiar a `anthropic` con el código de antes habría dado
+diagnósticos sin razonar, y habría sido fácil atribuir el empeoramiento al modelo en vez de a la
+configuración.
+
+Es `adaptive` y no un presupuesto de tokens por dos motivos: en `claude-opus-4-8` `budget_tokens`
+ya **no se acepta** —la API responde 400— y, aunque se aceptara, habría que elegir un número único
+para pasos que no se parecen en nada (el Step 6 diagnostica con datos históricos; la puerta de la
+búsqueda contesta sí o no). Con `adaptive` decide el modelo en cada uno.
+
+Esto **iguala** las dos rutas; no dice si el diagnóstico sale mejor. Para eso sigue haciendo falta
+la evaluación del punto 8 — y por eso `ANTHROPIC_THINKING=false` existe, para poder comparar
+cuando la haya.
 
 **Otras notas por proveedor:**
 
 - `gemini-2.5-pro` requiere facturación activada en el proyecto de Google Cloud; sin ella da error
   429 de cuota 0. Por eso el default es `gemini-2.5-flash`.
+- **El free tier de `gemini-2.5-flash` son 20 peticiones AL DÍA** por proyecto y modelo
+  (`GenerateRequestsPerDayPerProjectPerModel-FreeTier`, `quotaValue: 20`, leído del cuerpo de un 429
+  el 2026-09-29). Google ya no publica la cifra en su documentación: sólo se ve en el error o en AI
+  Studio. Es un techo bajo para desarrollar: un análisis normal son 2-3 llamadas y un reanálisis con
+  búsqueda entre 4 y 5, así que **cuatro o cinco pruebas agotan el día**. Es lo que hace que ahorrar
+  llamadas no sea una optimización prematura sino la diferencia entre poder probar y no poder.
+- **Un 429 se reintenta** desde el 2026-09-29, en las dos rutas. Estaba fuera del conjunto
+  transitorio de Gemini porque la regla era «4xx no se reintenta» —cierta para un 400 o un 401—,
+  pero el 429 dice «ahora no, vuelve en un momento» y es el error reintentable por definición. La
+  rama de Anthropic ya reintentaba su `RateLimitError`; era otra asimetría.
 
 ---
 
@@ -1194,9 +1244,16 @@ Cosas que un asistente de IA (o cualquier contribuidor) debe evitar en este repo
 - **Nunca commitear `webhook.log` ni `incidents/`.** Contienen payloads reales, prompts completos
   y series de datos de planta. Ambos están en `.gitignore`.
 - **La salida del modelo es entrada no confiable.** Todo lo que devuelve el LLM se valida antes de
-  usarse: los `piApiPath` contra el `af_context` (`_validate_selected_variables`) y la petición de
-  ventana contra el catálogo (`_parse_history_request`). No añadir rutas por las que la respuesta
-  del modelo llegue sin validar a una consulta, un comando o un fichero (ai-governance §1.7, §1.8).
+  usarse: los `piApiPath` contra el `af_context` (`_validate_selected_variables`), la petición de
+  ventana contra el catálogo (`_parse_history_request`), los identificadores de sospecha y de
+  objetivo contra los que emitió este código (`_clave_limpia` y las listas de claves esperadas) y
+  las causas de un reanálisis contra las que ya están en el expediente (`autorizar_causas`). No
+  añadir rutas por las que la respuesta del modelo llegue sin validar a una consulta, un comando o
+  un fichero (ai-governance §1.7, §1.8).
+- **Pedírselo en el prompt no es autorizarlo.** Las dos primeras ejecuciones reales del reanálisis
+  se saltaron reglas que el prompt decía con todas las letras: devolvió dos causas teniendo una de
+  presupuesto, y repitió una causa que seguía abierta. Una instrucción al modelo es una petición;
+  si la consecuencia de incumplirla importa, tiene que haber una comprobación en código detrás.
 - **No dar tools al modelo, salvo donde ya está acotado.** Quien llama a los MCP servers es el
   código. La única excepción es la búsqueda del reanálisis, y ni siquiera ahí recibe un servidor:
   recibe `graph_client.buscar_en_la_planta()`, una función envuelta de **sólo lectura**. Ampliar lo

@@ -5,8 +5,8 @@
 
 | | |
 |---|---|
-| **Fecha** | 10 de septiembre de 2026 · revisado el 28 |
-| **Estado** | Fases 1 y 2 entregadas · Fase 3 entregada salvo el paso de búsqueda |
+| **Fecha** | 10 de septiembre de 2026 · revisado el 29 |
+| **Estado** | Fases 1 a 3 entregadas |
 | **Alcance** | Fases 1 a 3 |
 
 ---
@@ -597,7 +597,7 @@ hecho de cuándo trabajó el workflow por última vez, y no se deduce de ningún
 Y lo que **no** lleva: ni disposición, ni nº de OT, ni autor, ni estado de cierre —que se
 deduce—, ni lista de interacciones, que se cayó con la decisión de no detectar presencia.
 
-## 5 ter. Lo que falta: la sospecha que señala fuera del contexto
+## 5 ter. La sospecha que señala fuera del contexto
 
 El Step 2 alcanza el subárbol del activo, el de su subsistema y los elementos de
 `AF_PLANT_CONTEXT_ELEMENTS`. **Todo lo demás del AF es inalcanzable.**
@@ -609,37 +609,87 @@ sospecha es una pista a contrastar y le escondemos el dato con el que
 contrastarla.
 
 Y no basta con buscar el texto: nadie escribe «PH213 Primary Line 1 Outlet pH»,
-escribe «el pH de salida del primario». Buscar eso literalmente no encuentra
-nada; buscar solo `pH` devuelve cuatro elementos, uno de ellos en *Emissions*.
+escribe «el pH de salida del primario».
 
-**El riesgo no es no encontrarla: es encontrar la equivocada.** Hoy el fallo es
-visible y benigno —el modelo declara en `variables_que_faltan` que no la tenía y
-modula su confianza—. Con una búsqueda floja pasaría a ser un diagnóstico seguro
-de sí mismo citando una variable de otra parte de la planta. Es el mismo tipo de
-fallo que el espejo de Wonderware: no revienta nada, solo miente.
+**El riesgo no es no encontrarla: es encontrar la equivocada.** Sin el paso, el
+fallo es visible y benigno —el modelo declara en `variables_que_faltan` que no la
+tenía y modula su confianza—. Con una búsqueda floja pasa a ser un diagnóstico
+seguro de sí mismo citando una variable de otra parte de la planta. Es el mismo
+tipo de fallo que el espejo de Wonderware: no revienta nada, solo miente.
 
-El mecanismo previsto, si se construye:
+### Cómo quedó, y en qué se apartó del plan
 
-1. **El modelo traduce, no busca.** Se le da la sospecha y devuelve términos de
-   vocabulario AF. Es lo único que sabe hacer que el código no: saltar del
-   castellano de planta al inglés de PI. No se le da acceso al grafo.
-2. **El código busca**, acotado a la planta y descartando las ramas que no son
-   proceso.
-3. **El código puntúa** y se queda con tres como mucho. Sin puntuación, `pH`
-   traería medio AF.
-4. Entran como un **cuarto bloque etiquetado**, y el prompt dice lo que son: un
-   intento de emparejar lo que escribió una persona, no algo que ella nombrara.
-5. **Y se le enseña a la persona, siempre.** Esto no es cosmética: es el
-   guardarraíl. Si el emparejamiento se equivoca, que se vea.
+Entregado el 2026-09-29. El mecanismo previsto en este documento era: *el modelo
+traduce, el código busca y puntúa, y no se le da acceso al grafo*. Se construyó
+distinto en dos puntos, y conviene saber por qué.
 
-Sería la **cuarta llamada al modelo**, y hace falta una regla nueva de qué ramas
-del WWTP son proceso y cuáles no —`Sankey Diagrams`, `PM_from_PME` y los árboles
-de navegación no deberían poder entrar jamás—. Eso es configuración, como la
-lista fija.
+**1. El modelo sí recibe una herramienta — una, y envuelta por nosotros.** Traducir
+a ciegas no funciona: no hay forma de acertar el vocabulario de una planta sin ver
+resultados. La segunda ejecución real lo demostró —cinco términos, cero
+resultados, y el elemento estaba ahí—. Así que se le da
+`graph_client.buscar_en_la_planta()`, **no** el servidor MCP: entre las tools de
+`afkg-graph-mcp` está `refresh_graph`, de escritura sobre un Neo4j compartido.
 
-> Hay un fixture montado como banco de pruebas: `PH213 Primary Line 1 Outlet pH`,
-> con una causa descartada y una sospecha que señala la conductividad de la
-> entrada de planta.
+La intención original —*que el alcance lo fije el código*— se cumple igual, y es
+lo que importaba: la planta, las ramas que no son proceso y el número de
+resultados los pone la función, y no devuelve `piApiPath`. El modelo elige un
+**sitio**; la ruta la resuelve el código después.
+
+Es el único paso agéntico del proyecto. Está acotado por `MAX_ITERACIONES_BUSQUEDA`
+vueltas y `BUSQUEDA_TIMEOUT_SECONDS` segundos, y agotarlos **no es un fallo**: lo
+que quede sin resolver sale como no encontrado y el diagnóstico se produce igual.
+
+**2. No hay puntuación: hay descomposición en palabras y elección del modelo.**
+Puntuar exigiría al código un criterio de dominio que no tiene. En su lugar, el
+término se parte en palabras y se cruzan los resultados, ignorando las que no
+existen en esta planta. `graph_search` casa por fragmento **contiguo** del
+nombre, así que «pH primary» no encuentra nada aunque exista `PH213 Primary Line
+1 Outlet pH`; palabra a palabra, `pH`, `primary` y `outlet` lo encuentran las
+tres. Ignorar las que dan cero es lo que permite que una sospecha en castellano
+funcione: de «pH a la salida del primario» sobrevive `pH`, que basta.
+
+Se puede hacer porque una consulta al grafo cuesta **0,04 s** y una vuelta del
+modelo entre 5 y 15 —y además cuenta para la cuota del proveedor—. Elegir entre
+ocho candidatos con su ubicación delante es justo lo que el modelo hace bien.
+
+**Y la primera búsqueda la hace el código**, con el término que ya escribió la
+puerta, antes de gastar una vuelta. El caso normal se resuelve en **una sola**
+llamada: la de elegir.
+
+**Lo que sí se construyó como estaba previsto:** entra como un **cuarto bloque
+etiquetado** (`contexto_anadido`) y el prompt dice lo que es —un intento de
+emparejar lo que escribió una persona, no algo que ella nombrara—; y **se le
+enseña a la persona, siempre**. Esto último no es cosmética, es el guardarraíl:
+cada sospecha muestra qué fue de ella —*encontrado aquí*, *no existe en la
+planta*, *no se llegó a localizar* o *pendiente*—, y en «Qué ha cambiado» aparece
+una línea que **escribe el código**, marcada aparte del texto del modelo. Si el
+emparejamiento se equivoca, se ve.
+
+Las ramas que nunca pueden entrar son configuración, como la lista fija:
+`AF_RAMAS_NO_PROCESO`, con `Sankey Diagrams` y `PM_from_PME` por defecto.
+
+### Lo que enseñaron las ejecuciones reales
+
+Tres cosas, y ninguna la había cogido una suite:
+
+- **La puerta tiraba su propio acierto.** El prompt presenta cada sospecha como
+  `[1:1] ...` y el modelo copió el identificador con los corchetes; el código
+  comparaba contra `1:1`. Le enseñábamos el identificador de una forma y se lo
+  exigíamos de otra. Los dobles de prueba no lo vieron porque los escribimos
+  nosotros devolviendo lo que suponíamos.
+- **Pedírselo en el prompt no es autorizarlo.** Se le dijo «devuelve una sola
+  causa nueva» y devolvió dos; se le dijo «no repitas las que siguen abiertas» y
+  repitió una. Ninguna de las dos reglas se comprobaba en código. Ahora sí
+  (`autorizar_causas`).
+- **Un campo del trace que alimenta una decisión posterior tiene que sobrevivir
+  al camino del fallo.** `marcar_fallo()` guardaba el trace donde nadie lo lee,
+  así que una pasada que buscó y luego murió dejaba el expediente sin rastro de
+  haber buscado — y el siguiente reanálisis lo habría repetido.
+
+> El banco de pruebas sigue montado: `PH213 Primary Line 1 Outlet pH`, con una
+> causa descartada y una sospecha que señala la conductividad de la entrada de
+> planta — que **no existe** en el WWTP, así que ese caso termina honestamente en
+> *aquí no se mide eso*.
 
 ---
 
@@ -724,9 +774,13 @@ Fases, donde cada una sirve por sí sola:
    **tiempo restante de la ventana** (§5): con el reloj moviendo solo de pestaña sería una
    cuenta atrás hacia nada. Entra con la Fase 3, que es cuando vencer apaga el reanálisis.
 3. **La vuelta al modelo**, con las dos reglas: verificar en vez de razonar, y
-   «no lo sé» como resultado de primera clase. ✅ Entregada el 2026-09-28,
-   salvo el paso de búsqueda (§5 ter). Validada de punta a punta contra el AF, PI
-   y el modelo reales: se le dio una sospecha y **la contrastó y la rechazó**.
+   «no lo sé» como resultado de primera clase. ✅ Entregada el 2026-09-28.
+   Validada de punta a punta contra el AF, PI y el modelo reales: se le dio una
+   sospecha y **la contrastó y la rechazó**.
+   El paso de búsqueda (§5 ter) se entregó el 2026-09-29, y la cadena completa
+   —puerta, búsqueda, elección y alta en el contexto— se validó también contra
+   el AF y el modelo reales. Lo que queda por ver en producción es si el modelo
+   **usa** la variable que se le añade, que es otra pregunta.
 
 ### Dónde cortaba la Fase 2, y qué cambió al llegar la 3
 

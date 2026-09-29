@@ -40,6 +40,18 @@ Reclasificar **antes** de hacer cualquiera de estas cosas:
 4. Que se le den las tools de los MCP servers al modelo, convirtiéndolo en un agente.
 5. Que empiece a tratar datos que identifiquen a personas (turnos, operarios, firmas).
 
+**Sobre el punto 4 (revisado el 2026-09-29).** Sigue sin cruzarse, y conviene dejar escrito
+por qué se estuvo cerca. El paso de búsqueda del reanálisis le da al modelo **una** función,
+`graph_client.buscar_en_la_planta()`, que es **nuestra y de sólo lectura**: no es una tool de
+`afkg-graph-mcp`. La diferencia es la que separa este punto de su contrario — entre las tools
+de ese servidor está `refresh_graph`, de **escritura** sobre un Neo4j que comparten las demás
+demos, y no le es alcanzable. La planta, las ramas válidas, el número de resultados y el
+presupuesto de vueltas los fija el código; el modelo elige un sitio, no una ruta.
+
+Dicho de otro modo: el modelo decide **dentro** de lo que le dejamos, no decide qué le
+dejamos. Darle las tools del servidor, o cualquier herramienta de escritura, **sí** dispara
+la reclasificación. Ver `DISENO-INTERACCION-HUMANA.md` §5 ter y `AGENTS.md` §La excepción.
+
 ---
 
 ## 2. Propósito y límites (§5.1)
