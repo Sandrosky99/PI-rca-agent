@@ -1080,9 +1080,12 @@ Lo que **no** comparte con la ruta de Anthropic, a propósito: la clave, el mode
 suyos (`DEEPSEEK_*`). Que un proveedor herede la configuración de otro es el atajo que luego hace
 que nadie sepa con qué se generó un diagnóstico.
 
-⚠️ **La ruta de DeepSeek no está verificada contra la API real** (2026-09-30): está escrita desde
-su documentación y probada con dobles, porque no había clave disponible. La primera ejecución con
-clave debería mirarse con eso en mente.
+**Verificada contra la API real el 2026-09-30**: una llamada de humo y el prompt de la puerta de
+la búsqueda (3.650 caracteres, 43 variables), que exige JSON estricto. Respondió en 3,6 s con JSON
+válido y un razonamiento correcto — distinguió que `PH705` es del vertido y no de la salida del
+primario. Devolvió además `"sospecha": "[1:1]"` **con los corchetes**, igual que Gemini: eso
+confirma que aquel fallo no era una manía de un proveedor, sino lo que hace cualquier modelo al
+que se le enseña un identificador así.
 
 Por defecto `LLM_PROVIDER=gemini` con `gemini-2.5-flash`; `validate_config()` en `config.py` solo
 exige la API key del proveedor realmente seleccionado (no ambas).
@@ -1120,7 +1123,7 @@ condiciones salió el único diagnóstico real que había:
 |---|---|
 | `gemini-2.5-flash` | **Activado por defecto.** Se configura con `thinking_level` (`low`/`medium`/`high`) y no puede apagarse del todo; lo más bajo es `low`. Los tokens de pensamiento se facturan como salida. El código no fija el parámetro, así que usa el default: **activado**. |
 | `claude-opus-4-8` | Estaba **desactivado**: `_generate_anthropic()` no pasaba `thinking`, y en Opus 4.8 omitirlo significa ejecutar sin razonar. Desde el 2026-09-28 pasa `thinking: {type: "adaptive"}` (`ANTHROPIC_THINKING`, encendido por defecto). |
-| `deepseek-flash` | **No se pide.** `adaptive` es una forma de Claude 4.6+ y la documentación de DeepSeek muestra otra distinta (`{type: "enabled"}`) para su ruta compatible con OpenAI, sin decir qué acepta la de Anthropic. Mandar un parámetro sin comprobarlo es cómo se consiguen 400 en producción, así que se deja fuera hasta poder probarlo con una clave. Es el tercer estado de esta tabla y hay que tenerlo presente al comparar diagnósticos. |
+| `deepseek-flash` | **Activado por defecto, y no se configura.** Comprobado contra la API el 2026-09-30: la respuesta trae bloque `thinking` aunque no se mande nada. Acepta `adaptive` y `enabled` sin protestar, pero no cambian el resultado, así que no se manda ninguno. Misma categoría que `gemini-2.5-flash`. **Consecuencia:** `_texto_de()` es imprescindible en esta ruta desde el primer día — el primer bloque de la respuesta es el razonamiento, no el texto. |
 
 Consecuencia práctica de entonces: **los diagnósticos reales que existen se produjeron con
 razonamiento**, porque los hizo Gemini. Cambiar a `anthropic` con el código de antes habría dado

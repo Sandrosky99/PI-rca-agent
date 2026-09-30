@@ -226,19 +226,27 @@ def _generate_deepseek(system_prompt: str, user_message: str) -> str:
       - La clave, el modelo y la URL son suyos (DEEPSEEK_*). Que un proveedor
         herede la configuración de otro es el tipo de atajo que luego hace que
         nadie sepa con qué se generó un diagnóstico.
-      - No se pide razonamiento. La ruta de Anthropic manda
-        `thinking: {"type": "adaptive"}`, que es una forma de Claude 4.6+; la
-        documentación de DeepSeek muestra `{"type": "enabled"}` en su ruta
-        compatible con OpenAI y no dice qué acepta la de Anthropic. Mandar un
-        parámetro sin comprobarlo es cómo se consiguen 400 en producción, así
-        que se deja fuera hasta poder probarlo contra la API real.
+      - No se pide razonamiento, porque NO HACE FALTA: `deepseek-flash` razona
+        siempre. Comprobado contra la API el 2026-09-30 -- la respuesta trae
+        bloque 'thinking' aunque no se mande nada. Acepta `{"type": "adaptive"}`
+        y `{"type": "enabled"}` sin protestar, pero no cambian el resultado, así
+        que mandar uno sería ruido.
+
+        Eso deja a DeepSeek en la misma categoría que `gemini-2.5-flash` --
+        razona por defecto, no se configura -- y no en un tercer estado.
 
     Reintentos: los mismos que Anthropic, y por el mismo predicado -- las
     excepciones las levanta ese SDK, así que son sus clases. Incluye el 429.
 
-    NO VERIFICADO CONTRA LA API REAL (2026-09-30): escrito desde la
-    documentación de DeepSeek (https://api-docs.deepseek.com/guides/anthropic_api)
-    y probado con dobles. No había clave disponible.
+    OJO con _texto_de(): aquí es imprescindible desde el primer día. Como la
+    respuesta siempre trae razonamiento, el primer bloque NO es el texto, así
+    que `response.content[0].text` devolvería el pensamiento en lugar del JSON
+    y rompería el parseo de todos los pasos.
+
+    VERIFICADO CONTRA LA API REAL el 2026-09-30: una llamada de humo y el prompt
+    de la puerta de la búsqueda (3.650 caracteres, 43 variables), que exige JSON
+    estricto. Respondió en 3,6 s con JSON válido y un razonamiento correcto --
+    distinguió que PH705 es del vertido y no de la salida del primario.
     """
     import anthropic
 

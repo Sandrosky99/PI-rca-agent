@@ -86,6 +86,19 @@ huerfanas = [k for k in claves if k not in fuente]
 check(f"las {len(claves)} claves del ejemplo se leen en config.py",
       not huerfanas, f"sin uso: {huerfanas}")
 
+# Y AL REVES, que es por donde se coló el hueco: esta comprobación solo miraba
+# ejemplo -> config, así que una variable que config leyera y el ejemplo no
+# documentara pasaba inadvertida. El 2026-09-30 eran OCHO -- las dos de la
+# pantalla, las cinco de la búsqueda y el umbral de causas repetidas. Nada se
+# rompía, porque todas tienen valor por defecto; simplemente quien copiara la
+# plantilla no sabía que existían.
+lee = set(re.findall(r'os\.environ\.get\(\s*"([A-Z_][A-Z0-9_]*)"', fuente))
+lee |= set(re.findall(r'_entero\(\s*"([A-Z_][A-Z0-9_]*)"', fuente))
+lee.discard("X")   # sale de un ejemplo dentro del docstring de _entero
+sin_documentar = sorted(lee - set(claves))
+check("y toda variable que config.py lee esta en el ejemplo",
+      not sin_documentar, f"sin documentar: {sin_documentar}")
+
 print("\n=== 6. validate_config solo exige la clave del proveedor elegido ===")
 orig_prov, orig_g, orig_a = config.LLM_PROVIDER, config.GEMINI_API_KEY, config.ANTHROPIC_API_KEY
 config.LLM_PROVIDER, config.GEMINI_API_KEY, config.ANTHROPIC_API_KEY = "gemini", "x", ""
@@ -104,7 +117,12 @@ print("\n=== 12. Razonamiento extendido en la ruta de Anthropic ===")
 # Existe para IGUALAR LOS DOS PROVEEDORES: gemini-2.5-flash razona por defecto y
 # la llamada a Anthropic no lo pedia, asi que cambiar de proveedor cambiaba algo
 # mas que el proveedor.
-check("encendido por defecto", config.ANTHROPIC_THINKING is True, config.ANTHROPIC_THINKING)
+# Contra el fuente, no contra config.ANTHROPIC_THINKING: eso lee el .env de
+# quien ejecute la suite, y quien lo tenga apagado veria fallar una prueba que
+# habla del valor POR DEFECTO.
+check("encendido por defecto",
+      'os.environ.get("ANTHROPIC_THINKING") or "true"'
+      in (RAIZ / "config.py").read_text(encoding="utf-8"))
 fuente = (RAIZ / "llm_client.py").read_text(encoding="utf-8")
 # "adaptive" y no un presupuesto de tokens: en claude-opus-4-8 budget_tokens ya
 # no se acepta -- la API responde 400 --, asi que la forma vieja no es solo peor,
@@ -213,17 +231,25 @@ check("clave propia", "config.DEEPSEEK_API_KEY" in cuerpo)
 check("modelo propio", "config.DEEPSEEK_MODEL" in cuerpo)
 check("y su base_url", "config.DEEPSEEK_BASE_URL" in cuerpo)
 check("NO hereda nada de ANTHROPIC_", "config.ANTHROPIC" not in cuerpo, cuerpo[:200])
-# El endpoint por defecto es el que documenta DeepSeek.
+# Los valores POR DEFECTO se comprueban contra el fuente de config.py, no
+# contra config.DEEPSEEK_*: eso ultimo lee el .env de quien ejecute la suite, y
+# una prueba que dependa del .env falla en una maquina y pasa en otra -- es la
+# misma razon por la que existe el aislamiento de las suites del webhook.
+#
+# Y no se imprime NUNCA el valor leido. El 2026-09-30 esta comprobacion tenia
+# config.DEEPSEEK_MODEL como detalle del fallo; una clave de API pegada por
+# error en esa variable acabo escrita en la salida de la consola. Un check sobre
+# configuracion no puede usar el valor real como mensaje de error.
+cfg = (RAIZ / "config.py").read_text(encoding="utf-8")
 check("el endpoint por defecto es el compatible con Anthropic",
-      config.DEEPSEEK_BASE_URL == "https://api.deepseek.com/anthropic",
-      config.DEEPSEEK_BASE_URL)
+      'or "https://api.deepseek.com/anthropic"' in cfg)
 check("y el modelo por defecto es el rapido",
-      config.DEEPSEEK_MODEL == "deepseek-flash", config.DEEPSEEK_MODEL)
+      'DEEPSEEK_MODEL: str = os.environ.get("DEEPSEEK_MODEL") or "deepseek-flash"' in cfg)
 
-# NO se manda razonamiento: la ruta de Anthropic usa {"type": "adaptive"}, que es
-# una forma de Claude 4.6+, y la documentacion de DeepSeek muestra otra distinta
-# para su ruta de OpenAI sin decir que acepta la de Anthropic. Mandar un
-# parametro sin comprobarlo es como se consiguen 400 en produccion.
+# NO se manda razonamiento porque NO HACE FALTA: comprobado contra la API el
+# 2026-09-30, deepseek-flash razona SIEMPRE -- la respuesta trae bloque
+# 'thinking' aunque no se mande nada. Acepta "adaptive" y "enabled" sin
+# protestar, pero no cambian el resultado.
 # Se mira LA LLAMADA, no el texto: el docstring nombra 'thinking' justo para
 # explicar por que no se manda.
 llamada = cuerpo[cuerpo.index("client.messages.create("):]
@@ -232,8 +258,19 @@ check("no se manda thinking sin haberlo comprobado",
       "thinking" not in llamada and "extra" not in llamada, llamada)
 check("y si los cuatro parametros que DeepSeek documenta",
       all(x in llamada for x in ("model=", "max_tokens=", "system=", "messages=")), llamada)
-# Y la funcion dice que no esta verificada contra la API real.
-check("consta que no esta verificada en vivo", "NO VERIFICADO CONTRA LA API REAL" in cuerpo)
+# Y consta cuando se verifico contra la API real, que no es lo mismo que pasar
+# las pruebas con dobles.
+check("consta la verificacion en vivo", "VERIFICADO CONTRA LA API REAL" in cuerpo)
+# Como la respuesta SIEMPRE trae razonamiento, el primer bloque no es el texto:
+# content[0].text devolveria el pensamiento en vez del JSON. Por eso esta ruta
+# tiene que pasar por _texto_de() si o si.
+# Se mira el CODIGO, no el docstring: ahi 'content[0]' aparece justo para
+# explicar por que no se usa. (Es la cuarta vez hoy que una comprobacion busca
+# una palabra en texto libre y la encuentra en el comentario que la desaconseja;
+# la regla es afirmar sobre estructura, no sobre prosa.)
+codigo = cuerpo.split('"""')[2] if cuerpo.count('"""') >= 2 else cuerpo
+check("la respuesta se lee con _texto_de, no por indice",
+      "_texto_de(response)" in codigo and "content[0]" not in codigo, codigo[:200])
 
 # Reintentos: los mismos, y por el mismo predicado -- las excepciones las levanta
 # ese SDK, asi que son sus clases. Incluye el 429.
