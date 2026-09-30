@@ -9,7 +9,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+RAIZ = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(RAIZ))
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 import config
 
@@ -128,6 +129,35 @@ check("ningun mensaje supera el limite del spec", not largos, f"{len(largos)} me
 
 import shutil
 shutil.rmtree(TMP, ignore_errors=True)
+print("\n=== Los derivados del .env no pueden llegar a git ===")
+# El .gitignore usaba .env.bak*, con el argumento -- bueno -- de que
+# .env.example si debe versionarse. La solucion era insuficiente: protegia solo
+# a quien se acordara de usar ESE nombre. El 2026-09-30 un respaldo llamado
+# .env.respaldo, con la clave de Gemini dentro, quedo fuera del ignore y visible
+# para `git add -A`. No se commiteo, pero solo porque nadie hizo add.
+ignore = (RAIZ / ".gitignore").read_text(encoding="utf-8")
+check("se ignora TODO derivado del .env", ".env.*" in ignore, ignore[:200])
+check("y la plantilla se exceptua", "!.env.example" in ignore)
+check("el .env a secas tambien", any(l.strip() == ".env" for l in ignore.splitlines()))
+
+# Lo que de verdad importa: que git este de acuerdo. Se le pregunta a el, no al
+# fichero -- el orden de los patrones y las negaciones tienen reglas propias.
+import subprocess
+def ignorado(nombre):
+    return subprocess.run(["git", "check-ignore", "-q", nombre],
+                          cwd=RAIZ).returncode == 0
+
+for nombre in (".env", ".env.respaldo", ".env.copia", ".env.bak-20260908",
+               ".env.local", ".env.produccion"):
+    check("git ignora %s" % nombre, ignorado(nombre))
+check("pero NO .env.example, que es la plantilla", not ignorado(".env.example"))
+
+# Y que ninguno este ya versionado por accidente.
+seguidos = subprocess.run(["git", "ls-files", ".env*"], cwd=RAIZ,
+                          capture_output=True, text=True).stdout.split()
+check("ningun derivado del .env esta versionado",
+      seguidos in ([], [".env.example"]), seguidos)
+
 print("\n" + "=" * 62)
 if fallos:
     print(f"FALLOS: {len(fallos)} -> {fallos}")
