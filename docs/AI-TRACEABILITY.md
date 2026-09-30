@@ -102,14 +102,15 @@ proceso y nombres de activo.
 
 ## 6. Verificación de dependencias introducidas con asistencia de IA (§1.3)
 
-Revisadas el 2026-09-07. Todas fijadas a versión exacta en `requirements.txt` (base §5).
+Revisadas el 2026-09-07, repasadas el 2026-09-30. Todas fijadas a versión exacta en
+`requirements.txt` (base §5).
 
 | Dependencia | Versión | Licencia | Valoración |
 |---|---|---|---|
 | `fastapi` | 0.138.2 | MIT | Mantenimiento muy activo, adopción masiva |
 | `uvicorn[standard]` | 0.49.0 | BSD-3-Clause | Servidor ASGI de referencia, mismo ecosistema |
 | `google-genai` | 2.10.0 | Apache-2.0 | SDK oficial de Google |
-| `anthropic` | 0.115.0 | MIT | SDK oficial de Anthropic |
+| `anthropic` | 0.115.0 | MIT | SDK oficial de Anthropic. Sirve a **dos** proveedores: `LLM_PROVIDER=anthropic` y `LLM_PROVIDER=deepseek`, que publica un endpoint compatible con ese protocolo. Reutilizarlo fue deliberado: DeepSeek también admite el SDK de OpenAI, y añadirlo habría metido una novena dependencia para no ganar nada |
 | `python-dotenv` | 1.2.2 | BSD-3-Clause | Estándar de facto para `.env` |
 | `pytz` | 2026.2 | MIT | Misma versión que usa `aveva-pi-mcp`, por coherencia de fechas |
 | `mcp` | 1.28.1 | MIT | SDK oficial de Model Context Protocol |
@@ -117,6 +118,10 @@ Revisadas el 2026-09-07. Todas fijadas a versión exacta en `requirements.txt` (
 
 Todas con licencia permisiva y compatible con Apache-2.0 (la de este recurso). Ninguna
 copyleft.
+
+**Siguen siendo ocho después de añadir DeepSeek** (2026-09-30). Merece la pena dejarlo escrito
+como criterio: un proveedor nuevo no justifica por sí solo una dependencia nueva si el protocolo
+que habla ya está cubierto por una que está declarada y revisada.
 
 **Binario de terceros (no es dependencia Python):**
 

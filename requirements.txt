@@ -18,8 +18,12 @@ uvicorn[standard]==0.49.0
 # Proveedor de LLM por defecto del agente (ver llm_client.py y LLM_PROVIDER en .env).
 google-genai==2.10.0
 
-# SDK oficial de Anthropic para llamar al modelo Claude desde Python.
-# Proveedor alternativo del agente (LLM_PROVIDER=anthropic en .env).
+# SDK oficial de Anthropic. Sirve a DOS proveedores, no a uno:
+#   LLM_PROVIDER=anthropic   llama a Claude
+#   LLM_PROVIDER=deepseek    llama a DeepSeek, que publica un endpoint compatible
+#                            con este mismo protocolo (otra base_url y nada mas)
+# DeepSeek tambien admite el SDK de OpenAI; se descarto para no anadir una
+# novena dependencia sin ganar nada. Ver AI-TRACEABILITY.md seccion 6.
 anthropic==0.115.0
 
 # python-dotenv: carga las variables de configuración desde el fichero .env

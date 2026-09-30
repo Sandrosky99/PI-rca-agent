@@ -498,7 +498,7 @@ PI-rca-agent/
 - **Windows Server 2019** (o cualquier Windows con `uv`)
 - Acceso de red a **PI Web API** (`https://datainfra/piwebapi`)
 - **AVEVA PI System** con el módulo **PI Notifications** configurado
-- Clave de API de **Google (Gemini)** o de **Anthropic**, según el proveedor elegido en `LLM_PROVIDER`
+- Clave de API de **Google (Gemini)**, **Anthropic** o **DeepSeek**, según el proveedor elegido en `LLM_PROVIDER`
 - Los servidores MCP `afkg-graph-mcp` y `aveva-pi-mcp` disponibles en la misma máquina (se lanzan como subproceso, no hace falta arrancarlos a mano)
 
 ---
@@ -543,10 +543,13 @@ Todas las opciones se configuran en `.env`. Copia `.env.example` como punto de p
 
 | Variable | Obligatoria | Descripción | Por defecto |
 |---|---|---|---|
-| `LLM_PROVIDER` | No | `gemini` o `anthropic` | `gemini` |
+| `LLM_PROVIDER` | No | `gemini`, `anthropic` o `deepseek` | `gemini` |
 | `GEMINI_API_KEY` | ✅ si `LLM_PROVIDER=gemini` | Clave de API de Google — [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | — |
 | `GEMINI_MODEL` | No | Modelo de Gemini. `gemini-2.5-pro` requiere facturación activa en Google Cloud; sin ella devuelve un 429 de cuota 0. | `gemini-2.5-flash` |
 | `ANTHROPIC_API_KEY` | ✅ si `LLM_PROVIDER=anthropic` | Clave de API de Anthropic — [console.anthropic.com](https://console.anthropic.com/settings/keys) | — |
+| `DEEPSEEK_API_KEY` | ✅ si `LLM_PROVIDER=deepseek` | Clave de API de DeepSeek — [platform.deepseek.com](https://platform.deepseek.com/api_keys) | — |
+| `DEEPSEEK_MODEL` | No | Modelo de DeepSeek. El grande es `deepseek-v4-pro`. | `deepseek-flash` |
+| `DEEPSEEK_BASE_URL` | No | Endpoint de DeepSeek compatible con el protocolo de Anthropic. Solo se toca si pasas por una pasarela interna. | `https://api.deepseek.com/anthropic` |
 | `ANTHROPIC_MODEL` | No | Modelo de Claude | `claude-opus-4-8` |
 | `LLM_MAX_TOKENS` | No | Techo de tokens de la respuesta del modelo, para ambos proveedores. Es un techo duro: si se alcanza, el JSON se trunca y el análisis se pierde. | `16000` |
 

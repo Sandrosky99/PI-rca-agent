@@ -58,7 +58,7 @@ def _entero(nombre: str, por_defecto: int) -> int:
 # sin conocer qué proveedor hay detrás. Solo se exige la clave de API del
 # proveedor realmente seleccionado (ver validate_config()).
 
-# "gemini" (por defecto) o "anthropic".
+# "gemini" (por defecto), "anthropic" o "deepseek".
 LLM_PROVIDER: str = os.environ.get("LLM_PROVIDER", "gemini").strip().lower()
 
 # Clave de API de Google (Gemini). Obligatoria si LLM_PROVIDER=gemini.
@@ -100,6 +100,32 @@ ANTHROPIC_MODEL: str = os.environ.get("ANTHROPIC_MODEL") or "claude-opus-4-8"
 ANTHROPIC_THINKING: bool = (
     os.environ.get("ANTHROPIC_THINKING") or "true"
 ).strip().lower() in ("1", "true", "yes")
+
+# -----------------------------------------------------------------------------
+# DeepSeek (LLM_PROVIDER=deepseek)
+# -----------------------------------------------------------------------------
+# Se habla con el SDK de Anthropic, no con uno propio: DeepSeek publica un
+# endpoint compatible con el protocolo de Anthropic y la llamada tiene la misma
+# forma -- model, max_tokens, system, messages. Eso evita una dependencia nueva,
+# que en este proyecto no es gratis: cada una lleva revisión de mantenimiento,
+# adopción y licencia (izSpecs §1.3, AI-TRACEABILITY.md §6).
+#
+# Clave de API de DeepSeek. Obligatoria solo si LLM_PROVIDER=deepseek.
+# Se obtiene en https://platform.deepseek.com/api_keys
+DEEPSEEK_API_KEY: str = os.environ.get("DEEPSEEK_API_KEY", "")
+
+# Modelo de DeepSeek. Por defecto el rápido, por el mismo criterio que hace que
+# el de Gemini sea 'flash' y no 'pro': lo caro se elige a propósito.
+#   deepseek-flash    rápido y barato
+#   deepseek-v4-pro   el grande
+DEEPSEEK_MODEL: str = os.environ.get("DEEPSEEK_MODEL") or "deepseek-flash"
+
+# El endpoint compatible con Anthropic. Se deja configurable por si mañana
+# cambia o hay que pasar por una pasarela interna; el valor por defecto es el
+# que documenta DeepSeek (https://api-docs.deepseek.com/guides/anthropic_api).
+DEEPSEEK_BASE_URL: str = (
+    os.environ.get("DEEPSEEK_BASE_URL") or "https://api.deepseek.com/anthropic"
+)
 
 # Techo de tokens de la respuesta del modelo, para AMBOS proveedores.
 #
@@ -605,10 +631,14 @@ def validate_config() -> list[str]:
     if LLM_PROVIDER == "gemini":
         if not GEMINI_API_KEY:
             missing.append("GEMINI_API_KEY")
+    elif LLM_PROVIDER == "deepseek":
+        if not DEEPSEEK_API_KEY:
+            missing.append("DEEPSEEK_API_KEY")
     elif LLM_PROVIDER == "anthropic":
         if not ANTHROPIC_API_KEY:
             missing.append("ANTHROPIC_API_KEY")
     else:
-        missing.append(f"LLM_PROVIDER (valor invalido: '{LLM_PROVIDER}', usa 'gemini' o 'anthropic')")
+        missing.append(f"LLM_PROVIDER (valor invalido: '{LLM_PROVIDER}', "
+                       f"usa 'gemini', 'anthropic' o 'deepseek')")
 
     return missing

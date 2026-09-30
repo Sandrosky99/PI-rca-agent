@@ -29,7 +29,8 @@ llm_client.py — Capa de abstracción sobre el proveedor de LLM (Gemini / Anthr
   una sola variable de entorno.
 
 ¿Cómo se elige el proveedor?
-  Variable de entorno LLM_PROVIDER ("gemini" por defecto, o "anthropic").
+  Variable de entorno LLM_PROVIDER: "gemini" (por defecto), "anthropic" o
+  "deepseek". El resto del workflow no sabe cuál hay detrás.
 
 ¿Qué pasa si el proveedor falla?
   Visto en producción el 2026-07-28: Gemini devolvió un 503 "high demand"
@@ -67,18 +68,21 @@ def generate(system_prompt: str, user_message: str) -> str:
         La respuesta del modelo como texto plano.
 
     Raises:
-        ValueError: si LLM_PROVIDER no es "gemini" ni "anthropic".
+        ValueError: si LLM_PROVIDER no es "gemini", "anthropic" ni "deepseek".
         LLMGenerationError: si el proveedor falla tras agotar los reintentos
                              (o falla con un error no transitorio).
     """
     provider = config.LLM_PROVIDER
-    if provider not in ("gemini", "anthropic"):
+    if provider not in ("gemini", "anthropic", "deepseek"):
         raise ValueError(
-            f"LLM_PROVIDER desconocido: '{provider}' (valores válidos: 'gemini', 'anthropic')"
+            f"LLM_PROVIDER desconocido: '{provider}' "
+            f"(valores válidos: 'gemini', 'anthropic', 'deepseek')"
         )
     try:
         if provider == "gemini":
             return _generate_gemini(system_prompt, user_message)
+        if provider == "deepseek":
+            return _generate_deepseek(system_prompt, user_message)
         return _generate_anthropic(system_prompt, user_message)
     except Exception as exc:
         raise LLMGenerationError(f"El proveedor '{provider}' no respondió: {exc}") from exc
@@ -198,6 +202,59 @@ def _generate_anthropic(system_prompt: str, user_message: str) -> str:
         system=system_prompt,
         messages=[{"role": "user", "content": user_message}],
         **extra,
+    )
+    return _texto_de(response)
+
+
+@tenacity.retry(retry=tenacity.retry_if_exception(_is_transient_anthropic_error), **_RETRY_COMMON)
+def _generate_deepseek(system_prompt: str, user_message: str) -> str:
+    """Llama a DeepSeek a través de su endpoint compatible con Anthropic.
+
+    No hay SDK propio ni hace falta: DeepSeek publica un endpoint que habla el
+    protocolo de Anthropic, y la llamada tiene exactamente la misma forma --
+    model, max_tokens, system, messages. Basta con apuntar el cliente que ya
+    tenemos a otra base_url.
+
+    Se hace así y no con el SDK de OpenAI -- que DeepSeek también admite --
+    porque añadir una dependencia en este proyecto no es gratis: cada una lleva
+    revisión de mantenimiento, adopción y licencia (izSpecs §1.3,
+    AI-TRACEABILITY.md §6). Reutilizar `anthropic`, que ya está declarado y
+    revisado, evita ese trabajo sin perder nada.
+
+    Lo que NO se comparte con la ruta de Anthropic, a propósito:
+
+      - La clave, el modelo y la URL son suyos (DEEPSEEK_*). Que un proveedor
+        herede la configuración de otro es el tipo de atajo que luego hace que
+        nadie sepa con qué se generó un diagnóstico.
+      - No se pide razonamiento. La ruta de Anthropic manda
+        `thinking: {"type": "adaptive"}`, que es una forma de Claude 4.6+; la
+        documentación de DeepSeek muestra `{"type": "enabled"}` en su ruta
+        compatible con OpenAI y no dice qué acepta la de Anthropic. Mandar un
+        parámetro sin comprobarlo es cómo se consiguen 400 en producción, así
+        que se deja fuera hasta poder probarlo contra la API real.
+
+    Reintentos: los mismos que Anthropic, y por el mismo predicado -- las
+    excepciones las levanta ese SDK, así que son sus clases. Incluye el 429.
+
+    NO VERIFICADO CONTRA LA API REAL (2026-09-30): escrito desde la
+    documentación de DeepSeek (https://api-docs.deepseek.com/guides/anthropic_api)
+    y probado con dobles. No había clave disponible.
+    """
+    import anthropic
+
+    # max_retries=0 por lo mismo que en la ruta de Anthropic: la política de
+    # reintentos la tiene tenacity, y dos políticas encajadas dan nueve intentos.
+    client = anthropic.Anthropic(
+        api_key=config.DEEPSEEK_API_KEY,
+        base_url=config.DEEPSEEK_BASE_URL,
+        timeout=config.LLM_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
+    response = client.messages.create(
+        model=config.DEEPSEEK_MODEL,
+        max_tokens=config.LLM_MAX_TOKENS,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_message}],
     )
     return _texto_de(response)
 

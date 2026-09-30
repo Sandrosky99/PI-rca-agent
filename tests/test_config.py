@@ -188,6 +188,111 @@ check("Anthropic ya lo hacia", "RateLimitError" in
 check("la ventana aguanta mas de un minuto",
       config.LLM_RETRY_WINDOW_SECONDS >= 60, config.LLM_RETRY_WINDOW_SECONDS)
 
+print("\n=== 14. DeepSeek como tercer proveedor ===")
+# Se habla con el SDK de Anthropic apuntado a otra base_url: DeepSeek publica un
+# endpoint que habla ese protocolo y la llamada tiene la misma forma. Asi no
+# entra una dependencia nueva, que aqui no es gratis -- cada una lleva revision
+# de mantenimiento, adopcion y licencia (izSpecs 1.3).
+# Se miran las lineas que DECLARAN dependencia, no el texto del fichero: los
+# comentarios nombran a DeepSeek justo para explicar que no hace falta una.
+requisitos = (RAIZ / "requirements.txt").read_text(encoding="utf-8")
+declaradas = sorted(l.split("==")[0].strip() for l in requisitos.splitlines()
+                    if "==" in l and not l.strip().startswith("#"))
+check("NO se anade dependencia nueva", len(declaradas) == 8, declaradas)
+check("y ninguna es de deepseek ni de openai",
+      not any("deepseek" in d or "openai" in d for d in declaradas), declaradas)
+check("se reutiliza el SDK que ya estaba", "anthropic" in declaradas, declaradas)
+
+fuente = (RAIZ / "llm_client.py").read_text(encoding="utf-8")
+i = fuente.index("def _generate_deepseek")
+cuerpo = fuente[i:fuente.index("def _texto_de", i)]
+
+# Configuracion PROPIA. Que un proveedor herede la de otro es como se acaba sin
+# saber con que se genero un diagnostico.
+check("clave propia", "config.DEEPSEEK_API_KEY" in cuerpo)
+check("modelo propio", "config.DEEPSEEK_MODEL" in cuerpo)
+check("y su base_url", "config.DEEPSEEK_BASE_URL" in cuerpo)
+check("NO hereda nada de ANTHROPIC_", "config.ANTHROPIC" not in cuerpo, cuerpo[:200])
+# El endpoint por defecto es el que documenta DeepSeek.
+check("el endpoint por defecto es el compatible con Anthropic",
+      config.DEEPSEEK_BASE_URL == "https://api.deepseek.com/anthropic",
+      config.DEEPSEEK_BASE_URL)
+check("y el modelo por defecto es el rapido",
+      config.DEEPSEEK_MODEL == "deepseek-flash", config.DEEPSEEK_MODEL)
+
+# NO se manda razonamiento: la ruta de Anthropic usa {"type": "adaptive"}, que es
+# una forma de Claude 4.6+, y la documentacion de DeepSeek muestra otra distinta
+# para su ruta de OpenAI sin decir que acepta la de Anthropic. Mandar un
+# parametro sin comprobarlo es como se consiguen 400 en produccion.
+# Se mira LA LLAMADA, no el texto: el docstring nombra 'thinking' justo para
+# explicar por que no se manda.
+llamada = cuerpo[cuerpo.index("client.messages.create("):]
+llamada = llamada[:llamada.index("return")]
+check("no se manda thinking sin haberlo comprobado",
+      "thinking" not in llamada and "extra" not in llamada, llamada)
+check("y si los cuatro parametros que DeepSeek documenta",
+      all(x in llamada for x in ("model=", "max_tokens=", "system=", "messages=")), llamada)
+# Y la funcion dice que no esta verificada contra la API real.
+check("consta que no esta verificada en vivo", "NO VERIFICADO CONTRA LA API REAL" in cuerpo)
+
+# Reintentos: los mismos, y por el mismo predicado -- las excepciones las levanta
+# ese SDK, asi que son sus clases. Incluye el 429.
+# El decorador va en la linea justo encima del def. Las excepciones las levanta
+# el SDK de Anthropic -- es el que hace la llamada -- asi que el predicado es el
+# suyo, y eso incluye el 429.
+lineas = fuente.split(chr(10))
+n = next(k for k, x in enumerate(lineas) if x.startswith("def _generate_deepseek"))
+check("reintenta, con el predicado de Anthropic",
+      "_is_transient_anthropic_error" in lineas[n - 1] and "_RETRY_COMMON" in lineas[n - 1],
+      lineas[n - 1])
+
+print("\n=== 14b. La eleccion es del usuario, en el .env ===")
+check("el proveedor se acepta", "deepseek" in fuente and '"deepseek"' in fuente)
+ejemplo = (RAIZ / ".env.example").read_text(encoding="utf-8")
+for clave in ("DEEPSEEK_API_KEY", "DEEPSEEK_MODEL", "DEEPSEEK_BASE_URL"):
+    check("%s esta en el .env.example" % clave, clave + "=" in ejemplo)
+check("y el selector menciona los tres", '"deepseek"' in ejemplo and '"anthropic"' in ejemplo)
+
+print("\n=== 14c. validate_config solo exige SU clave ===")
+guardado = (config.LLM_PROVIDER, config.DEEPSEEK_API_KEY)
+try:
+    config.LLM_PROVIDER, config.DEEPSEEK_API_KEY = "deepseek", ""
+    falta = config.validate_config()
+    check("sin clave la reclama", "DEEPSEEK_API_KEY" in falta, falta)
+    check("y no pide las de los otros",
+          not any(k.startswith(("GEMINI", "ANTHROPIC")) for k in falta), falta)
+    config.DEEPSEEK_API_KEY = "sk-loquesea"
+    check("con clave no falta nada del LLM",
+          not any("API_KEY" in k for k in config.validate_config()), config.validate_config())
+    config.LLM_PROVIDER = "gemini"
+    check("y con gemini no exige la de deepseek",
+          "DEEPSEEK_API_KEY" not in config.validate_config())
+    config.LLM_PROVIDER = "otracosa"
+    check("un proveedor desconocido nombra los tres",
+          all(x in str(config.validate_config()) for x in ("gemini", "anthropic", "deepseek")),
+          config.validate_config())
+finally:
+    config.LLM_PROVIDER, config.DEEPSEEK_API_KEY = guardado
+
+print("\n=== 14d. El despachador lo enruta ===")
+llamadas = []
+guardado = (llm_client._generate_deepseek, config.LLM_PROVIDER)
+try:
+    llm_client._generate_deepseek = lambda sp, um: llamadas.append(("deepseek", sp, um)) or "OK"
+    config.LLM_PROVIDER = "deepseek"
+    check("responde", llm_client.generate("sistema", "usuario") == "OK")
+    check("por la rama de deepseek", llamadas and llamadas[0][0] == "deepseek", llamadas)
+    check("con el system prompt y el mensaje", llamadas[0][1:] == ("sistema", "usuario"), llamadas)
+    config.LLM_PROVIDER = "marciano"
+    try:
+        llm_client.generate("a", "b")
+        check("un proveedor invalido revienta", False, "no lanzo nada")
+    except ValueError as exc:
+        check("un proveedor invalido revienta, y dice cuales valen",
+              "deepseek" in str(exc), str(exc))
+finally:
+    llm_client._generate_deepseek, config.LLM_PROVIDER = guardado
+
 print("\n" + "=" * 62)
 if fallos:
     print(f"FALLOS: {len(fallos)} -> {fallos}")

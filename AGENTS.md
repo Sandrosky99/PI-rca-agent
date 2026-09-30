@@ -1058,7 +1058,7 @@ Confirmado el 2026-07-02 (con `StartTime` desde las 09:16 UTC). PI envía este J
 ## Proveedor de LLM
 
 `llm_client.py` es una capa de abstracción con una única función `generate(system_prompt,
-user_message) -> str` que llama a Gemini o a Claude según `LLM_PROVIDER` (`.env`), sin que el resto
+user_message) -> str` que llama a Gemini, a Claude o a DeepSeek según `LLM_PROVIDER` (`.env`), sin que el resto
 del workflow conozca la diferencia. Anthropic y Google **no** comparten un estándar de API, por eso
 cada proveedor tiene su propia función interna:
 
@@ -1068,6 +1068,21 @@ cada proveedor tiene su propia función interna:
 | System prompt | parámetro `system` | `GenerateContentConfig(system_instruction=...)` |
 | Mensaje | `messages=[{"role": "user", "content": "..."}]` | `contents="..."` |
 | Respuesta | `response.content[0].text` | `response.text` |
+
+**DeepSeek (desde el 2026-09-30) no trae SDK propio, y es deliberado.** Publica un endpoint que
+habla el **protocolo de Anthropic** —`https://api.deepseek.com/anthropic`— con la misma forma de
+llamada (`model`, `max_tokens`, `system`, `messages`), así que se usa el cliente `anthropic` que ya
+estaba declarado, apuntado a otra `base_url`. También admite el SDK de OpenAI; se descartó porque
+añadir una dependencia aquí no es gratis: cada una lleva revisión de mantenimiento, adopción y
+licencia (izSpecs §1.3, `AI-TRACEABILITY.md` §6).
+
+Lo que **no** comparte con la ruta de Anthropic, a propósito: la clave, el modelo y la URL son
+suyos (`DEEPSEEK_*`). Que un proveedor herede la configuración de otro es el atajo que luego hace
+que nadie sepa con qué se generó un diagnóstico.
+
+⚠️ **La ruta de DeepSeek no está verificada contra la API real** (2026-09-30): está escrita desde
+su documentación y probada con dobles, porque no había clave disponible. La primera ejecución con
+clave debería mirarse con eso en mente.
 
 Por defecto `LLM_PROVIDER=gemini` con `gemini-2.5-flash`; `validate_config()` en `config.py` solo
 exige la API key del proveedor realmente seleccionado (no ambas).
@@ -1105,6 +1120,7 @@ condiciones salió el único diagnóstico real que había:
 |---|---|
 | `gemini-2.5-flash` | **Activado por defecto.** Se configura con `thinking_level` (`low`/`medium`/`high`) y no puede apagarse del todo; lo más bajo es `low`. Los tokens de pensamiento se facturan como salida. El código no fija el parámetro, así que usa el default: **activado**. |
 | `claude-opus-4-8` | Estaba **desactivado**: `_generate_anthropic()` no pasaba `thinking`, y en Opus 4.8 omitirlo significa ejecutar sin razonar. Desde el 2026-09-28 pasa `thinking: {type: "adaptive"}` (`ANTHROPIC_THINKING`, encendido por defecto). |
+| `deepseek-flash` | **No se pide.** `adaptive` es una forma de Claude 4.6+ y la documentación de DeepSeek muestra otra distinta (`{type: "enabled"}`) para su ruta compatible con OpenAI, sin decir qué acepta la de Anthropic. Mandar un parámetro sin comprobarlo es cómo se consiguen 400 en producción, así que se deja fuera hasta poder probarlo con una clave. Es el tercer estado de esta tabla y hay que tenerlo presente al comparar diagnósticos. |
 
 Consecuencia práctica de entonces: **los diagnósticos reales que existen se produjeron con
 razonamiento**, porque los hizo Gemini. Cambiar a `anthropic` con el código de antes habría dado
