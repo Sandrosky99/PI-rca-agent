@@ -74,7 +74,7 @@ check("config carga sin excepcion", proc.returncode == 0,
 if proc.returncode == 0:
     partes = proc.stdout.split()
     check("aplica los valores por defecto documentados",
-          partes[1:6] == ["8090", "24", "16000", "20", "40"], proc.stdout.strip())
+          partes[1:6] == ["8090", "24", "32000", "20", "40"], proc.stdout.strip())
 
 print("\n=== 5. Todas las variables del ejemplo estan contempladas en config.py ===")
 import re
@@ -329,6 +329,86 @@ try:
               "deepseek" in str(exc), str(exc))
 finally:
     llm_client._generate_deepseek, config.LLM_PROVIDER = guardado
+
+print("\n=== 15. El techo de tokens cubre el RAZONAMIENTO, no solo la respuesta ===")
+# El Step 6 de un reanalisis real murio con stop_reason=max_tokens y un UNICO
+# bloque 'thinking': gasto el techo entero pensando y no llego a escribir el
+# diagnostico, habiendo pagado ya los cinco pasos anteriores.
+#
+# Repetido contra ese mismo prompt (79.024 caracteres, el mas grande que produce
+# el workflow) salio bien con 9.608 tokens de salida. Asi que 16000 no era
+# absurdo, era JUSTO -- 1,7x sobre un caso normal -- y lo que varia de una vuelta
+# a otra es cuanto razona el modelo.
+check("el techo da mas de 3x sobre lo medido", config.LLM_MAX_TOKENS >= 3 * 9608,
+      config.LLM_MAX_TOKENS)
+cfg = (RAIZ / "config.py").read_text(encoding="utf-8")
+check("y el porque esta escrito, con la medida",
+      "9.608" in cfg and "razonamiento" in cfg)
+
+# El aviso tiene que decir QUE paso y QUE hacer, sin mandar a una palanca que no
+# aplica: deepseek-flash razona siempre y ANTHROPIC_THINKING no lo apaga.
+# Se provoca el fallo y se lee EL MENSAJE MONTADO, no el fuente: en el codigo el
+# texto va partido entre literales, asi que buscarlo ahi encuentra trozos y no
+# frases. Lo que importa es lo que acaba leyendo una persona.
+class _Bloque:
+    type = "thinking"
+
+
+class _Respuesta:
+    content = [_Bloque()]
+    stop_reason = "max_tokens"
+
+
+try:
+    llm_client._texto_de(_Respuesta())
+    aviso = ""
+    check("sin texto se avisa", False, "no lanzo nada")
+except llm_client.LLMGenerationError as exc:
+    aviso = str(exc)
+    check("sin texto se avisa", True)
+
+check("dice el motivo de parada", "max_tokens" in aviso, aviso)
+check("y que solo vino un bloque de razonamiento", "thinking" in aviso, aviso)
+check("distingue quedarse sin espacio RAZONANDO", "RAZONANDO" in aviso, aviso)
+check("dice que el techo cubre las dos cosas",
+      "razonamiento y la respuesta juntos" in aviso, aviso)
+check("y que apagarlo solo vale en la ruta de Anthropic",
+      "solo sirve en la ruta de Anthropic" in aviso, aviso)
+# Decia "Claude no devolvio texto" cuando ya son tres proveedores.
+check("no nombra a un proveedor como si fuera el unico",
+      "Claude no" not in aviso, aviso)
+
+print("\n=== 16. uv se resuelve a ruta absoluta, no se confia al PATH ===")
+# El 2026-10-08 una notificacion REAL murio con FileNotFoundError [WinError 2]:
+# el proceso del webhook llevaba encendido desde antes de que la carpeta
+# .local/bin del usuario entrara en el PATH, asi que no encontraba 'uv' y no
+# podia lanzar los servidores MCP. Un servicio de larga vida hereda el entorno
+# del momento en que arranco: "esta en mi terminal" no significa que este en el
+# suyo.
+check("UV_BINARY existe", hasattr(config, "UV_BINARY"))
+check("y apunta a un ejecutable de verdad",
+      os.path.isfile(config.UV_BINARY) or shutil.which(config.UV_BINARY),
+      config.UV_BINARY)
+check("es una ruta, no el nombre a secas", os.sep in config.UV_BINARY, config.UV_BINARY)
+
+# Los dos clientes MCP lo usan; si alguno se queda con "uv" literal, vuelve el
+# fallo pero solo en ese paso.
+for mod in ("graph_client.py", "pi_client.py"):
+    fuente = (RAIZ / mod).read_text(encoding="utf-8")
+    check("%s lanza con UV_BINARY" % mod, "command=config.UV_BINARY," in fuente)
+    check("%s ya no usa 'uv' literal" % mod, 'command="uv"' not in fuente)
+
+# Y se avisa ANTES de perder un analisis, no a mitad del Step 2.
+guardado = config.UV_BINARY
+try:
+    config.UV_BINARY = "uv-que-no-existe-en-ninguna-parte"
+    falta = config.validate_config()
+    check("si no se encuentra, validate_config lo dice",
+          any("UV_BINARY" in x for x in falta), falta)
+    check("y explica la consecuencia",
+          any("servidores MCP" in x for x in falta), falta)
+finally:
+    config.UV_BINARY = guardado
 
 print("\n" + "=" * 62)
 if fallos:

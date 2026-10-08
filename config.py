@@ -14,6 +14,7 @@ config.py — Carga y validación de la configuración del Workflow RCA
 """
 
 import os
+import shutil
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -127,6 +128,28 @@ DEEPSEEK_BASE_URL: str = (
     os.environ.get("DEEPSEEK_BASE_URL") or "https://api.deepseek.com/anthropic"
 )
 
+# Techo de tokens SOLO para DeepSeek. Existe porque la evidencia es suya y no
+# vale para los otros dos: razona siempre, razona mucho, y lo que razona VARÍA
+# mucho de una vuelta a otra. Medido sobre el Step 6 de un reanálisis real --
+# el prompt más grande que produce el workflow:
+#
+#   intento   techo     resultado                 al repetir ESE mismo prompt
+#   1         16.000    agotado razonando          9.608 tokens
+#   2         32.000    agotado razonando         14.690 tokens
+#
+# Las dos veces el repetido salió bien. No es que el techo estuviera mal
+# calculado: es que el consumo típico (~15.000 con la ventana ampliada) y el de
+# una vuelta mala se llevan más del doble. Con 64.000 hay 4x sobre lo medido.
+#
+# Y el precio de quedarse corto es el peor del workflow: el Step 6 muere con el
+# análisis entero pagado -- AF, PI y las llamadas anteriores -- sin producir
+# diagnóstico.
+#
+# No se sube LLM_MAX_TOKENS para todos porque no hay medida de que Gemini o
+# Claude lo necesiten, y 64.000 está comprobado contra DeepSeek pero no contra
+# los otros. Cuando haya medida, se unifica.
+DEEPSEEK_MAX_TOKENS: int = _entero("DEEPSEEK_MAX_TOKENS", 64000)
+
 # Techo de tokens de la respuesta del modelo, para AMBOS proveedores.
 #
 # Es un techo duro que la API aplica cortando la generación en seco: el modelo
@@ -140,10 +163,26 @@ DEEPSEEK_BASE_URL: str = (
 # MAX_SELECTED_VARIABLES=40 puede llegar a ~3.700. No llegó a fallar porque el
 # proveedor por defecto es Gemini, cuya llamada no fijaba ningún tope.
 #
-# 16000 cubre el peor caso con holgura, deja sitio para los tokens de thinking
-# si algún día se activa (cuentan contra este mismo tope en Anthropic) y se
-# mantiene por debajo de los timeouts HTTP del SDK sin necesitar streaming.
-# Subirlo no cuesta nada: solo se pagan los tokens realmente generados.
+# 32000 desde el 2026-10-01, y el motivo es que el techo ya NO cubre solo la
+# respuesta: en el protocolo de Anthropic los tokens de razonamiento cuentan
+# contra este mismo número, y ahora razonan DOS de los tres proveedores --
+# Claude desde el 2026-09-28 (thinking adaptive) y deepseek-flash siempre, lo
+# quiera uno o no.
+#
+# Estaba en 16000 con la nota "deja sitio para los tokens de thinking si algún
+# día se activa". Se activó, y no dejaba sitio suficiente: el Step 6 de un
+# reanálisis real murió con stop_reason=max_tokens y un único bloque
+# 'thinking' -- gastó el techo entero pensando y no llegó a escribir el
+# diagnóstico, habiendo pagado ya los cinco pasos anteriores.
+#
+# Medido sobre ESE mismo prompt (79.024 caracteres, el más grande que produce
+# el workflow): repetido, salió bien con 9.608 tokens de salida. Así que 16000
+# no era absurdo, era JUSTO -- 1,7x sobre un caso normal --, y lo que varía de
+# una vuelta a otra es cuánto razona el modelo. 32000 da más de 3x.
+#
+# Subirlo no cuesta nada: solo se pagan los tokens realmente generados. Lo que
+# cuesta es quedarse corto, porque se paga el análisis entero y no se obtiene
+# diagnóstico.
 #
 # Por qué se aplica también a Gemini, que no lo exige (decisión 2026-09-03):
 # los dos SDK tienen el mismo concepto, pero Anthropic lo hace OBLIGATORIO
@@ -157,7 +196,7 @@ DEEPSEEK_BASE_URL: str = (
 # en ambas rutas, que es justo para lo que existe llm_client. Si alguna vez
 # truncara, se vería en el log como un JSONDecodeError del Step 4 o 6, no en
 # silencio.
-LLM_MAX_TOKENS: int = _entero("LLM_MAX_TOKENS", 16000)
+LLM_MAX_TOKENS: int = _entero("LLM_MAX_TOKENS", 32000)
 
 
 # =============================================================================
@@ -360,6 +399,25 @@ INCIDENT_TRACE_RETENTION_DAYS: int = _entero("INCIDENT_TRACE_RETENTION_DAYS", 90
 # Carpeta del proyecto afkg-graph-mcp (Step 2: consulta de la estructura del AF).
 # Se usa para lanzar el servidor MCP como subproceso vía "uv run --directory ...",
 # igual que hace Claude Code según C:\MCPServer\MCP Server\.mcp.json.
+# Ruta del ejecutable de uv, que es quien lanza los dos servidores MCP.
+#
+# Se RESUELVE a ruta absoluta en vez de confiar en que "uv" esté en el PATH, y
+# eso no es paranoia: el 2026-10-08 una notificación real murió con
+# FileNotFoundError [WinError 2] porque el proceso del webhook llevaba encendido
+# desde antes de que la carpeta .localin del usuario entrara en el PATH. Un
+# servicio de larga vida hereda el entorno del momento en que arrancó, así que
+# "está en mi terminal" no significa que esté en el suyo.
+#
+# El fallo era además mudo: [WinError 2] no dice QUÉ fichero no encuentra, y
+# parecía un problema de los MCP cuando era de arranque.
+#
+# UV_BINARY permite fijarlo a mano si la resolución falla o hay varias copias.
+UV_BINARY: str = (
+    os.environ.get("UV_BINARY")
+    or shutil.which("uv")
+    or "uv"            # último recurso: que lo resuelva el sistema, como antes
+)
+
 AFKG_GRAPH_MCP_DIR: str = os.environ.get("AFKG_GRAPH_MCP_DIR") or r"C:\MCPServer\afkg-graph-mcp"
 
 # Carpeta del proyecto aveva-pi-mcp (Step 5: datos históricos de PI Web API).
@@ -640,5 +698,12 @@ def validate_config() -> list[str]:
     else:
         missing.append(f"LLM_PROVIDER (valor invalido: '{LLM_PROVIDER}', "
                        f"usa 'gemini', 'anthropic' o 'deepseek')")
+
+    # No es una clave, pero sin esto los dos servidores MCP no arrancan y el
+    # fallo aparece tarde y mudo: a mitad del Step 2, como [WinError 2].
+    if not os.path.isfile(UV_BINARY) and not shutil.which(UV_BINARY):
+        missing.append(
+            f"UV_BINARY (no se encuentra el ejecutable de uv: '{UV_BINARY}'; "
+            f"sin el no arrancan los servidores MCP)")
 
     return missing

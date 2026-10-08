@@ -260,7 +260,10 @@ def _generate_deepseek(system_prompt: str, user_message: str) -> str:
     )
     response = client.messages.create(
         model=config.DEEPSEEK_MODEL,
-        max_tokens=config.LLM_MAX_TOKENS,
+        # Techo propio, no LLM_MAX_TOKENS: ver DEEPSEEK_MAX_TOKENS en config.py.
+        # Razona siempre y lo que razona varía mucho; dos ejecuciones reales se
+        # quedaron sin espacio pensando antes de escribir el diagnóstico.
+        max_tokens=config.DEEPSEEK_MAX_TOKENS,
         system=system_prompt,
         messages=[{"role": "user", "content": user_message}],
     )
@@ -287,9 +290,12 @@ def _texto_de(response) -> str:
     # max_tokens se agota razonando. Se avisa con el motivo de parada, que es lo
     # que lo explica.
     raise LLMGenerationError(
-        "Claude no devolvió texto (stop_reason=%s, bloques=%s). Si es "
-        "'max_tokens', el modelo se quedó sin espacio: sube LLM_MAX_TOKENS o "
-        "apaga ANTHROPIC_THINKING." % (
+        "El modelo no devolvió texto (stop_reason=%s, bloques=%s). Si es "
+        "'max_tokens' y solo hay un bloque 'thinking', se quedó sin espacio "
+        "RAZONANDO: en este protocolo LLM_MAX_TOKENS cubre el razonamiento y la "
+        "respuesta juntos. Subirlo es la salida; apagar el razonamiento solo "
+        "sirve en la ruta de Anthropic (ANTHROPIC_THINKING), porque "
+        "deepseek-flash razona siempre." % (
             getattr(response, "stop_reason", "?"),
             [getattr(b, "type", "?") for b in response.content]),
     )

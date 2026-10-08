@@ -40,7 +40,10 @@ SEPARADOR_AF = chr(92)
 log = logging.getLogger(__name__)
 
 _SERVER_PARAMS = StdioServerParameters(
-    command="uv",
+    # Ruta absoluta, no "uv" a secas: ver UV_BINARY en config.py. Un
+    # servicio de larga vida no tiene por que compartir el PATH de quien
+    # lo desarrolla.
+    command=config.UV_BINARY,
     args=[
         "run", "--directory", config.AFKG_GRAPH_MCP_DIR,
         "python", "src/afkg_graph_mcp/server.py",
