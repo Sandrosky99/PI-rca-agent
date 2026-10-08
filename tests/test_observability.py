@@ -133,6 +133,49 @@ config.AUDIT_FILE = str(TMP / "audit.jsonl")
 
 logging.getLogger().handlers.clear()
 shutil.rmtree(TMP, ignore_errors=True)
+print("\n=== El cuerpo que manda PI no se recorta a 200 ===")
+# El webhook registra una linea titulada "Body raw (primeros 1000 bytes)" para
+# poder diagnosticar lo que envia PI. El formateador la dejaba en 200, cortando
+# justo antes de donde esta el error.
+#
+# Visto el 2026-10-08: llego una notificacion cuyo cuerpo no parseaba como JSON
+# y el log guardo hasta 'Plant": "WW...'. El sistema guardaba el cuerpo para
+# depurarlo y acto seguido lo tiraba.
+_flujo = io.StringIO()
+_h = logging.StreamHandler(_flujo); _h.setFormatter(observability.JsonFormatter())
+_lg = logging.getLogger("prueba_crudo"); _lg.handlers = [_h]
+_lg.setLevel(logging.INFO); _lg.propagate = False
+
+_lg.info("normal: %s", "X" * 900)
+_lg.info("crudo: %s", "X" * 900, extra={"_crudo": True})
+_normal, _crudo = [json.loads(x) for x in _flujo.getvalue().strip().split(chr(10))]
+
+check("una linea normal se sigue recortando a 200", len(_normal["msg"]) <= 201, len(_normal["msg"]))
+check("una marcada llega al tope grande", 900 < len(_crudo["msg"]) <= 1001, len(_crudo["msg"]))
+# No es "sin recorte": un cuerpo de 10 MB reventaria el log igual.
+_flujo.truncate(0); _flujo.seek(0)
+_lg.info("crudo: %s", "Y" * 5000, extra={"_crudo": True})
+check("y sigue habiendo tope", len(json.loads(_flujo.getvalue())["msg"]) <= 1001)
+
+# La marca cambia COMO se formatea, no QUE se publica: lleva guion bajo, y el
+# bucle de extras salta las claves que empiezan por "_".
+check("la marca no se cuela en el JSON", "_crudo" not in _crudo, sorted(_crudo))
+check("ni aparece con otro nombre",
+      sorted(_crudo) == ["component", "level", "msg", "ts"], sorted(_crudo))
+
+# Y el webhook la usa donde toca.
+_fuente = (Path(__file__).resolve().parent.parent / "webhook.py").read_text(encoding="utf-8")
+# El tope grande va SOLO en el camino del fallo. La linea incondicional -- que
+# sale para TODA notificacion, tambien las validas -- se queda en 200: de esas
+# el cuerpo completo ya vive en el fichero del incidente, y volcarlo tambien al
+# log seria duplicarlo donde no hace falta. Lo cazo test_seguridad.py.
+_i = _fuente.index("Body raw (primeros 1000 bytes): %s")
+check("la linea incondicional NO va marcada",
+      "_crudo" not in _fuente[_i:_i+160], _fuente[_i:_i+160])
+# Ademas del cuerpo, el MOTIVO del parseo: dice en que linea y columna falla.
+_j = _fuente.index("no es JSON valido")
+check("y se registra por que no parsea", "%s" in _fuente[_j:_j+40], _fuente[_j:_j+120])
+
 print("\n" + "=" * 62)
 if fallos:
     print(f"FALLOS: {len(fallos)} -> {fallos}")

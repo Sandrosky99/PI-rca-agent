@@ -365,6 +365,10 @@ async def receive_notification(
              request.method,
              request.headers.get("content-type", "no definido"),
              request.headers.get("content-length", "no definido"))
+    # Recorte normal (200). Esta línea sale para TODA notificación, también las
+    # válidas, y de ésas el cuerpo completo ya vive en el fichero del incidente:
+    # volcarlo aquí además sería duplicarlo en un sitio que no lo necesita. Ver
+    # "El log no vuelca el payload entero" en tests/test_seguridad.py.
     log.info("Body raw (primeros 1000 bytes): %s", raw_body[:1000])
     log.info("---------------------")
 
@@ -373,10 +377,23 @@ async def receive_notification(
     try:
         import json
         payload = json.loads(raw_body)
-    except Exception:
+    except Exception as exc:
         # No es JSON — lo guardamos como texto para poder analizarlo
         payload = {"_raw": raw_body.decode("utf-8", errors="replace"), "_format": "no-json"}
-        log.warning("El body de PI no es JSON valido. Guardado como texto para diagnostico.")
+        # AQUÍ SÍ va el cuerpo entero, y solo aquí. Un cuerpo que no parsea se
+        # RECHAZA, así que no se crea expediente: el log es el único sitio donde
+        # queda, y recortarlo a 200 lo deja inservible justo para lo que existe.
+        #
+        # Visto el 2026-10-08: llegó una notificación mal formada y el registro
+        # se cortó en 'Plant": "WW…', antes del error. Con el payload de una
+        # notificación válida no pasa -- ése va entero al fichero del incidente.
+        #
+        # Y el motivo del parseo, que es lo que señala DÓNDE falla:
+        # "Expecting ',' delimiter: line 6 column 10".
+        log.warning("El body de PI no es JSON valido (%s). Guardado como texto "
+                    "para diagnostico: %s", exc,
+                    raw_body[:1000].decode("utf-8", errors="replace"),
+                    extra={"_crudo": True})
 
     # ------------------------------------------------------------------
     # Paso 2: Registrar la notificación en el log y en el historial
