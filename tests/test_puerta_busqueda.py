@@ -288,6 +288,46 @@ check("guarda el prompt y la respuesta", "puerta_busqueda" in tr, list(tr))
 check("con la sospecha dentro del prompt", CONDUCT[:30] in tr["puerta_busqueda"]["prompt"])
 check("y el por que del modelo", "Ya esta disponible" in tr["puerta_busqueda"]["respuesta"])
 
+print("\n=== 15. EL MODELO COPIA LO QUE VE, Y CADA UNO COPIA OTRA COSA ===")
+# Dos ejecuciones reales seguidas, dos formas distintas de copiar el
+# identificador, las dos razonables desde su lado:
+#
+#   2026-09-29 (gemini)   "sospecha": "[1:1]"
+#   2026-10-01 (deepseek) "sospecha": "[1:1] El pH de la salida del primario
+#                          linea 1 parece fuera de rango, puede que..."
+#
+# Las dos veces el acierto era impecable -- las dos senalaron que PH705 es el pH
+# del vertido y no el de la salida del primario -- y las dos veces el codigo lo
+# tiro. El primer arreglo quitaba los corchetes: adivinaba UNA forma de copiar
+# en vez de reconocer la clave. Ahora se busca por su FORMA.
+REAL_GEMINI = "[1:0]"
+REAL_DEEPSEEK = ("[1:0] El pH de la salida del primario linea 1 parece fuera de "
+                 "rango, puede que afecte al rendimiento del biologico")
+for etiqueta, copiado in (("como copio gemini", REAL_GEMINI),
+                          ("como copio deepseek", REAL_DEEPSEEK),
+                          ("a secas", "1:0"),
+                          ("con espacios", "  1:0  "),
+                          ("dentro de una frase", "la sospecha 1:0 de la lista")):
+    responder({"decisiones": [{"sospecha": copiado, "senala_fuera": True,
+                               "que_busca": "la conductividad de la entrada"}]})
+    obj, _ = puerta([causa(0, CONDUCT)])
+    check(etiqueta + " -> se atiende", [o["causa"] for o in obj] == ["1:0"], obj)
+
+# Lo que NO cede: sigue teniendo que ser una clave que emitio este codigo.
+for etiqueta, inventado in (("una clave que no existe", "[9:9]"),
+                            ("inventada con texto detras", "[9:9] lo que sea"),
+                            ("sin ninguna clave dentro", "no se de que me hablas")):
+    responder({"decisiones": [{"sospecha": inventado, "senala_fuera": True,
+                               "que_busca": "algo"}]})
+    check(etiqueta + " -> se cae", puerta([causa(0, CONDUCT)])[0] == [])
+
+# Y el prompt pide explicitamente SOLO el identificador, que es la mitad que
+# faltaba: el codigo robusto y la instruccion clara.
+check("el prompt dice que solo el identificador",
+      "SOLO el identificador" in workflow._PUERTA_BUSQUEDA_PROMPT)
+check("y que no copie el texto",
+      "No copies el texto de la sospecha" in workflow._PUERTA_BUSQUEDA_PROMPT)
+
 print("\n" + "=" * 62)
 if fallos:
     print(f"FALLOS: {len(fallos)} -> {fallos}")

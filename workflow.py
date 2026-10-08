@@ -904,7 +904,8 @@ _PUERTA_BUSQUEDA_PROMPT = (
     "Responde con un unico objeto JSON con una clave \"decisiones\": una lista "
     "con UNA ENTRADA POR CADA identificador de arriba, ni una mas ni una menos, "
     "y cada entrada con exactamente estas claves:\n"
-    "- \"sospecha\": el identificador, copiado literalmente.\n"
+    "- \"sospecha\": SOLO el identificador, lo que va entre corchetes y nada "
+    "mas -- por ejemplo \"1:1\". No copies el texto de la sospecha aqui.\n"
     "- \"senala_fuera\": true solo si ESA sospecha apunta a algo medible que NO "
     "esta en la lista de disponibles. false si no menciona ninguna variable o "
     "equipo concreto, o si lo que menciona ya esta disponible.\n"
@@ -939,24 +940,35 @@ def clave_de_causa(causa: dict) -> str:
     return "%s:%s" % (causa.get("iteracion"), causa.get("indice"))
 
 
+_FORMA_CLAVE = re.compile(r"(\d+:\d+)")
+
+
 def _clave_limpia(valor) -> str:
-    """La clave tal como la devuelve el modelo, sin los adornos que le pusimos.
+    """La clave que hay DENTRO de lo que devolvio el modelo, reconocida por su forma.
 
-    Los prompts presentan cada identificador entre corchetes -- "[1:1] mirad el
-    pH..." -- porque asi se separa de un vistazo del texto que escribio la
-    persona. El modelo copia lo que ve, corchetes incluidos, y eso es exactamente
-    lo que hizo en la primera ejecucion real (2026-09-29): contesto
-    {"sospecha": "[1:1]", "senala_fuera": true, ...} con un acierto impecable, y
-    el codigo lo tiro porque comparaba contra "1:1".
+    Los prompts presentan cada identificador pegado a su texto -- "[1:1] mirad el
+    pH del primario..." -- porque asi se lee de un vistazo de quien es cada
+    sospecha. Y el modelo copia lo que ve. En dos ejecuciones reales seguidas
+    copio dos cosas distintas, las dos razonables desde su lado:
 
-    No es que el modelo se equivocara: le enseñamos el identificador de una forma
-    y le exigimos otra. Quitar el adorno es nuestro trabajo, no suyo.
+        2026-09-29 (gemini)   "sospecha": "[1:1]"
+        2026-10-01 (deepseek) "sospecha": "[1:1] El pH de la salida del primario
+                               linea 1 parece fuera de rango, puede que..."
 
-    Esto NO relaja la garantia. La clave sigue teniendo que ser una de las que
-    emitio este codigo: "[9:9]" se limpia a "9:9" y se cae igual por no estar en
-    la lista. Lo unico que cambia es que deja de caerse lo que si era valido.
+    Las dos veces el acierto era impecable y las dos veces el codigo lo tiro. El
+    primer arreglo quitaba los corchetes, que era quedarse corto: adivinaba UNA
+    forma de copiar en vez de reconocer la clave.
+
+    Asi que ya no se limpia, se BUSCA: la clave tiene forma conocida --
+    iteracion:indice, dos numeros con dos puntos -- y se extrae de donde este.
+    Eso cubre "[1:1]", "1:1", " 1:1 " y la linea entera.
+
+    Esto NO relaja la garantia, que es lo unico que no puede ceder: lo extraido
+    sigue teniendo que ser una de las claves que emitio este codigo. De "[9:9]
+    lo que sea" sale "9:9", y se cae igual por no estar en la lista.
     """
-    return str(valor or "").strip().strip("[]").strip()
+    m = _FORMA_CLAVE.search(str(valor or ""))
+    return m.group(1) if m else ""
 
 
 async def sospechas_que_senalan_fuera(
@@ -1100,7 +1112,8 @@ _BUSQUEDA_PROMPT = (
     "solo PARTE de lo que pediste. Si una busqueda no devuelve nada, prueba con "
     "OTRA palabra, no con la misma acompañada.\n\n"
     "2) Cuando uno de los resultados del catalogo es lo que se buscaba:\n"
-    "   {{\"accion\": \"elegir\", \"objetivo\": \"<identificador>\", \"resultado\": <numero>}}\n\n"
+    "   {{\"accion\": \"elegir\", \"objetivo\": \"<identificador>\", \"resultado\": <numero>}}\n"
+    "   El identificador es SOLO lo que va entre corchetes, por ejemplo \"1:0\".\n\n"
     "3) Cuando estes razonablemente seguro de que eso no existe en esta planta:\n"
     "   {{\"accion\": \"rendirse\", \"objetivo\": \"<identificador>\"}}\n"
     "   Rendirse es una respuesta valida y util: significa que la planta no mide "
