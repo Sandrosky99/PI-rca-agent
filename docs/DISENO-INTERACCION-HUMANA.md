@@ -5,7 +5,7 @@
 
 | | |
 |---|---|
-| **Fecha** | 10 de septiembre de 2026 · revisado el 29 |
+| **Fecha** | 10 de septiembre de 2026 · revisado el 1 de octubre |
 | **Estado** | Fases 1 a 3 entregadas |
 | **Alcance** | Fases 1 a 3 |
 
@@ -670,13 +670,23 @@ Las ramas que nunca pueden entrar son configuración, como la lista fija:
 
 ### Lo que enseñaron las ejecuciones reales
 
-Tres cosas, y ninguna la había cogido una suite:
+Ninguna la había cogido una suite:
 
-- **La puerta tiraba su propio acierto.** El prompt presenta cada sospecha como
-  `[1:1] ...` y el modelo copió el identificador con los corchetes; el código
-  comparaba contra `1:1`. Le enseñábamos el identificador de una forma y se lo
-  exigíamos de otra. Los dobles de prueba no lo vieron porque los escribimos
-  nosotros devolviendo lo que suponíamos.
+- **La puerta tiraba su propio acierto, y dos veces.** El prompt presenta cada
+  sospecha como `[1:1] ...`, y cada modelo copió una cosa distinta — las dos
+  razonables desde su lado:
+
+  | | lo que devolvió como identificador |
+  |---|---|
+  | Gemini, 29-09 | `"[1:1]"` |
+  | DeepSeek, 01-10 | `"[1:1] El pH de la salida del primario linea 1 parece..."` |
+
+  Las dos veces el acierto era impecable y las dos veces el código lo tiró. El
+  primer arreglo quitaba los corchetes: adivinaba **una** forma de copiar en vez
+  de reconocer la clave. Ahora se busca por su **forma** (`iteracion:indice`),
+  que cubre cualquiera. La lección es que le enseñábamos el identificador de una
+  manera y se lo exigíamos de otra; y que los dobles de prueba no lo vieron
+  porque los escribimos nosotros devolviendo lo que suponíamos.
 - **Pedírselo en el prompt no es autorizarlo.** Se le dijo «devuelve una sola
   causa nueva» y devolvió dos; se le dijo «no repitas las que siguen abiertas» y
   repitió una. Ninguna de las dos reglas se comprobaba en código. Ahora sí
@@ -685,6 +695,34 @@ Tres cosas, y ninguna la había cogido una suite:
   al camino del fallo.** `marcar_fallo()` guardaba el trace donde nadie lo lee,
   así que una pasada que buscó y luego murió dejaba el expediente sin rastro de
   haber buscado — y el siguiente reanálisis lo habría repetido.
+
+- **Razonar cuesta tokens del mismo bolsillo.** El Step 6 murió dos veces con
+  `stop_reason=max_tokens` y un único bloque `thinking`: gastó el techo entero
+  pensando y no llegó a escribir el diagnóstico, con el análisis ya pagado.
+  Repetido, el mismo prompt salía bien — 9.608 tokens con techo 16.000 y 14.690
+  con techo 32.000. No era un cálculo mal hecho: es que lo que razona el modelo
+  **varía mucho** de una vuelta a otra, y el techo cubre razonamiento y respuesta
+  juntos. DeepSeek tiene desde entonces techo propio.
+
+### Lo que falta vigilar, visto en uso
+
+El riesgo que este documento marcaba como el importante —**no es no encontrarla,
+es encontrar la equivocada**— se materializó en su versión suave el 1 de octubre.
+La sospecha decía *«el nivel del tanque **secundario** de la línea 1»* y lo que
+entró fue `LT212 Biological Line 1 Tank Level`: el tanque del biológico de esa
+línea, misma zona pero no lo señalado.
+
+No hizo daño, y vale la pena ver por qué: el modelo lo miró y **lo descartó con
+los datos** — *«el nivel de la línea 1 ni sube»*. Esa es la defensa de fondo, y
+funcionó. Pero el emparejamiento se equivocó, y sólo lo detecta quien conoce la
+planta: por eso lo añadido **se enseña siempre**, que era justo el guardarraíl
+previsto aquí.
+
+Y una limitación que no estaba escrita: **una sospecha que nombre dos variables
+se atiende como un único objetivo**. En esa misma ejecución se pedía el nivel *y*
+los sólidos de la línea 1, y el bucle paró al encontrar el nivel. La puerta
+agrupa en un `que_busca`, así que el tope de dos objetivos por pasada no ayuda
+aquí.
 
 > El banco de pruebas sigue montado: `PH213 Primary Line 1 Outlet pH`, con una
 > causa descartada y una sospecha que señala la conductividad de la entrada de

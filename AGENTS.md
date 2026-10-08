@@ -228,7 +228,7 @@ Otros cabos sueltos, por orden de urgencia:
    para procesar la alerta pausada), que ya es posible desde que se arregló el re-lanzado.
 5. **La llamada a Anthropic no usa adaptive thinking**, mientras que Gemini sí razona por defecto
    (ver «Asimetría de razonamiento» más abajo). Activar `thinking: {type: "adaptive"}` en
-   `_generate_anthropic()` igualaría las dos rutas, y `LLM_MAX_TOKENS=16000` ya deja sitio para
+   `_generate_anthropic()` igualaría las dos rutas, y `LLM_MAX_TOKENS` ya deja sitio para
    ello. Pendiente de decidir: sin evaluación no habría forma de medir si mejora el diagnóstico.
    Si se activa, hacerlo detrás de un flag y en ambos proveedores.
 6. **Ampliar la validación** a más KPIs y tipos de activo. Las tres ejecuciones reales que hay son
@@ -1097,7 +1097,31 @@ backoff exponencial (2–30 s) vía `tenacity`, **solo** para errores que un rei
 reintentar no los soluciona. Si se agotan (o el error no es transitorio), `generate()` lanza
 `LLMGenerationError`.
 
-**Techo de tokens de salida (`LLM_MAX_TOKENS`, 16000, revisado 2026-09-03).** Los dos SDK tienen el
+**Techo de tokens (`LLM_MAX_TOKENS`, 32000, subido el 2026-10-01).** Ya no cubre solo la
+respuesta: en el protocolo de Anthropic los tokens de razonamiento cuentan contra este mismo
+número, y razonan **dos de los tres** proveedores — Claude desde el 28 de septiembre y
+`deepseek-flash` siempre.
+
+Estaba en 16000 con la nota *«deja sitio para los tokens de thinking si algún día se activa»*. Se
+activó, y no dejaba sitio: el Step 6 de un reanálisis real murió con `stop_reason=max_tokens` y un
+único bloque `thinking` — gastó el techo entero pensando y no llegó a escribir el diagnóstico,
+habiendo pagado ya los cinco pasos anteriores. Repetido contra ese mismo prompt (79.024 caracteres,
+el más grande que produce el workflow) salió bien con **9.608 tokens de salida**: 16000 no era
+absurdo, era justo, y lo que varía de una vuelta a otra es cuánto razona el modelo.
+
+**Y 32000 tampoco bastó para DeepSeek.** El mismo fallo volvió ese mismo día con la ventana
+ampliada a 168 h: agotado razonando, y el repetido salió con **14.690 tokens**. Dos medidas, dos
+veces el repetido bien: lo que varía no es el tamaño del prompt sino cuánto piensa el modelo, y en
+`deepseek-flash` esa variación se lleva más del doble del consumo típico. Por eso tiene techo
+propio, **`DEEPSEEK_MAX_TOKENS` = 64000**, y no se subió el de todos: no hay medida de que Gemini o
+Claude lo necesiten, y 64000 está comprobado contra DeepSeek pero no contra los otros. Cuando haya
+medida, se unifica.
+
+El precio de quedarse corto es el peor del workflow: el Step 6 muere con el análisis entero pagado
+—AF, PI y las llamadas anteriores— sin producir diagnóstico. Subirlo no cuesta nada: solo se pagan
+los tokens realmente generados.
+
+**Lo de antes (revisado 2026-09-03).** Los dos SDK tienen el
 mismo concepto, pero con defaults opuestos:
 
 | | Parámetro | ¿Obligatorio? | Si se omite |
@@ -1204,7 +1228,8 @@ rca-agent/
 | `GEMINI_MODEL` | No | Modelo de Gemini a usar | `gemini-2.5-flash` |
 | `ANTHROPIC_API_KEY` | ✅ si `LLM_PROVIDER=anthropic` | Clave API de Anthropic para Claude | — |
 | `ANTHROPIC_MODEL` | No | Modelo de Claude a usar | `claude-opus-4-8` |
-| `LLM_MAX_TOKENS` | No | Techo de tokens de la respuesta, para ambos proveedores | `16000` |
+| `LLM_MAX_TOKENS` | No | Techo de tokens del modelo (razonamiento + respuesta), para Gemini y Anthropic | `32000` |
+| `DEEPSEEK_MAX_TOKENS` | No | Techo **solo** para DeepSeek: razona siempre y lo que razona varía mucho | `64000` |
 | `WEBHOOK_PORT` | No | Puerto del servidor | `8090` |
 | `WEBHOOK_SECRET` | No | Token para validar origen de PI (cabecera `X-PI-Secret`) | vacío |
 | `PI_LOCAL_TIMEZONE` | No | Zona horaria para logs | `Europe/Madrid` |

@@ -550,8 +550,9 @@ Todas las opciones se configuran en `.env`. Copia `.env.example` como punto de p
 | `DEEPSEEK_API_KEY` | ✅ si `LLM_PROVIDER=deepseek` | Clave de API de DeepSeek — [platform.deepseek.com](https://platform.deepseek.com/api_keys) | — |
 | `DEEPSEEK_MODEL` | No | Modelo de DeepSeek. El grande es `deepseek-v4-pro`. | `deepseek-flash` |
 | `DEEPSEEK_BASE_URL` | No | Endpoint de DeepSeek compatible con el protocolo de Anthropic. Solo se toca si pasas por una pasarela interna. | `https://api.deepseek.com/anthropic` |
+| `DEEPSEEK_MAX_TOKENS` | No | Techo de tokens **solo** para DeepSeek (razonamiento + respuesta). Tiene el suyo porque razona siempre y lo que razona varía mucho. | `64000` |
 | `ANTHROPIC_MODEL` | No | Modelo de Claude | `claude-opus-4-8` |
-| `LLM_MAX_TOKENS` | No | Techo de tokens de la respuesta del modelo, para ambos proveedores. Es un techo duro: si se alcanza, el JSON se trunca y el análisis se pierde. | `16000` |
+| `LLM_MAX_TOKENS` | No | Techo de tokens del modelo para **Gemini y Anthropic** (DeepSeek tiene el suyo). Cubre el razonamiento **y** la respuesta, no solo la respuesta. Es un techo duro: si se alcanza, el JSON se trunca y el análisis se pierde. | `32000` |
 
 Solo se exige la clave del proveedor realmente seleccionado, no ambas.
 
@@ -753,18 +754,30 @@ C:\MCPServer\rca-agent\logs\service_error.log
 | ↻ | **Reanálisis** — el operario descarta con evidencia y el workflow vuelve a entrar por el Step 4 con ese feedback | ✅ Completado |
 | ↳ | **Búsqueda** — si la sospecha señala un activo que no está en el contexto, se localiza en el AF y se añade. Único paso en el que el modelo recibe una herramienta | ✅ Completado |
 
-**Validación:** ciclo completo el 2026-08-20 y repetido el 2026-09-23 contra el AF, PI y el modelo reales, con la alerta de `Hydraulic Efficiency` sobre `PS20102 A03 PS02 Pump 02`: 206 s, 3 llamadas al modelo, 159 variables ofrecidas y 24 elegidas. El modelo pidió ampliar la ventana de 24 h a 7 días y se le concedió; volvió a pedir y se le denegó por presupuesto. Validación real pero no exhaustiva: falta ejercitarlo con otros KPIs y tipos de activo.
+**Validación:** ciclo completo el 2026-08-20 y repetido el 2026-09-23 contra el AF, PI y el modelo reales, con la alerta de `Hydraulic Efficiency` sobre `PS20102 A03 PS02 Pump 02`: 206 s, 3 llamadas al modelo, 159 variables ofrecidas y 24 elegidas. El modelo pidió ampliar la ventana de 24 h a 7 días y se le concedió; volvió a pedir y se le denegó por presupuesto.
+
+**El reanálisis con búsqueda, validado el 2026-10-01** con DeepSeek, dos casos reales de punta a punta:
+
+- `OX313 Biological Line 1 Aerobic Area Oxygen` — la sospecha señalaba el pH de salida del primario. Se localizó `PH213`, se añadió al contexto, y el modelo **lo miró y lo descartó**: «PH213 es un artefacto: rampa lineal hasta 0,0 el 24-09 y valor congelado en 7,0056 desde entonces». De ahí salió una causa nueva — que la alarma es un falso positivo de la cadena de medida.
+- `SS324 Biological Line 2 Suspended Solids` — la sospecha señalaba el tanque secundario de la línea 1. Cinco vueltas de búsqueda hasta dar con `LT212`, y otra vez contrastado y no sostenido: «el nivel de la línea 1 ni sube».
+
+Es el comportamiento que se buscaba: va a por el dato que señala la persona y dice si lo respalda o no, en vez de darle la razón. Validación real pero no exhaustiva: falta ejercitarlo con otros KPIs y tipos de activo.
 
 ### Pendiente
 
-1. **Ejercitar la búsqueda de punta a punta contra el AF y el modelo reales.**
-   El paso funciona, está probado con dobles y la pantalla ya cuenta qué fue de
-   cada sospecha. Lo que falta es verlo contra el grafo de verdad, y el riesgo
-   que hay que vigilar ahí no es no encontrar la variable: es encontrar **la
-   equivocada** y que el diagnóstico cite con confianza una variable de otra
-   parte de la planta. Conviene empezar por el caso que ya se sabe cómo acaba:
-   «la conductividad de la entrada» no existe en el WWTP, así que tiene que
-   terminar honestamente en *no se mide eso*.
+1. **Vigilar que la búsqueda no traiga la variable equivocada.** El paso ya se
+   ha ejercitado contra el AF y el modelo reales (ver *Validación*), y encuentra.
+   Lo que queda es el riesgo que siempre fue el importante: **no es no encontrar
+   la variable, es encontrar la parecida**. En la ejecución del 2026-10-01 la
+   sospecha decía «el nivel del tanque **secundario** de la línea 1» y lo que
+   entró fue `LT212 Biological Line 1 Tank Level` — el tanque del biológico de
+   esa línea, misma zona pero no lo señalado. No hizo daño porque el modelo la
+   descartó con los datos, pero el mecanismo lo permite y sólo lo detecta quien
+   conoce la planta. Por eso lo añadido **se enseña siempre** en la pantalla.
+
+   Pendiente también: una sospecha que nombre **dos** variables se atiende como
+   un único objetivo, así que el bucle para al encontrar la primera. En esa
+   misma ejecución se pedía el nivel *y* los sólidos, y sólo entró el nivel.
 2. **Relanzar un análisis fallido.** Hoy un incidente en `fallido` es un callejón
    sin salida, y la mitad de los motivos de fallo son cortes externos que un
    reintento resolvería.
