@@ -38,6 +38,7 @@ import asyncio
 import io
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -248,14 +249,26 @@ check("una variable de planta pasa la puerta",
       in workflow._collect_authorized_paths(ctx))
 
 print("\n=== 13. El prompt lo explica y le da la ultima prioridad ===")
-check("el modelo de datos habla de tres bloques",
-      "tres bloques" in workflow._DATA_MODEL_SECTION)
+# Ya NO se comprueba que diga "tres": se comprueba que no diga ningun numero.
+# Esa frase se quedo atras al pasar de dos bloques a tres, y habria vuelto a
+# quedarse atras al pasar a cuatro. El numero era lo unico que caducaba de
+# ella, asi que se quito del prompt -- y esta prueba vigila que no vuelva.
+# Lo que no puede llevar numero es el TOTAL. "los dos bloques anteriores",
+# dentro de la descripcion de plant_context, es una referencia relativa a
+# main+nearby y sigue siendo cierta con cuatro bloques: esa se queda.
+check("el modelo de datos NO cuenta cuantos bloques hay",
+      not re.search(r"organizados en (dos|tres|cuatro|cinco|\d+) bloques",
+                    workflow._DATA_MODEL_SECTION, re.I),
+      re.findall(r"organizados en [^:]+", workflow._DATA_MODEL_SECTION))
+check("pero si los presenta", "bloques:" in workflow._DATA_MODEL_SECTION)
 check("y describe que es plant_context", "plant_context" in workflow._DATA_MODEL_SECTION)
 # La regla estricta decia "estos dos bloques" y se quedo atras al anadir el
 # tercero: le ofrecia plant_context por un lado y por otro le decia que solo
 # valen dos. Lo destapo leer el mensaje construido entero, no una prueba.
-check("la regla estricta cuenta los TRES bloques",
-      "los TRES bloques" in workflow._DATA_MODEL_SECTION
+# Al anadir el cuarto bloque (contexto_anadido) se dejo de contar: ahora dice
+# "los bloques que se te han dado", que no caduca.
+check("la regla estricta tampoco los cuenta",
+      "los bloques que se te han dado" in workflow._DATA_MODEL_SECTION
       and "estos dos bloques" not in workflow._DATA_MODEL_SECTION)
 check("dice que NO cuelgan del activo ni del subsistema",
       "otra rama de la jerarquia" in workflow._DATA_MODEL_SECTION)

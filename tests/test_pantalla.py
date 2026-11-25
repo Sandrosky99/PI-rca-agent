@@ -126,10 +126,19 @@ check("conserva 'explanation' tal cual se guardo",
 check("y la lista lo cuenta como una causa",
       any(i["id"] == viejo["id"] and i["numCausas"] == 1 for i in CLIENTE.get("/incidentes").json()["incidentes"]))
 
-print("\n=== 5. El detalle NO trae el trace ===")
+print("\n=== 5. El detalle NO trae los PROMPTS ===")
 # Medido sobre un incidente real, el trace es el 98,9 % del fichero, y son los
 # prompts en crudo. No pinta nada en la pantalla y se transferiria en cada clic.
-check("el trace se queda fuera", "traces" not in d and "trace" not in d, list(d))
+#
+# Lo que se comprueba es eso -- que no viajen los prompts --, no que no exista
+# la clave 'traces': de cada pasada sobreviven tres campos cortos que son de
+# los que la pantalla deriva que fue de cada sospecha. Podar por tamaño, que es
+# el motivo real, y no por nombre.
+check("el trace suelto se queda fuera", "trace" not in d, list(d))
+volcado = json.dumps(d)
+for pesado in ("step3_prompt", "step4_response", "system_prompt", "step6_prompt"):
+    check("no viaja %s" % pesado, pesado not in volcado)
+check("y lo que queda de cada pasada es corto", len(volcado) < 20000, len(volcado))
 fichero = json.loads((TMP / "inc" / f"{a['id']}.json").read_text(encoding="utf-8"))
 check("pero sigue guardado en disco", "traces" in fichero, list(fichero))
 
@@ -440,6 +449,106 @@ sanos = CLIENTE.get("/incidentes").json()["total"]
 r = CLIENTE.get("/incidentes")
 check("responde 200 igualmente", r.status_code == 200, r.status_code)
 check("y sigue listando los sanos", r.json()["total"] == sanos, f"{r.json()['total']} de {sanos}")
+
+print("\n=== 8p. La pantalla puede contar que fue de una sospecha ===")
+# El dato lo compone el SERVIDOR, por lo mismo que 'causas': se deduce de los
+# traces y ese calculo no puede vivir en dos sitios. La pantalla escribe la
+# frase; el dato sale del endpoint.
+r = sembrar("PS-BUSQ-01", incidents.FINALIZADO, con_diagnostico=True)
+incidents.mark(r["id"], incidents.FINALIZADO, trace={
+    "busqueda_resultado": [
+        {"causa": "1:0", "que_busca": "la turbidez de entrada",
+         "acierto": {"tipo": "variable", "nombre": "Turbidity inlet",
+                     "donde": "WWTP" + chr(92) + "Operational" + chr(92) + "1 - Intake"},
+         "motivo": "encontrado"}],
+    "sospechas_pendientes": [{"causa": "1:1", "sospecha": "y la temperatura del digestor"}],
+})
+det = CLIENTE.get("/incidentes/" + r["id"]).json()
+check("el detalle trae que fue de cada sospecha", "sospechas" in det, list(det))
+check("con el desenlace y el sitio",
+      det["sospechas"]["1:0"]["motivo"] == "encontrado"
+      and det["sospechas"]["1:0"]["nombre"] == "Turbidity inlet", det.get("sospechas"))
+check("y lo pendiente como pendiente",
+      det["sospechas"]["1:1"]["motivo"] == "pendiente", det.get("sospechas"))
+check("y trae lo anadido al expediente",
+      [a["nombre"] for a in det.get("anadido") or []] == ["Turbidity inlet"], det.get("anadido"))
+# El trace sigue sin salir: esto es un resumen, no el volcado.
+check("sin arrastrar los prompts", "step3_prompt" not in json.dumps(det), list(det))
+
+print("\n=== 8q. Y sabe escribir las cuatro frases ===")
+check("tiene la funcion", "function suerteDeLaSospecha(" in html)
+for motivo, trozo in (("encontrado", "se añadió al análisis"),
+                      ("no_existe", "aquí no se mide eso"),
+                      ("sin_presupuesto", "no se llegó a localizar"),
+                      ("pendiente", "Pendiente de buscar")):
+    check("dice algo para '%s'" % motivo, trozo in html, trozo)
+# "Pendiente" y no "descartada", y con el motivo: si no, aparecer en un
+# reanalisis posterior seria inexplicable para quien la escribio.
+check("y explica por que quedo pendiente",
+      "se atendieron antes otras sospechas" in html)
+
+print("\n=== 8r. La linea del recuadro la escribe el CODIGO, y se nota ===")
+# En esta pantalla conviven lo que propuso la IA y lo que hizo el sistema.
+# Confundirlos es exactamente lo que este proyecto lleva evitando.
+check("la frase acordada", "Añadido a este expediente por tu sospecha" in html)
+check("va marcada aparte del texto del modelo", 'class="anadido"' in html)
+check("con estilo propio", ".anadido{" in html)
+# El recuadro tiene que salir aunque el modelo no escribiera su frase: lo que se
+# anadio es un hecho, y no depende de que el modelo lo comente.
+check("el recuadro no depende de que_cambia",
+      "(cambio || bloqueAnadido)" in html)
+
+print("\n=== 8s. El recuento junto al titulo de las causas ===")
+# Cuantas hay y en que estado, para leerlo sin contar tarjetas.
+check("existe la funcion", "function recuento(estados){" in html)
+check("y el titulo la usa", "${recuento(estados)}" in html)
+check("con estilo de dato, no de etiqueta",
+      ".recuento{" in html and "text-transform:none" in html)
+
+# LA REGLA: un cero no se escribe. "3 - 0 descartadas" ocupa el mismo sitio que
+# el dato util y no dice nada que no se vea ya.
+i = html.index("function recuento(estados){")
+cuerpo = html[i:html.index("function zonaVeredicto", i)]
+check("las descartadas solo salen si las hay", "if(desc) partes.push" in cuerpo, cuerpo[-400:])
+check("y las confirmadas igual", "if(conf) partes.push" in cuerpo, cuerpo[-400:])
+check("el total SI sale siempre", "partes = [String(estados.length)]" in cuerpo)
+# Singular y plural: "1 descartada" y no "1 descartadas".
+check("concuerda en numero", 'desc === 1 ? "" : "s"' in cuerpo and 'conf === 1 ? "" : "s"' in cuerpo)
+# "confirmada" y no "aceptada": es la palabra del resto de la pantalla. Dos
+# nombres para lo mismo en la misma vista se leen como dos cosas distintas.
+check("usa la palabra del resto de la pantalla",
+      "confirmada" in cuerpo and "aceptada" not in cuerpo, cuerpo[-300:])
+check("y esa palabra es la del veredicto", "Confirmada por el operario" in html)
+
+print("\n=== 8t. La marca de la fila no puede contradecir a su pastilla ===")
+# En activos se filtra por ESTADO, asi que la marca de una fila abierta tiene que
+# decir lo que dice su pastilla. Si no, el mismo nombre etiqueta dos conjuntos
+# distintos: se vio con cuatro incidentes bajo la pastilla "interrumpido"
+# marcados "Fallo del analisis", que es el nombre de OTRA pastilla.
+i = html.index("function chipEstado(x){")
+fn = html[i:html.index("async function pedir", i)]
+# La condicion tiene que MIRAR el estado, no deducir los veredictos de que la
+# etiqueta no sea 'sin_veredicto': FALLIDO e INTERRUMPIDO sacan su etiqueta del
+# estado, no de que alguien haya revisado nada.
+check("la marca de cierre exige estado finalizado",
+      'x.estado === "finalizado"' in fn, fn[-500:])
+check("y sigue exigiendo que haya etiqueta distinta de sin_veredicto",
+      'x.cierre !== "sin_veredicto"' in fn)
+check("un incidente cerrado sigue enseñando su cierre", "x.cerrado ||" in fn)
+
+# La pastilla de estado de interrumpido existe y es NEUTRA: no es un diagnostico
+# que fallo, es un proceso que murio debajo.
+check("interrumpido tiene estilo propio y neutro",
+      ".e-pausado,.e-interrumpido{background:var(--neutro-fondo)" in html)
+# Y la de fallido comparte color con su etiqueta de cierre, por eso el arreglo
+# no le cambia el aspecto.
+check("fallido se ve igual por cualquiera de las dos vias",
+      ".e-fallido{background:var(--malo-fondo); color:var(--malo)}" in html
+      and ".c-fallo_del_analisis{background:var(--malo-fondo); color:var(--malo)}" in html)
+
+# Y el nombre de la pastilla de estado de cada uno sigue siendo el suyo.
+check("las pastillas no se llaman igual",
+      'fallido:     "fallo del análisis"' in html and 'interrumpido:"interrumpido"' in html)
 
 print("\n" + "=" * 62)
 if fallos:

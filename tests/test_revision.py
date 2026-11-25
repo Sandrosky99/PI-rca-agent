@@ -785,6 +785,49 @@ check("pone la confirmada delante", 'estados[b] === "confirmada"' in html)
 # coincidir.
 check("pero el numero mostrado sigue siendo el original", "CAUSA ${n+1} DE" in html)
 
+print("\n=== 20. UN INTERRUMPIDO TAMBIEN VENCE ===")
+# Lo destapo mirar la pantalla, no una prueba: habia interrumpidos de mas de 20 h
+# ocupando sitio en la ventana de prioridad sin pedir nada.
+#
+# La causa no era el reloj: era que no se llegaba a mirarlo. cierre() devolvia
+# etiqueta None para INTERRUMPIDO, y con etiqueta None esta_cerrado() contesta
+# ANTES de comparar contra las 12 h. Asi que no vencia nunca, ni a las 20 h ni a
+# las 200. El comentario daba por supuesto que "se recogen solos cuando PI vuelve
+# a notificar" -- cierto solo si la alerta se repite; si la condicion se corrigio,
+# PI no vuelve a avisar y el expediente se queda ahi para siempre.
+#
+# El diseño YA lo decia (DISENO-INTERACCION-HUMANA.md, "Que se ve en activos":
+# 12 h para fallido e interrumpido). El codigo era lo que no lo cumplia.
+inte = sembrar(estado=incidents.INTERRUMPIDO, diagnostico=None)
+check("recien interrumpido sigue en activos",
+      _cierre_de(inte) == (incidents.FALLO_DEL_ANALISIS, False), _cierre_de(inte))
+_envejecer_workflow(inte, 20)
+check("a las 20 h esta cerrado",
+      _cierre_de(inte) == (incidents.FALLO_DEL_ANALISIS, True), _cierre_de(inte))
+
+# Comparte etiqueta con FALLIDO a proposito: para quien mira la pantalla los dos
+# dicen lo mismo -- no hay diagnostico y nadie lo va a terminar.
+fall = sembrar(estado=incidents.FALLIDO, diagnostico=None)
+_envejecer_workflow(fall, 20)
+check("fallido se comporta igual", _cierre_de(fall) == _cierre_de(inte), _cierre_de(fall))
+# La diferencia no se pierde: la conserva el campo 'estado', que es donde
+# importa -- para depurar, no para decidir si eso pide atencion hoy.
+check("pero el estado los sigue distinguiendo",
+      incidents.leer_por_id(inte)["estado"] == incidents.INTERRUMPIDO
+      and incidents.leer_por_id(fall)["estado"] == incidents.FALLIDO)
+
+# No se toca PAUSADO: no es informacion de un incidente sino del sistema entero
+# -- que alguien bajo el interruptor --, y por eso no sale en ninguna pestaña.
+paus = sembrar(estado=incidents.PAUSADO, diagnostico=None)
+check("pausado sigue sin etiqueta y fuera de las dos pestañas",
+      _cierre_de(paus) == (None, True), _cierre_de(paus))
+
+# Y no vence antes de tiempo: 12 h son las que el diseño da para que lo vea el
+# turno siguiente.
+joven = sembrar(estado=incidents.INTERRUMPIDO, diagnostico=None)
+_envejecer_workflow(joven, 11)
+check("a las 11 h todavia se ve", _cierre_de(joven)[1] is False, _cierre_de(joven))
+
 print("\n" + "=" * 62)
 if fallos:
     print(f"FALLOS: {len(fallos)} -> {fallos}")

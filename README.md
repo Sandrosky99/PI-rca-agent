@@ -14,11 +14,23 @@ con IA.
 > que produce es una hipótesis generada por un modelo de lenguaje, no una causa raíz
 > confirmada.**
 
+> ⚠️ **Es una demo, probada únicamente en un entorno de demostración controlado.**
+> Todas las pruebas se han hecho sobre un PI System y un Asset Framework de pruebas (raíz
+> `WWTP`), donde las desviaciones las genera un ciclo periódico sintético (ver `DEMO_MODE`), y
+> parte de las alertas y de las revisiones son incidentes de prueba escritos a mano. **No se ha
+> desplegado ni validado en ninguna planta real ni en producción.** Las cifras de validación de
+> este documento son de ese entorno y no aseguran cómo se comportaría con los datos de una
+> planta en operación. Tampoco se comporta siempre igual de una planta a otra: depende de lo
+> bien hecho que esté el modelo de datos del AF (qué activos y atributos hay, cómo se llaman,
+> cómo se agrupan y cómo está configurado cada PI Point), porque el modelo solo puede elegir y
+> razonar sobre lo que el AF le ofrece. Usarlo fuera del entorno de demo exige reclasificar el riesgo antes
+> ([`docs/AI-GOVERNANCE.md`](./docs/AI-GOVERNANCE.md) §1, supuesto 2) y repetir la validación.
+
 Conforme a izSpecs `2026.12-09011521` — ver [`docs/IZSPECS-CONFORMANCE.md`](./docs/IZSPECS-CONFORMANCE.md).
 
 ---
 
-> **Nota sobre el nombre.** El repositorio se llama todavía `PI-rca-agent`, pero **esto es un workflow, no un agente**: el módulo principal es `workflow.py` y el renombrado del repositorio está pendiente. El control de flujo vive entero en código Python; al modelo se le consulta dos veces y no dirige el proceso. Ver [¿Workflow o agente?](#workflow-o-agente) — la distinción importa al leer el código.
+> **Nota sobre el nombre.** El repositorio se llama `PI-rca-agent`, pero **esto es un workflow, no un agente**: el módulo principal es `workflow.py`. Mantener el nombre del repositorio es una decisión del 2026-09-08, no un renombrado pendiente (ver `AGENTS.md` §Terminología). El control de flujo vive en código Python: al modelo se le consulta en los puntos que fija el código, y no dirige el proceso salvo en un paso acotado del reanálisis, la búsqueda. Ver [¿Workflow o agente?](#workflow-o-agente) — la distinción importa al leer el código.
 
 ---
 
@@ -36,7 +48,7 @@ Conforme a izSpecs `2026.12-09011521` — ver [`docs/IZSPECS-CONFORMANCE.md`](./
 - [Uso](#uso)
 - [Endpoints de la API](#endpoints-de-la-api)
 - [Integración con PI System](#integración-con-pi-system)
-- [Despliegue en producción](#despliegue-en-producción)
+- [Arranque como servicio de Windows](#arranque-como-servicio-de-windows)
 - [Estado actual del desarrollo](#estado-actual-del-desarrollo)
 - [Servidores MCP relacionados](#servidores-mcp-relacionados)
 
@@ -68,13 +80,21 @@ Merece la pena tener clara la distinción antes de leer el código, porque los n
 | Criterio | Este sistema | Lo que haría un agente |
 |---|---|---|
 | Quién decide el siguiente paso | `run_rca_analysis()`: los 6 steps están escritos en orden en el cuerpo de la función | El modelo, en cada vuelta de un bucle |
-| Llamadas al modelo | **Las fija el código**, no el modelo: 2 en posiciones fijas (Steps 4 y 6), más una repetición del Step 6 por cada ampliación de ventana concedida (`MAX_HISTORY_ADJUSTMENTS`, 1 por defecto) | Un número indeterminado |
-| Acceso a herramientas | **Ninguno.** `llm_client.generate()` nunca pasa un parámetro `tools` | El modelo recibe las tools y decide cuál invocar |
+| Llamadas al modelo | **Las fija el código**, no el modelo: 2 en posiciones fijas (Steps 4 y 6), más una repetición del Step 6 por cada ampliación de ventana concedida (`MAX_HISTORY_ADJUSTMENTS`, 1 por defecto). Un reanálisis cuya sospecha señale fuera añade la puerta de la búsqueda (1) y el bucle (hasta `MAX_ITERACIONES_BUSQUEDA`), que también son un tope del código | Un número indeterminado |
+| Acceso a herramientas | **Una, y envuelta por nosotros.** `llm_client.generate()` nunca pasa un parámetro `tools`; el único paso que le ofrece algo es la búsqueda del reanálisis, y recibe una función de sólo lectura acotada a esta planta, no el servidor MCP | El modelo recibe las tools y decide cuál invocar |
 | Quién llama a los MCP servers | El código Python (`graph_client.py`, `pi_client.py`) | El modelo, vía *tool use* |
 | Reintentos y recuperación | Código determinista (`tenacity`, `_query_with_retry()`) | El modelo observa el error y decide qué probar |
 | Condición de parada | La última línea de la función | El modelo decide cuándo ha terminado |
 
 **El matiz:** el modelo *sí* decide algo — en el Step 4 elige qué variables consultar, y eso cambia qué datos se piden a PI. Pero cambia el *contenido* de un paso que se iba a ejecutar igualmente, no el *orden* ni la *existencia* de los pasos. Eso es selección de datos dentro de una ruta fija, no autonomía.
+
+**La excepción.** Hay un paso, y sólo uno, en el que el modelo dirige: la **búsqueda** del
+reanálisis, cuando la sospecha de quien revisa señala un activo que no está en el contexto. Ahí
+elige qué buscar y cuándo parar, con un presupuesto de vueltas y de reloj. No elige el alcance: la
+planta, las ramas válidas y el número de resultados los fija el código, y lo que recibe no es el
+servidor MCP sino una función envuelta de sólo lectura — entre las tools de `afkg-graph-mcp` hay
+una de escritura sobre una base compartida. Tampoco decide si el paso se ejecuta, ni cuántas cosas
+se buscan, ni qué entra después en el contexto. Está descrito entero en `AGENTS.md`.
 
 El patrón es **encadenamiento de prompts** (*prompt chaining*), con una puerta de código entre las dos llamadas que valida, deduplica y filtra. Es el patrón adecuado aquí: la tarea está bien definida y su secuencia se conoce de antemano, así que no hay razón para pagar la latencia, el coste y la impredecibilidad de un bucle autónomo.
 
@@ -97,9 +117,9 @@ El patrón es **encadenamiento de prompts** (*prompt chaining*), con una puerta 
 │  :8090          │ Step 2 · graph_client.py ───────────────┼──┐  │
 │                 │   └ ficha del equipo · pi_client.py     │  │  │
 │  /notification  │ Step 3 · build_analysis_context()       │  │  │
-│                 │ Step 4 · llm_client.generate()  ────────┼──┼──┼──▶ Gemini
-│                 │ Step 5 · pi_client.py ──────────────────┼──┼─▶│    o Claude
-│                 │ Step 6 · llm_client.generate()  ────────┼──┼──┘  │
+│                 │ Step 4 · llm_client.generate()  ────────┼──┼──┼──▶ Gemini,
+│                 │ Step 5 · pi_client.py ──────────────────┼──┼─▶│    Claude o
+│                 │ Step 6 · llm_client.generate()  ────────┼──┼──┘  │ DeepSeek
 │                 └─────────────────────────────────────────┘  │     │
 │                                                              │     │
 │  config.py · variables de entorno (.env)                     │     │
@@ -112,8 +132,9 @@ El patrón es **encadenamiento de prompts** (*prompt chaining*), con una puerta 
 │                               │   │                              │
 │  · graph_neighborhood         │   │  · create_timeseries_bucket  │
 │    → estructura del AF        │   │  · query_by_path             │
-│    → piApiPath de cada        │   │  · search_event_frames       │
+│    → piApiPath de cada        │   │                              │
 │      atributo                 │   │                              │
+│  · graph_search               │   │                              │
 └───────────────┬───────────────┘   └───────────────┬──────────────┘
                 │                                   │
                 ▼                                   ▼
@@ -332,10 +353,14 @@ ACTIVOS                              CERRADOS
 lo que pide atención ahora           el expediente, para anotar en frío
 
 filtra por ESTADO del workflow       filtra por CIERRE
-  recibido · analizando                causa confirmada · causa no determinada
-  finalizado · fallido                 revisado parcialmente · sin veredicto
-  interrumpido                         fallo del análisis · alerta no válida
+  en cola · procesando                 causa confirmada · causa no determinada
+  pendiente de revisar · en pausa      revisado parcialmente · sin veredicto
+  fallo del análisis · interrumpido    fallo del análisis · alerta no válida
 ```
+
+Son los nombres que enseña la pantalla. En el fichero, los estados son `recibido`,
+`analizando`, `finalizado`, `pausado`, `fallido` e `interrumpido`. Un reanálisis en marcha
+se ve como «recalculando» y cuenta en el filtro de «procesando».
 
 Un incidente pasa de una a otra **por un solo reloj: 12 h desde el último trabajo
 que sigue en pie**. Una respuesta terminal —una causa confirmada, o todas
@@ -423,13 +448,20 @@ Esa restricción de red es una **dependencia invisible**: si algún día la pant
 se publica en otra red, esta decisión deja de sostenerse. Queda anotada también
 en el bloque «DECISIONES DE SEGURIDAD» de `webhook.py`.
 
-Para verla sin PI hay 15 incidentes sintéticos que cubren los seis estados y los
-seis cierres:
+Para verla sin PI, `generar.py` escribe 26 incidentes sintéticos que cubren los seis
+estados y los seis cierres:
 
 ```bash
 python dev-fixtures/generar.py        # escribe en dev-fixtures/incidents/, NUNCA en incidents/
-set INCIDENTS_DIR=dev-fixtures/incidents && set WEBHOOK_PORT=8099 && python serve.py
+set INCIDENTS_DIR=dev-fixtures/incidents && set LOG_FILE=dev-fixtures/webhook.log && set AUDIT_FILE=dev-fixtures/audit.jsonl && set WEBHOOK_PORT=8099 && python serve.py
 ```
+
+Los tres ficheros del servidor de pruebas van aparte: incidentes, log y audit. Si solo se cambia
+la carpeta de incidentes, lo que se haga en la pantalla de pruebas acaba en el `audit.jsonl` del
+servicio real, y los dos procesos se pisan al rotar `webhook.log`. Pasó hasta el 2026-11-25.
+Desde entonces, si se arranca con otra carpeta de incidentes pero el log o el audit del
+servicio, sale un WARNING al arrancar que dice cuál falta.
+Los ficheros nuevos ya quedan fuera de git por los patrones de `.gitignore`.
 
 ---
 
@@ -443,24 +475,32 @@ PI-rca-agent/
 ├── graph_client.py      ← Cliente MCP para afkg-graph-mcp (Step 2)
 ├── pi_client.py         ← Cliente MCP para aveva-pi-mcp (Step 5 y la ficha)
 ├── incidents.py         ← Expediente: deduplicación, persistencia y revisión humana
-├── llm_client.py        ← Abstracción sobre el proveedor de LLM (Gemini/Anthropic)
+├── llm_client.py        ← Abstracción sobre el proveedor de LLM (Gemini, Anthropic o DeepSeek)
 ├── config.py            ← Carga y validación de variables de entorno
 ├── serve.py             ← Arranca uvicorn leyendo WEBHOOK_PORT del .env
+├── observability.py     ← Logging estructurado (JSON) y audit trail (audit.jsonl)
 │
 ├── static/
 │   └── pantalla.html    ← La pantalla de la sala de control (una sola página)
 ├── docs/
-│   └── DISENO-INTERACCION-HUMANA.md   ← Por qué la pantalla es como es
-├── tests/               ← 14 suites. No necesitan PI ni claves de API
+│   ├── DISENO-INTERACCION-HUMANA.md   ← Por qué la pantalla es como es
+│   ├── AI-GOVERNANCE.md               ← Riesgo, límites e interruptor de parada
+│   ├── AI-TRACEABILITY.md             ← Registro de la asistencia de IA (solo se añade)
+│   └── IZSPECS-CONFORMANCE.md         ← Matriz de conformidad con izSpecs
+├── prompts-revision/    ← Evidencia de ejecuciones contra sistemas reales: prompts y respuestas. Solo local (en .gitignore)
+├── tests/               ← 19 suites. No necesitan PI ni claves de API
 ├── dev-fixtures/
-│   ├── generar.py       ← 15 incidentes sintéticos para ver la pantalla sin PI
-│   └── incidents/       ← Donde los escribe. NUNCA en incidents/
+│   ├── generar.py       ← 26 incidentes sintéticos para ver la pantalla sin PI
+│   ├── incidents/       ← Donde los escribe. NUNCA en incidents/
+│   └── webhook.log · audit.jsonl ← Log y audit del servidor de pruebas, aparte de los reales
 │
 ├── incidents/           ← Un JSON por incidente. En .gitignore (datos de planta)
 ├── .env.example         ← Plantilla de configuración (copia a .env y rellena)
 ├── .env                 ← Configuración real con credenciales (NO en git)
 ├── .gitignore           ← Excluye .env, .venv, incidents/, webhook.log*, __pycache__
 ├── requirements.txt     ← Dependencias Python del proyecto
+├── AGENTS.md            ← Contexto para asistentes de IA (CLAUDE.md lo importa)
+├── DISCLAIMER.md        ← Aviso legal
 │
 ├── setup.bat            ← Instala el entorno virtual (ejecutar solo 1 vez)
 ├── start.bat            ← Arranca el servidor webhook
@@ -471,12 +511,13 @@ PI-rca-agent/
 
 | Fichero | Función |
 |---|---|
-| `webhook.py` | Servidor FastAPI que escucha en `:8090/notification`. Recibe el POST de PI, lo registra en consola y en `webhook.log` (rotativo, 10 MB × 5), y lanza `workflow.run_rca_analysis()` en segundo plano. Expone además `/health` y `/notifications/history`. Incluye el middleware que gestiona la cabecera `Expect: 100-continue` que envía PI. |
+| `webhook.py` | Servidor FastAPI que escucha en `:8090/notification`. Recibe el POST de PI, lo registra en consola y en `webhook.log` (rotativo, 10 MB × 5), y lanza `workflow.run_rca_analysis()` en segundo plano. Expone además `/health`, `/notifications/history` (apagado por defecto) y los endpoints de la pantalla. Incluye el middleware que gestiona la cabecera `Expect: 100-continue` que envía PI. |
 | `workflow.py` | El corazón del workflow. Contiene `run_rca_analysis()` (los 6 steps en orden), los prompts fijos, `build_analysis_context()` (Step 3), `build_diagnosis_context()` (Step 6) y la validación de tipos del payload. |
-| `graph_client.py` | Lanza `afkg-graph-mcp` como subproceso por stdio y recorre recursivamente el árbol del AF. Filtra metadatos y desambigua elementos con nombre repetido usando su `path` único. |
+| `graph_client.py` | Lanza `afkg-graph-mcp` como subproceso por stdio y recorre recursivamente el árbol del AF. Filtra metadatos y desambigua elementos con nombre repetido usando su `path` único. También ofrece al reanálisis la única herramienta del modelo, `buscar_en_la_planta()`, de solo lectura. |
 | `pi_client.py` | Lanza `aveva-pi-mcp` por stdio, crea el bucket temporal y consulta las series. Deduplica paths repetidos y excluye los que no resuelven a WebID. |
-| `incidents.py` | Un fichero JSON por incidente. Evita analizar dos veces la misma alerta (la creación exclusiva del fichero es la reserva atómica) y deja constancia en disco de cada análisis, de modo que un reinicio no lo pierda en silencio. |
-| `llm_client.py` | Expone una única función `generate(system, user) → str`. Absorbe la diferencia entre los SDK de Anthropic y Google, y reintenta con backoff exponencial los errores transitorios (5xx, rate limit, timeout). |
+| `incidents.py` | Un fichero JSON por incidente. Evita analizar dos veces la misma alerta (la creación exclusiva del fichero es la reserva atómica) y deja constancia en disco de cada análisis, de modo que un reinicio no lo pierda en silencio. Guarda también la revisión humana: veredictos, reclasificación y pasadas del reanálisis. |
+| `llm_client.py` | Expone `generate(system, user) → str`. Absorbe la diferencia entre proveedores (Google por un lado; Anthropic y DeepSeek, que comparten SDK, por otro) y reintenta con backoff exponencial los errores transitorios (5xx, rate limit, timeout). `modelo_en_uso()` dice qué modelo se llamó, para la etiqueta de IA de cada diagnóstico. |
+| `observability.py` | Logs en JSON de una línea (los textos largos se recortan a 200 caracteres) y `audit.jsonl`, donde se anota cada operación que cambia estado **antes** de hacerla. |
 | `config.py` | Lee `.env` y expone las variables como constantes. `validate_config()` comprueba al arrancar que está la API key del proveedor seleccionado. |
 | `setup.bat` | Crea el entorno virtual `.venv` con `uv` e instala las dependencias. Solo hace falta una vez. |
 | `start.bat` | Arranca `uvicorn` en el puerto 8090. Para desarrollo o pruebas. |
@@ -490,7 +531,7 @@ PI-rca-agent/
 - **Windows Server 2019** (o cualquier Windows con `uv`)
 - Acceso de red a **PI Web API** (`https://datainfra/piwebapi`)
 - **AVEVA PI System** con el módulo **PI Notifications** configurado
-- Clave de API de **Google (Gemini)** o de **Anthropic**, según el proveedor elegido en `LLM_PROVIDER`
+- Clave de API de **Google (Gemini)**, **Anthropic** o **DeepSeek**, según el proveedor elegido en `LLM_PROVIDER`
 - Los servidores MCP `afkg-graph-mcp` y `aveva-pi-mcp` disponibles en la misma máquina (se lanzan como subproceso, no hace falta arrancarlos a mano)
 
 ---
@@ -535,24 +576,35 @@ Todas las opciones se configuran en `.env`. Copia `.env.example` como punto de p
 
 | Variable | Obligatoria | Descripción | Por defecto |
 |---|---|---|---|
-| `LLM_PROVIDER` | No | `gemini` o `anthropic` | `gemini` |
+| `LLM_PROVIDER` | No | `gemini`, `anthropic` o `deepseek` | `gemini` |
 | `GEMINI_API_KEY` | ✅ si `LLM_PROVIDER=gemini` | Clave de API de Google — [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | — |
 | `GEMINI_MODEL` | No | Modelo de Gemini. `gemini-2.5-pro` requiere facturación activa en Google Cloud; sin ella devuelve un 429 de cuota 0. | `gemini-2.5-flash` |
 | `ANTHROPIC_API_KEY` | ✅ si `LLM_PROVIDER=anthropic` | Clave de API de Anthropic — [console.anthropic.com](https://console.anthropic.com/settings/keys) | — |
+| `DEEPSEEK_API_KEY` | ✅ si `LLM_PROVIDER=deepseek` | Clave de API de DeepSeek — [platform.deepseek.com](https://platform.deepseek.com/api_keys) | — |
+| `DEEPSEEK_MODEL` | No | Modelo de DeepSeek. El grande es `deepseek-v4-pro`. | `deepseek-flash` |
+| `DEEPSEEK_BASE_URL` | No | Endpoint de DeepSeek compatible con el protocolo de Anthropic. Solo se toca si pasas por una pasarela interna. | `https://api.deepseek.com/anthropic` |
+| `DEEPSEEK_MAX_TOKENS` | No | Techo de tokens **solo** para DeepSeek (razonamiento + respuesta). Tiene el suyo porque razona siempre y lo que razona varía mucho. | `64000` |
 | `ANTHROPIC_MODEL` | No | Modelo de Claude | `claude-opus-4-8` |
-| `LLM_MAX_TOKENS` | No | Techo de tokens de la respuesta del modelo, para ambos proveedores. Es un techo duro: si se alcanza, el JSON se trunca y el análisis se pierde. | `16000` |
+| `ANTHROPIC_THINKING` | No | Razonamiento *adaptive* en la ruta de Claude. Existe para poder comparar con y sin él | `true` |
+| `LLM_TIMEOUT_SECONDS` | No | Tiempo máximo de una llamada al modelo | `120` |
+| `LLM_MAX_TOKENS` | No | Techo de tokens del modelo para **Gemini y Anthropic** (DeepSeek tiene el suyo). Cubre el razonamiento **y** la respuesta, no solo la respuesta. Es un techo duro: si se alcanza, el JSON se trunca y el análisis se pierde. | `32000` |
 
-Solo se exige la clave del proveedor realmente seleccionado, no ambas.
+Solo se exige la clave del proveedor realmente seleccionado, no las de los otros.
 
 ### Servidor y entorno
 
 | Variable | Obligatoria | Descripción | Por defecto |
 |---|---|---|---|
 | `WEBHOOK_PORT` | No | Puerto en el que escucha el servidor | `8090` |
-| `WEBHOOK_SECRET` | No | Token para validar que las peticiones vienen de PI. PI debe enviarlo en la cabecera `X-PI-Secret`. Vacío = no se valida el origen. | vacío |
+| `WEBHOOK_SECRET` | No | Token para validar que las peticiones vienen de PI, en la cabecera `X-PI-Secret`. Vacío = no se valida el origen. PI Notifications no puede enviar cabeceras propias, así que con PI se queda vacío (ver «DECISIONES DE SEGURIDAD» en `webhook.py`). | vacío |
+| `WORKFLOW_ENABLED` | No | **Interruptor de parada.** Con `false` se siguen aceptando y registrando las alertas (en pausa), pero no se analiza ninguna: ni modelo ni PI. Ver `docs/AI-GOVERNANCE.md` §5 | `true` |
+| `NOTIFICATION_HISTORY_ENABLED` | No | Activa `/notifications/history`. Expone datos de planta sin autenticar: solo para depurar una integración, y apagarlo al terminar | `false` |
+| `MAX_CONCURRENT_ANALYSES` | No | Análisis simultáneos; el resto espera «en cola». `0` = sin límite | `3` |
+| `ANALYSIS_TIMEOUT_SECONDS` | No | Tiempo máximo de un análisis entero; al superarlo queda como fallo | `900` |
 | `PI_LOCAL_TIMEZONE` | No | Zona horaria para mostrar timestamps en el log (nombre IANA) | `Europe/Madrid` |
 | `INCIDENTS_DIR` | No | Carpeta donde se guarda un JSON por incidente | `<proyecto>\incidents` |
 | `INCIDENT_COOLDOWN_MINUTES` | No | Minutos durante los que una alerta del mismo activo y KPI se considera el mismo incidente, aunque cambie el `StartTime`. `0` deja solo la deduplicación exacta. | `20` |
+| `INCIDENT_TRACE_RETENTION_DAYS` | No | Días tras los que se podan los prompts y respuestas guardados en cada incidente; el diagnóstico se conserva | `90` |
 
 ### Consultas a PI y a los MCP servers
 
@@ -578,12 +630,17 @@ Solo se exige la clave del proveedor realmente seleccionado, no ambas.
 | `AF_PLANT_ROOT` | Raíz del AF a la que se restringe todo lo que se consulte | `WWTP` |
 | `AF_PLANT_CONTEXT_ELEMENTS` | Elementos que se añaden al contexto de toda alerta, separados por `\|` | vacío |
 | `MAX_PLANT_CONTEXT_ATTRIBUTES` | Tope de atributos que puede aportar ese bloque | `60` |
-| `MAX_REANALISIS` | Reanálisis permitidos por incidente. El primero no cuenta | `2` |
+| `MAX_REANALISIS` | Reanálisis permitidos por incidente. El primer análisis no cuenta | `2` |
+| `MAX_ITERACIONES_BUSQUEDA` | Vueltas del bucle de búsqueda por reanálisis | `5` |
+| `BUSQUEDA_TIMEOUT_SECONDS` | Reloj de la búsqueda entera. Agotarlo no es un fallo: se sigue sin lo que no encontró | `180` |
 
 El acotado a la planta **no es cosmético**: el grafo es un entorno compartido con
 otras demos, los nombres de elemento se repiten entre ellas, y hay un modelo
 espejo de este mismo WWTP. Se aplica anclado a la raíz, porque `path_contains` es
 una subcadena y `WWTP` a secas también casaría con `WWTP_Demo`.
+
+Estas tablas recogen lo que más se toca. La lista completa, con el porqué de cada valor
+por defecto, está en `.env.example`.
 
 ---
 
@@ -608,7 +665,8 @@ Servidor RCA Workflow arrancado y escuchando en:
 
 ```powershell
 Invoke-RestMethod http://localhost:8090/health
-# → {"status": "ok", "timestamp": "...", "service": "rca-agent-webhook"}
+# → {"status": "ok", "timestamp": "...", "service": "rca-workflow-webhook",
+#    "workflow_enabled": true, "incidentes": {...}}
 ```
 
 ### Simular una notificación de PI (para pruebas)
@@ -631,13 +689,17 @@ Invoke-RestMethod -Uri "http://localhost:8090/notification" `
 # → {"status": "accepted", "message": "...", "received_at": "..."}
 ```
 
-El análisis corre en segundo plano. El recorrido completo — incluidos los prompts enviados y el diagnóstico final — queda en la consola y en `webhook.log`.
+El análisis corre en segundo plano. El diagnóstico, con los prompts y las respuestas de cada pasada, queda en `incidents/<id>.json` y se ve en la pantalla (`/pantalla`). En la consola y en `webhook.log` queda el recorrido, con los textos largos recortados.
 
 ### Ver el historial de notificaciones recibidas
 
 ```powershell
 Invoke-RestMethod http://localhost:8090/notifications/history
 ```
+
+Está **apagado por defecto** y responde `404`: devuelve payloads completos sin autenticar.
+Para depurar una integración, `NOTIFICATION_HISTORY_ENABLED=true`, reiniciar, y volver a
+apagarlo al terminar.
 
 ---
 
@@ -649,10 +711,10 @@ Documentación interactiva completa en `http://localhost:8090/docs` (Swagger UI 
 |---|---|---|
 | `GET` | `/health` | Estado del servidor. Devuelve `200 OK` si está en marcha. |
 | `POST` | `/notification` | Recibe alertas de PI System. Acepta cualquier body (si no es JSON lo guarda como texto para diagnóstico). Devuelve `202 Accepted`. |
-| `GET` | `/notifications/history` | Lista las últimas 50 notificaciones recibidas (en memoria, se pierde al reiniciar). |
+| `GET` | `/notifications/history` | Lista las últimas 50 notificaciones recibidas (en memoria, se pierde al reiniciar). **Apagado por defecto**: `404` salvo con `NOTIFICATION_HISTORY_ENABLED=true`. |
 | `GET` | `/pantalla` | La pantalla de la sala de control. HTML sin dependencias externas. |
 | `GET` | `/incidentes` | Lista de incidentes para la pantalla. Acota por periodo, estado o cierre, y por número máximo. |
-| `GET` | `/incidentes/{id}` | El expediente completo **salvo el `trace`**, que es el 98,9 % del fichero y no pinta nada en una pantalla. |
+| `GET` | `/incidentes/{id}` | El expediente completo **salvo los `traces`** (prompts y respuestas), que son el 98,9 % del fichero y no pintan nada en una pantalla. |
 | `POST` | `/incidentes/{id}/veredicto` | Confirma o descarta una causa, con su evidencia. También la devuelve a `pendiente` para deshacer. |
 | `POST` | `/incidentes/{id}/reclasificacion` | Marca la alerta como no válida, o quita la marca. |
 | `POST` | `/incidentes/{id}/reanalisis` | Vuelve a analizar llevándole al modelo lo que se descartó y con qué evidencia. Rechaza si está cerrado, si no queda presupuesto o si no hay ninguna causa descartada. |
@@ -672,7 +734,7 @@ En **PI System Explorer → Notifications**, configura el canal de entrega HTTP:
 | **Content-Type** | `application/json` |
 | **Body** | El JSON completo del payload (ver [Step 1](#step-1--recibir-la-notificación-de-pi-)) |
 
-> **Importante:** el servidor usa HTTP plano. Si configuras la URL con `https://`, el handshake TLS falla **en silencio**: la conexión TCP queda ESTABLISHED pero ni una sola petición llega a FastAPI. En una red industrial interna, HTTP plano es habitual y no supone un riesgo significativo.
+> **Importante:** el servidor usa HTTP plano. Si configuras la URL con `https://`, el handshake TLS falla **en silencio**: la conexión TCP queda ESTABLISHED pero ni una sola petición llega a FastAPI. En la red interna de la demo, HTTP plano se aceptó como riesgo asumible; en una planta real esa decisión hay que volver a tomarla (ver `docs/AI-GOVERNANCE.md`, «Decisiones de seguridad del webhook»).
 
 El puerto es el 8090 porque el 8080 está ocupado por IIS en este servidor.
 
@@ -697,9 +759,9 @@ El puerto es el 8090 porque el 8080 está ocupado por IIS en este servidor.
 
 ---
 
-## Despliegue en producción
+## Arranque como servicio de Windows
 
-Para que el servidor arranque automáticamente con Windows sin mantener una terminal abierta, se usa **NSSM** (Non-Sucking Service Manager):
+Para que el servidor arranque automáticamente con Windows sin mantener una terminal abierta, se usa **NSSM** (Non-Sucking Service Manager). Instalarlo como servicio **no lo convierte en un despliegue productivo**: así es como corre hoy en el servidor de demo (ver el aviso del principio).
 
 1. Descarga NSSM desde [nssm.cc/download](https://nssm.cc/download) (gratuito, sin instalador) y copia `nssm.exe` (carpeta `win64`) junto a este README. Hace falta porque uvicorn no implementa el protocolo de servicios de Windows; NSSM actúa de envoltorio.
 2. **Cierra cualquier servidor arrancado a mano.** Si el puerto está ocupado, el servicio no podrá abrirlo y se quedará reiniciándose en bucle.
@@ -740,32 +802,58 @@ C:\MCPServer\rca-agent\logs\service_error.log
 | 5 | Obtener datos históricos de PI vía `aveva-pi-mcp` | ✅ Completado |
 | 6 | El modelo produce diagnóstico y recomendaciones | ✅ Completado |
 | ↻ | **Reanálisis** — el operario descarta con evidencia y el workflow vuelve a entrar por el Step 4 con ese feedback | ✅ Completado |
+| ↳ | **Búsqueda** — si la sospecha señala un activo que no está en el contexto, se localiza en el AF y se añade. Único paso en el que el modelo recibe una herramienta | ✅ Completado |
 
-**Validación:** ciclo completo el 2026-08-20 y repetido el 2026-09-23 contra el AF, PI y el modelo reales, con la alerta de `Hydraulic Efficiency` sobre `PS20102 A03 PS02 Pump 02`: 206 s, 3 llamadas al modelo, 159 variables ofrecidas y 24 elegidas. El modelo pidió ampliar la ventana de 24 h a 7 días y se le concedió; volvió a pedir y se le denegó por presupuesto. Validación real pero no exhaustiva: falta ejercitarlo con otros KPIs y tipos de activo.
+**Validación:** ciclo completo el 2026-08-20 y repetido el 2026-09-23 contra el AF, PI y el modelo reales, con la alerta de `Hydraulic Efficiency` sobre `PS20102 A03 PS02 Pump 02`: 206 s, 3 llamadas al modelo, 159 variables ofrecidas y 24 elegidas. El modelo pidió ampliar la ventana de 24 h a 7 días y se le concedió; volvió a pedir y se le denegó por presupuesto.
+
+**El reanálisis con búsqueda, probado el 2026-10-01** contra el AF, PI y el modelo reales,
+sobre **dos incidentes de prueba**: las alertas y los veredictos eran de `dev-fixtures`,
+escritos a mano.
+
+- `OX313 Biological Line 1 Aerobic Area Oxygen` — la sospecha señalaba el pH de salida del primario. Se localizó `PH213`, se añadió al contexto, y el modelo **lo miró y lo descartó**: «PH213 es un artefacto: rampa lineal hasta 0,0 el 24-09 y valor congelado en 7,0056 desde entonces». De ahí salió una causa nueva — que la alarma es un falso positivo de la cadena de medida.
+- `SS324 Biological Line 2 Suspended Solids` — la sospecha señalaba el tanque secundario de la línea 1. Cinco vueltas de búsqueda hasta dar con `LT212`, y otra vez contrastado y no sostenido: «el nivel de la línea 1 ni sube».
+
+Es el comportamiento que se buscaba: va a por el dato que señala la persona y dice si lo respalda o no, en vez de darle la razón. Pero los sistemas eran reales y el caso no: falta ejercitarlo con alertas reales, otros KPIs y otros tipos de activo.
+
+**Con alertas reales de PI**, a 2026-11-25 hay cinco análisis terminados (del 2026-09-07 al
+2026-10-28), sobre dos bombas y todos de `Hydraulic Efficiency`. **Solo uno se revisó y se
+reanalizó desde la pantalla** (2026-10-08, `PS20102 A03 PS02 Pump 02`). Se descartó una causa
+con una sospecha sobre el nivel del intake de la planta: la búsqueda agotó sus 5 vueltas sin
+encontrarlo y el reanálisis terminó sin ese dato, como está previsto. Después se confirmó una
+causa de la primera pasada; no consta que lo hiciera mantenimiento tras inspeccionar el equipo.
 
 ### Pendiente
 
-1. **El paso de búsqueda del reanálisis.** Es lo único que falta de la Fase 3.
-   Cuando la sospecha del operario señala un activo de otro sistema que tampoco
-   está en `AF_PLANT_CONTEXT_ELEMENTS` —«mirad la conductividad de la entrada de
-   planta»— el modelo no puede pedir esa variable ni queriendo: el Step 2 no
-   llega ahí. Hace falta traducir lo que escribió la persona a vocabulario del
-   AF y buscarlo, acotado a la planta y enseñando siempre qué se ha mirado.
-   El riesgo no es no encontrarla: es encontrar **la equivocada** y que el
-   diagnóstico cite con confianza una variable de otra parte de la planta.
+1. **Vigilar que la búsqueda no traiga la variable equivocada.** El paso ya se
+   ha ejercitado contra el AF y el modelo reales (ver *Validación*), y encuentra.
+   Lo que queda es el riesgo que siempre fue el importante: **no es no encontrar
+   la variable, es encontrar la parecida**. En la ejecución del 2026-10-01 la
+   sospecha decía «el nivel del tanque **secundario** de la línea 1» y lo que
+   entró fue `LT212 Biological Line 1 Tank Level` — el tanque del biológico de
+   esa línea, misma zona pero no lo señalado. No hizo daño porque el modelo la
+   descartó con los datos, pero el mecanismo lo permite y sólo lo detecta quien
+   conoce la planta. Por eso lo añadido **se enseña siempre** en la pantalla.
+
+   Pendiente también: una sospecha que nombre **dos** variables se atiende como
+   un único objetivo, así que el bucle para al encontrar la primera. En esa
+   misma ejecución se pedía el nivel *y* los sólidos, y sólo entró el nivel.
 2. **Relanzar un análisis fallido.** Hoy un incidente en `fallido` es un callejón
    sin salida, y la mitad de los motivos de fallo son cortes externos que un
    reintento resolvería.
-3. **Igualar el razonamiento entre proveedores.** `gemini-2.5-flash` razona por
-   defecto; la llamada a Anthropic no pasa `thinking`, así que no razona.
-   Activarlo igualaría ambas rutas, pero sin evaluación no hay forma de medir si
-   mejora el diagnóstico.
+3. **Medir si el razonamiento extendido mejora el diagnóstico.** Desde el
+   2026-09-28 la llamada a Anthropic pasa `thinking: adaptive`, así que las dos
+   rutas razonan — `gemini-2.5-flash` ya lo hacía por defecto. Eso cierra una
+   diferencia entre proveedores que contaminaba cualquier comparación, pero
+   **no** responde a si el diagnóstico sale mejor: para eso hace falta una
+   evaluación que todavía no existe. Mientras tanto la palanca está puesta
+   (`ANTHROPIC_THINKING=false`) para poder comparar cuando la haya.
 4. **Ampliar la validación** a más KPIs y tipos de activo. Dos cosas concretas:
    el bloque `plant_context` está implementado y **el modelo aún no lo ha
    usado** —en la ejecución del 2026-09-23 eligió 0 de sus 10 variables, que es
    lo correcto para una alerta de bomba pero deja sin comprobar que las pida
-   cuando toque—; y solo existe **un** reanálisis real, así que no sabemos con
-   qué frecuencia la sospecha señalará fuera del contexto disponible.
+   cuando toque—; y solo hay **un** reanálisis de una alerta real, así que no
+   sabemos con qué frecuencia la sospecha señalará fuera del contexto disponible.
+   En ese único caso sí señaló fuera, y la búsqueda no dio con lo que se pedía.
 
 ---
 
@@ -775,5 +863,5 @@ El workflow lanza estos dos servidores como subproceso (`uv run --directory ...`
 
 | Servidor | Ruta | Tools que se usan | Step |
 |---|---|---|---|
-| `afkg-graph-mcp` | `C:\MCPServer\afkg-graph-mcp\` | `graph_neighborhood` | Step 2 |
+| `afkg-graph-mcp` | `C:\MCPServer\afkg-graph-mcp\` | `graph_neighborhood`, `graph_search` | Step 2 y búsqueda del reanálisis |
 | `aveva-pi-mcp` | `C:\MCPServer\MCP Server\` | `create_timeseries_bucket`, `query_by_path` | Step 5 |

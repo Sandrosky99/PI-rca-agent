@@ -274,6 +274,40 @@ check("y el corte anotado",
 check("el que no tenia si queda interrumpido",
       fichero(sin_diag)["estado"] == incidents.INTERRUMPIDO, fichero(sin_diag)["estado"])
 
+print("\n=== 13. UN REANALISIS FALLIDO TAMBIEN APILA SU TRACE ===")
+# Lo destapo una ejecucion real: la busqueda gasto sus cinco vueltas, Gemini
+# devolvio 429 en el Step 6, y el expediente quedo SIN RASTRO de que se hubiera
+# buscado nada. Un reanalisis posterior habria repetido la busqueda entera.
+#
+# marcar_fallo() escribia el campo suelto 'trace' en vez de apilar en 'traces',
+# y traces() prefiere la lista: el suelto se ignora en cuanto existe. Asi que se
+# guardaba donde nadie lo lee.
+#
+# No es perder unos prompts: lo que trae dentro la pasada fallida es QUE se
+# busco y con que resultado, y de ahi sale que no se repita.
+iid = sembrar(diagnostico=None, estado=incidents.RECIBIDO)
+incidents.mark(iid, incidents.FINALIZADO, diagnostico=PRIMERA,
+               trace={"step3_prompt": "pasada 1"})
+incidents.marcar_fallo(iid, "Gemini devolvio 429.", trace={
+    "step3_prompt": "pasada 2",
+    "busqueda_resultado": [{"causa": "1:0", "que_busca": "el pH del primario",
+                            "acierto": None, "motivo": "sin_presupuesto"}]})
+reg = fichero(iid)
+check("la pasada fallida se apila", len(incidents.traces(reg)) == 2,
+      len(incidents.traces(reg)))
+check("y no pisa la anterior",
+      incidents.traces(reg)[0]["step3_prompt"] == "pasada 1", incidents.traces(reg))
+check("lo buscado se puede derivar",
+      "1:0" in incidents.sospechas_atendidas(reg), incidents.sospechas_atendidas(reg))
+# Que es de lo que depende no repetirla.
+check("y consta como atendida aunque no se encontrara",
+      incidents.estado_de_sospechas(reg)["1:0"]["motivo"] == "sin_presupuesto")
+# Lo demas de marcar_fallo no cambia: el diagnostico previo se conserva y el
+# incidente NO se marca fallido.
+check("el diagnostico anterior sigue", incidents.diagnostico_vigente(reg) is not None)
+check("y el incidente sigue finalizado", reg["estado"] == incidents.FINALIZADO, reg["estado"])
+check("con el intento anotado aparte", len(reg.get("intentos_fallidos") or []) == 1)
+
 print("\n" + "=" * 62)
 if fallos:
     print(f"FALLOS: {len(fallos)} -> {fallos}")

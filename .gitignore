@@ -1,10 +1,21 @@
 # Fichero .env con credenciales reales — NUNCA subir a git
 .env
 
-# Respaldos del .env. Llevan las MISMAS credenciales que el original, así que
-# necesitan el mismo trato. El patrón es .env.bak* y no .env.* a propósito:
-# .env.example sí debe versionarse.
-.env.bak*
+# CUALQUIER derivado del .env. Llevan las MISMAS credenciales que el original,
+# así que necesitan el mismo trato.
+#
+# Antes el patrón era solo .env.bak*, con el argumento de que .env.example sí
+# debe versionarse. El argumento era bueno y la solución insuficiente: protegía
+# únicamente a quien se acordara de usar ESE nombre. El 2026-09-30 un respaldo
+# llamado .env.respaldo -- con la clave de Gemini dentro -- quedó fuera del
+# ignore y visible para `git add -A`. No llegó a commitearse, pero solo porque
+# nadie hizo add en esos veinte minutos.
+#
+# Ahora se ignora todo .env.* y se exceptúa la plantilla, que es lo que había
+# que hacer desde el principio: la lista de lo que SÍ se versiona es corta y
+# conocida; la de lo que no, no.
+.env.*
+!.env.example
 
 # Entorno virtual de Python — se regenera con setup.bat
 .venv/

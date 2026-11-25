@@ -38,6 +38,10 @@ SUITES = [
     ("Alcance del Step 2 en el AF", "test_af_alcance.py"),
     ("Ficha del equipo en el Step 6", "test_ficha_equipo.py"),
     ("Reanalisis: el feedback al modelo", "test_reanalisis.py"),
+    ("Puerta de la busqueda de la sospecha", "test_puerta_busqueda.py"),
+    ("Busqueda en la planta (la unica tool del modelo)", "test_busqueda.py"),
+    ("Bucle de busqueda (el paso agentico)", "test_bucle_busqueda.py"),
+    ("Etiqueta de IA: el modelo que se llamo", "test_etiqueta_ia.py"),
 ]
 
 

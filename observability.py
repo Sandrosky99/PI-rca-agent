@@ -47,6 +47,24 @@ COMPONENT = "pi-rca-workflow"
 
 # §1: los valores de texto de más de 200 caracteres SHOULD truncarse.
 _MAX_MSG = 200
+
+# Excepción acotada para el DIAGNÓSTICO de lo que envía PI.
+#
+# El §1 dice SHOULD, no MUST, y aquí recortar a 200 se come justo aquello para
+# lo que existe la línea. Visto el 2026-10-08: una notificación llegó con un
+# cuerpo que no parseaba como JSON, el webhook la registró bajo el título "Body
+# raw (primeros 1000 bytes)" -- y el formateador la dejó en 200, cortando antes
+# de donde estaba el error. El sistema guardaba el cuerpo para poder depurarlo y
+# acto seguido lo tiraba.
+#
+# No es "sin recorte": un cuerpo de 10 MB reventaría el log igual. Es el tope
+# que la propia línea promete, que es el que hace falta para leer un payload de
+# PI entero.
+#
+# Se activa con extra={"_crudo": True}. Lleva guion bajo a propósito: el bucle
+# de abajo salta las claves que empiezan por "_", así que la marca NO sale en el
+# JSON -- cambia cómo se formatea, no qué se publica.
+_MAX_CRUDO = 1000
 # §2.1: los valores de args de más de 120 caracteres SHOULD truncarse.
 _MAX_ARG = 120
 
@@ -81,11 +99,14 @@ class JsonFormatter(logging.Formatter):
     """Formatea cada registro como una línea de JSON (spec §1)."""
 
     def format(self, record: logging.LogRecord) -> str:
+        # Una línea marcada como diagnóstico del cuerpo de PI se recorta al tope
+        # grande. Ver _MAX_CRUDO.
+        tope = _MAX_CRUDO if getattr(record, "_crudo", False) else _MAX_MSG
         entrada = {
             "ts": _ahora(),
             "level": _NIVELES.get(record.levelname, record.levelname),
             "component": COMPONENT,
-            "msg": _truncar(record.getMessage(), _MAX_MSG),
+            "msg": _truncar(record.getMessage(), tope),
         }
         # Campos extra del que llama, ya en camelCase por convención del spec.
         for clave, valor in record.__dict__.items():

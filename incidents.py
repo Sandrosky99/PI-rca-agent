@@ -237,11 +237,12 @@ def traces(registro: dict) -> list[dict]:
     """Los prompts y respuestas de CADA pasada, de la mas antigua a la reciente.
 
     Mismo problema que tenia el diagnostico, y misma forma de resolverlo. Hasta
-    el 2026-09-23 el trace era un objeto suelto que mark() escribia entero en
-    cada pasada, asi que un reanalisis PISABA los prompts de la anterior.
+    la Fase 3 (2026-09-28) el trace era un objeto suelto que mark() escribia
+    entero en cada pasada, asi que un reanalisis PISABA los prompts de la anterior.
 
-    Lo destapo una prueba de punta a punta: el volcado de la primera pasada solo
-    existe porque se guardo a mano antes de relanzar. Sin eso habria desaparecido.
+    Lo destapo una prueba de punta a punta el 2026-09-23: el volcado de la primera
+    pasada solo existe porque se guardo a mano antes de relanzar. Sin eso habria
+    desaparecido.
 
     No es solo incomodo. base/software-spec §1.5 pide conservar el prompt que
     llevo a un artefacto generado por IA: el diagnostico de la primera pasada si
@@ -257,6 +258,112 @@ def traces(registro: dict) -> list[dict]:
     if isinstance(antiguo, dict):
         return [dict(antiguo, iteracion=antiguo.get("iteracion", 1))]
     return []
+
+
+def busquedas(registro: dict) -> list[dict]:
+    """Todo lo que se busco en este expediente, de la pasada mas antigua a la
+    reciente.
+
+    NO se almacena aparte: se deriva de los traces, que ya son append-only y que
+    webhook.py persiste tanto si el analisis acaba bien como si falla. Eso
+    ultimo importa mas de lo que parece -- si esto viajara con el diagnostico,
+    un analisis que se cae DESPUES de una busqueda con exito la perderia, y el
+    reanalisis siguiente gastaria el presupuesto repitiendola.
+
+    Un segundo sitio donde guardarlo seria un segundo sitio que puede discrepar.
+
+    Cada entrada es {"causa", "que_busca", "acierto", "motivo"} tal como la
+    devolvio workflow.buscar_lo_que_falta().
+    """
+    salida = []
+    for t in traces(registro):
+        for b in (t or {}).get("busqueda_resultado") or []:
+            if isinstance(b, dict) and b.get("causa"):
+                salida.append(b)
+    return salida
+
+
+def sospechas_atendidas(registro: dict) -> frozenset[str]:
+    """Las claves (iteracion:indice) de las causas cuya sospecha ya se busco.
+
+    Con exito o sin el: una sospecha que acabo en "no existe en esta planta" NO
+    se vuelve a buscar. Saber que algo no existe es un resultado, y repetirlo
+    cuesta el mismo presupuesto que la primera vez.
+
+    Es lo que hace que un reanalisis 2 no empiece la busqueda de cero.
+    """
+    return frozenset(b["causa"] for b in busquedas(registro))
+
+
+def aciertos_anadidos(registro: dict) -> list[dict]:
+    """Los elementos y variables que las busquedas localizaron, sin repetir.
+
+    Se guarda el SITIO (tipo, nombre, donde), no el bloque de contexto ya
+    resuelto: son tres cadenas en vez de hasta 74 atributos, y al reconstruirlo
+    en cada pasada lo que entra esta al dia respecto al AF. El coste es un
+    recorrido de subarbol por elemento y pasada, que es lo que ya hace el Step 2
+    varias veces.
+    """
+    salida, vistos = [], set()
+    for b in busquedas(registro):
+        a = b.get("acierto")
+        if not isinstance(a, dict) or not a.get("nombre"):
+            continue
+        firma = (a.get("tipo"), a.get("nombre"), a.get("donde"))
+        if firma in vistos:
+            continue
+        vistos.add(firma)
+        salida.append(a)
+    return salida
+
+
+
+def estado_de_sospechas(registro: dict) -> dict:
+    """Que fue de cada sospecha que escribio una persona, por clave de causa.
+
+    Derivado de los traces, igual que el estado de una causa se deriva de sus
+    veredictos. Si esto se guardara aparte habria dos sitios que pueden
+    discrepar, y el que mira la pantalla no sabria a cual creer.
+
+    Una sospecha puede acabar de cuatro maneras, y las cuatro se enseñan:
+
+      encontrado      se busco y se localizo; 'nombre' y 'donde' dicen que.
+      no_existe       se busco y la planta no mide eso. Es un resultado, no un
+                      fallo, y hay que decirlo: quien lo escribio merece saber
+                      que se miro.
+      sin_presupuesto se busco y no se llego a localizar antes de agotar el
+                      presupuesto del paso.
+      pendiente       no se ha buscado todavia porque en esa pasada habia mas
+                      sospechas que el tope. NO se ha descartado.
+
+    Una sospecha que no aparece aqui es una que la puerta considero que hablaba
+    de algo que ya estaba disponible, o una escrita despues del ultimo analisis.
+    En ninguno de los dos casos hay nada que contar.
+
+    Las pasadas se recorren de la mas antigua a la mas reciente y la ultima
+    manda: lo que estaba pendiente en la pasada 1 y se atendio en la 2 sale ya
+    como atendido.
+    """
+    salida: dict = {}
+    for t in traces(registro):
+        t = t or {}
+        # Primero lo pendiente y despues lo resuelto: si una misma causa
+        # apareciera en las dos listas, manda haberla resuelto.
+        for q in t.get("sospechas_pendientes") or []:
+            if isinstance(q, dict) and q.get("causa"):
+                salida[q["causa"]] = {"motivo": "pendiente",
+                                      "que_busca": "", "nombre": "", "donde": ""}
+        for b in t.get("busqueda_resultado") or []:
+            if not isinstance(b, dict) or not b.get("causa"):
+                continue
+            acierto = b.get("acierto") or {}
+            salida[b["causa"]] = {
+                "motivo": b.get("motivo") or "",
+                "que_busca": b.get("que_busca") or "",
+                "nombre": acierto.get("nombre") or "",
+                "donde": acierto.get("donde") or "",
+            }
+    return salida
 
 
 def diagnostico_vigente(registro: dict) -> dict | None:
@@ -396,13 +503,25 @@ def listar(desde: str | None = None, hasta: str | None = None,
     }
 
 
+# Lo que de una pasada SÍ viaja a la pantalla. Todo lo demás de un trace son
+# prompts y respuestas en crudo.
+_TRACE_LIGERO = ("iteracion", "busqueda_resultado", "sospechas_pendientes")
+
+
 def leer_por_id(incidente_id: str) -> dict | None:
     """Un incidente completo, o None si no existe o el id no es válido.
 
-    Se devuelve SIN el trace. Medido sobre un incidente real, el trace es el
+    Se devuelve SIN LOS PROMPTS. Medido sobre un incidente real, el trace es el
     98,9 % del fichero (501 KB de 507 KB) y son los prompts enviados al modelo y
     sus respuestas en crudo: nada que pinte en una pantalla de sala de control,
     y mucho que transferir en cada refresco.
+
+    Lo que sí sobrevive de cada pasada son los tres campos de `_TRACE_LIGERO`,
+    que son cadenas cortas. Hasta el 2026-09-28 se quitaba `traces` entero, y
+    eso dejaba sin materia prima a `estado_de_sospechas()`: la pantalla no podía
+    contar qué había sido de una sospecha porque el dato del que se deriva
+    llegaba borrado. El motivo de podar era el TAMAÑO, no la existencia de las
+    pasadas, así que se poda por tamaño.
     """
     if not _ID_VALIDO.match(incidente_id or ""):
         log.warning("Id de incidente con formato no válido; se rechaza.",
@@ -411,7 +530,13 @@ def leer_por_id(incidente_id: str) -> dict | None:
     registro = _leer(_directorio() / f"{incidente_id}.json")
     if registro is None:
         return None
-    return {k: v for k, v in registro.items() if k not in ("trace", "traces")}
+    salida = {k: v for k, v in registro.items() if k not in ("trace", "traces")}
+    # Lista blanca y no lista negra: así un campo pesado que se añada mañana a
+    # un trace no empieza a viajar solo porque nadie se acordó de excluirlo.
+    ligeros = [{k: t[k] for k in _TRACE_LIGERO if k in t} for t in traces(registro)]
+    if any(ligeros):
+        salida["traces"] = ligeros
+    return salida
 
 
 def _duplicado_por_enfriamiento(identidad: str, ahora: datetime) -> dict | None:
@@ -945,7 +1070,11 @@ def marcar_fallo(incidente_id: str, motivo: str, trace: dict | None = None) -> d
     'intentos_fallidos' es de SOLO ANADIR, como los veredictos: que un
     reanalisis fallara dos veces seguidas es informacion, no ruido.
     """
-    previo = leer_por_id(incidente_id) or {}
+    # El expediente COMPLETO, no leer_por_id(): esa poda los traces a sus campos
+    # ligeros para no arrastrar los prompts hasta la pantalla, y aqui hacen
+    # falta enteros -- sin ellos, apilar la pasada que acaba de fallar borraria
+    # los prompts de todas las anteriores. Mismo motivo que en mark().
+    previo = _leer(_directorio() / f"{incidente_id}.json") or {}
     if not iteraciones(previo):
         return mark(incidente_id, FALLIDO, trace=trace, motivo=motivo)
 
@@ -963,7 +1092,26 @@ def marcar_fallo(incidente_id: str, motivo: str, trace: dict | None = None) -> d
                              + [{"en": ahora, "motivo": motivo}],
     }
     if trace:
-        cambios["trace"] = trace
+        # Se APILA en 'traces', igual que en mark(). Escribirlo en el campo
+        # suelto 'trace' -- que es lo que se hacia hasta el 2026-09-29 -- lo
+        # dejaba donde nadie lo lee: traces() prefiere la lista y el suelto se
+        # ignora en cuanto existe.
+        #
+        # No es solo perder unos prompts. Lo que la pasada fallida trae dentro
+        # es lo que se buscó y con qué resultado, y de ahí sale que un
+        # reanálisis posterior NO repita la búsqueda (ver busquedas() y
+        # sospechas_atendidas()). Esa garantía estaba escrita en su docstring
+        # -- "webhook persiste el trace tanto si el análisis acaba bien como si
+        # falla" -- y era falsa justo en la rama del reanálisis fallido, que es
+        # la única donde hacía falta.
+        #
+        # Lo destapó una ejecución real: Gemini devolvió 429 en el Step 6
+        # después de que la búsqueda hubiera gastado sus cinco vueltas, y el
+        # expediente quedó sin rastro de que se hubiera buscado nada.
+        anteriores = traces(previo)
+        cambios["traces"] = anteriores + [dict(trace, iteracion=len(anteriores) + 1)]
+        if "trace" in previo:
+            cambios["trace"] = _BORRAR
     log.warning("Reanalisis fallido; se conserva el diagnostico anterior: %s",
                 motivo, extra={"incidentId": incidente_id})
     return _actualizar(incidente_id, cambios)
@@ -1010,10 +1158,32 @@ def cierre(registro: dict) -> tuple[str | None, bool]:
     estado = registro.get("estado")
     if estado in _EN_CURSO:
         return None, False                       # está en marcha; no ha terminado
-    if estado == FALLIDO:
+
+    # FALLIDO e INTERRUMPIDO comparten etiqueta a propósito. La diferencia --
+    # el análisis se cortó solo, o murió el proceso debajo -- importa para
+    # depurar y la conserva el campo 'estado'; para quien mira la pantalla los
+    # dos dicen lo mismo: no hay diagnóstico y nadie lo va a terminar.
+    #
+    # Que INTERRUMPIDO esté aquí es un arreglo del 2026-09-29. Antes caía en el
+    # `return None, False` de abajo, y eso NO es "no ha cerrado todavía": con
+    # etiqueta None, esta_cerrado() contesta antes de llegar a mirar el reloj,
+    # así que un interrumpido no vencía nunca -- ni a las 20 h ni a las 200. Se
+    # quedaba en activos ocupando sitio en la ventana de prioridad sin pedir
+    # nada, que es lo contrario de para lo que sirve esa pestaña.
+    #
+    # El comentario que había daba por supuesto que "se recogen solos cuando PI
+    # vuelve a notificar" -- cierto sólo si la alerta se repite. Si la condición
+    # se corrigió, PI no vuelve a avisar y el expediente se queda ahí para
+    # siempre. Lo destapó mirar la pantalla, no una prueba.
+    #
+    # El diseño ya decía esto: DISENO-INTERACCION-HUMANA.md §"Qué se ve en
+    # activos" da 12 h a `fallido` e `interrumpido`, y el README ya listaba
+    # "fallo del análisis" como su cierre. El código era lo que no lo cumplía.
+    if estado in (FALLIDO, INTERRUMPIDO):
         return FALLO_DEL_ANALISIS, False         # se ve 12 h y luego cierra
     if estado != FINALIZADO:
-        # PAUSADO e INTERRUMPIDO se recogen solos cuando PI vuelve a notificar.
+        # Sólo queda PAUSADO, que no sale en ninguna de las dos pestañas: no es
+        # información de un incidente sino del sistema entero. Ver esta_cerrado().
         return None, False
 
     # TODAS las pasadas, no solo la vigente: un reanalisis trae causas nuevas y

@@ -17,6 +17,7 @@ RAIZ = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(RAIZ))
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 import config
+import llm_client
 
 fallos = []
 
@@ -73,7 +74,7 @@ check("config carga sin excepcion", proc.returncode == 0,
 if proc.returncode == 0:
     partes = proc.stdout.split()
     check("aplica los valores por defecto documentados",
-          partes[1:6] == ["8090", "24", "16000", "20", "40"], proc.stdout.strip())
+          partes[1:6] == ["8090", "24", "32000", "20", "40"], proc.stdout.strip())
 
 print("\n=== 5. Todas las variables del ejemplo estan contempladas en config.py ===")
 import re
@@ -84,6 +85,19 @@ claves = re.findall(r"^([A-Z_][A-Z0-9_]*)=", ejemplo, re.M)
 huerfanas = [k for k in claves if k not in fuente]
 check(f"las {len(claves)} claves del ejemplo se leen en config.py",
       not huerfanas, f"sin uso: {huerfanas}")
+
+# Y AL REVES, que es por donde se coló el hueco: esta comprobación solo miraba
+# ejemplo -> config, así que una variable que config leyera y el ejemplo no
+# documentara pasaba inadvertida. El 2026-09-30 eran OCHO -- las dos de la
+# pantalla, las cinco de la búsqueda y el umbral de causas repetidas. Nada se
+# rompía, porque todas tienen valor por defecto; simplemente quien copiara la
+# plantilla no sabía que existían.
+lee = set(re.findall(r'os\.environ\.get\(\s*"([A-Z_][A-Z0-9_]*)"', fuente))
+lee |= set(re.findall(r'_entero\(\s*"([A-Z_][A-Z0-9_]*)"', fuente))
+lee.discard("X")   # sale de un ejemplo dentro del docstring de _entero
+sin_documentar = sorted(lee - set(claves))
+check("y toda variable que config.py lee esta en el ejemplo",
+      not sin_documentar, f"sin documentar: {sin_documentar}")
 
 print("\n=== 6. validate_config solo exige la clave del proveedor elegido ===")
 orig_prov, orig_g, orig_a = config.LLM_PROVIDER, config.GEMINI_API_KEY, config.ANTHROPIC_API_KEY
@@ -99,6 +113,344 @@ check("proveedor desconocido se reporta", config.validate_config() != [])
 config.LLM_PROVIDER, config.GEMINI_API_KEY, config.ANTHROPIC_API_KEY = orig_prov, orig_g, orig_a
 
 shutil.rmtree(TMP, ignore_errors=True)
+print("\n=== 12. Razonamiento extendido en la ruta de Anthropic ===")
+# Existe para IGUALAR LOS DOS PROVEEDORES: gemini-2.5-flash razona por defecto y
+# la llamada a Anthropic no lo pedia, asi que cambiar de proveedor cambiaba algo
+# mas que el proveedor.
+# Contra el fuente, no contra config.ANTHROPIC_THINKING: eso lee el .env de
+# quien ejecute la suite, y quien lo tenga apagado veria fallar una prueba que
+# habla del valor POR DEFECTO.
+check("encendido por defecto",
+      'os.environ.get("ANTHROPIC_THINKING") or "true"'
+      in (RAIZ / "config.py").read_text(encoding="utf-8"))
+fuente = (RAIZ / "llm_client.py").read_text(encoding="utf-8")
+# "adaptive" y no un presupuesto de tokens: en claude-opus-4-8 budget_tokens ya
+# no se acepta -- la API responde 400 --, asi que la forma vieja no es solo peor,
+# es un error.
+check("es adaptive", '{"type": "adaptive"}' in fuente)
+# Se mira LA LLAMADA, no el fichero: los comentarios de al lado nombran
+# budget_tokens justo para explicar por que no se usa.
+i = fuente.index("response = client.messages.create(")
+llamada = fuente[i:fuente.index(")", fuente.index("**extra", i))]
+check("y NO se pasa budget_tokens", "budget_tokens" not in llamada, llamada)
+check("el thinking entra por el extra", "**extra" in llamada, llamada)
+# Con razonamiento la API solo admite la temperatura por defecto.
+check("no se pasa temperatura", "temperature=" not in fuente)
+
+print("\n=== 12b. EL RIESGO: el primer bloque ya no es el texto ===")
+# Con razonamiento extendido la respuesta llega en VARIOS bloques y el primero
+# es el pensamiento. response.content[0].text -- que es lo que habia -- habria
+# devuelto el razonamiento en lugar del JSON, y habria roto el parseo de TODOS
+# los pasos con un error que no apunta ni de lejos a esa linea.
+class Bloque:
+    def __init__(self, tipo, texto=None):
+        self.type = tipo
+        if texto is not None:
+            self.text = texto
+
+
+class Respuesta:
+    def __init__(self, bloques, stop="end_turn"):
+        self.content = bloques
+        self.stop_reason = stop
+
+
+check("se salta el bloque de razonamiento",
+      llm_client._texto_de(Respuesta([Bloque("thinking"), Bloque("text", '{"ok":1}')]))
+      == '{"ok":1}')
+check("y sigue valiendo sin razonamiento",
+      llm_client._texto_de(Respuesta([Bloque("text", "hola")])) == "hola")
+# Un bloque de razonamiento NO tiene .text: acceder a el reventaria.
+check("no toca el .text del que no lo tiene",
+      not hasattr(Bloque("thinking"), "text"))
+
+# Sin bloque de texto no hay respuesta. Pasa si max_tokens se agota razonando, y
+# el aviso tiene que decir que hacer.
+try:
+    llm_client._texto_de(Respuesta([Bloque("thinking")], stop="max_tokens"))
+    check("sin texto avisa", False, "no lanzo nada")
+except llm_client.LLMGenerationError as exc:
+    check("sin texto avisa, y es el error del modulo", True)
+    check("dice el motivo de parada", "max_tokens" in str(exc), str(exc))
+    check("y que hacer", "ANTHROPIC_THINKING" in str(exc), str(exc))
+
+print("\n=== 13. Un 429 se reintenta; el resto de 4xx no ===")
+# El 429 dice "ahora mismo no, vuelve en un momento": es EL error reintentable
+# por definicion. Estaba fuera porque la regla era "4xx no se reintenta" --
+# cierta para todos los demas -- y eso dejaba a los dos proveedores
+# comportandose distinto ante lo mismo: la rama de Anthropic si reintenta su
+# RateLimitError.
+#
+# Costo un analisis real (2026-09-29): el paso de busqueda subio las llamadas
+# por reanalisis de 2-3 a 8, ocho en 45 s agotaron el limite por minuto, y el
+# 429 llego en el Step 6 -- con el diagnostico a una llamada de distancia.
+from google.genai import errors as _gerr
+
+
+def _gemini(clase, code):
+    return clase(code, {"error": {"code": code, "status": "RESOURCE_EXHAUSTED"}}, None)
+
+
+check("503 se reintenta", llm_client._is_transient_gemini_error(_gemini(_gerr.ServerError, 503)))
+check("429 TAMBIEN", llm_client._is_transient_gemini_error(_gemini(_gerr.ClientError, 429)))
+check("400 no", not llm_client._is_transient_gemini_error(_gemini(_gerr.ClientError, 400)))
+check("401 tampoco", not llm_client._is_transient_gemini_error(_gemini(_gerr.ClientError, 401)))
+check("y algo que no es del SDK, tampoco",
+      not llm_client._is_transient_gemini_error(ValueError("x")))
+
+# Los dos proveedores, ante un limite de ritmo, hacen lo mismo.
+import anthropic as _anth
+check("Anthropic ya lo hacia", "RateLimitError" in
+      (RAIZ / "llm_client.py").read_text(encoding="utf-8"))
+# Y la ventana de reintentos cubre de sobra un limite por minuto.
+check("la ventana aguanta mas de un minuto",
+      config.LLM_RETRY_WINDOW_SECONDS >= 60, config.LLM_RETRY_WINDOW_SECONDS)
+
+print("\n=== 14. DeepSeek como tercer proveedor ===")
+# Se habla con el SDK de Anthropic apuntado a otra base_url: DeepSeek publica un
+# endpoint que habla ese protocolo y la llamada tiene la misma forma. Asi no
+# entra una dependencia nueva, que aqui no es gratis -- cada una lleva revision
+# de mantenimiento, adopcion y licencia (izSpecs 1.3).
+# Se miran las lineas que DECLARAN dependencia, no el texto del fichero: los
+# comentarios nombran a DeepSeek justo para explicar que no hace falta una.
+requisitos = (RAIZ / "requirements.txt").read_text(encoding="utf-8")
+declaradas = sorted(l.split("==")[0].strip() for l in requisitos.splitlines()
+                    if "==" in l and not l.strip().startswith("#"))
+check("NO se anade dependencia nueva", len(declaradas) == 8, declaradas)
+check("y ninguna es de deepseek ni de openai",
+      not any("deepseek" in d or "openai" in d for d in declaradas), declaradas)
+check("se reutiliza el SDK que ya estaba", "anthropic" in declaradas, declaradas)
+
+fuente = (RAIZ / "llm_client.py").read_text(encoding="utf-8")
+i = fuente.index("def _generate_deepseek")
+cuerpo = fuente[i:fuente.index("def _texto_de", i)]
+
+# Configuracion PROPIA. Que un proveedor herede la de otro es como se acaba sin
+# saber con que se genero un diagnostico.
+check("clave propia", "config.DEEPSEEK_API_KEY" in cuerpo)
+check("modelo propio", "config.DEEPSEEK_MODEL" in cuerpo)
+check("y su base_url", "config.DEEPSEEK_BASE_URL" in cuerpo)
+check("NO hereda nada de ANTHROPIC_", "config.ANTHROPIC" not in cuerpo, cuerpo[:200])
+# Los valores POR DEFECTO se comprueban contra el fuente de config.py, no
+# contra config.DEEPSEEK_*: eso ultimo lee el .env de quien ejecute la suite, y
+# una prueba que dependa del .env falla en una maquina y pasa en otra -- es la
+# misma razon por la que existe el aislamiento de las suites del webhook.
+#
+# Y no se imprime NUNCA el valor leido. El 2026-09-30 esta comprobacion tenia
+# config.DEEPSEEK_MODEL como detalle del fallo; una clave de API pegada por
+# error en esa variable acabo escrita en la salida de la consola. Un check sobre
+# configuracion no puede usar el valor real como mensaje de error.
+cfg = (RAIZ / "config.py").read_text(encoding="utf-8")
+check("el endpoint por defecto es el compatible con Anthropic",
+      'or "https://api.deepseek.com/anthropic"' in cfg)
+check("y el modelo por defecto es el rapido",
+      'DEEPSEEK_MODEL: str = os.environ.get("DEEPSEEK_MODEL") or "deepseek-flash"' in cfg)
+
+# NO se manda razonamiento porque NO HACE FALTA: comprobado contra la API el
+# 2026-09-30, deepseek-flash razona SIEMPRE -- la respuesta trae bloque
+# 'thinking' aunque no se mande nada. Acepta "adaptive" y "enabled" sin
+# protestar, pero no cambian el resultado.
+# Se mira LA LLAMADA, no el texto: el docstring nombra 'thinking' justo para
+# explicar por que no se manda.
+llamada = cuerpo[cuerpo.index("client.messages.create("):]
+llamada = llamada[:llamada.index("return")]
+check("no se manda thinking sin haberlo comprobado",
+      "thinking" not in llamada and "extra" not in llamada, llamada)
+check("y si los cuatro parametros que DeepSeek documenta",
+      all(x in llamada for x in ("model=", "max_tokens=", "system=", "messages=")), llamada)
+# Y consta cuando se verifico contra la API real, que no es lo mismo que pasar
+# las pruebas con dobles.
+check("consta la verificacion en vivo", "VERIFICADO CONTRA LA API REAL" in cuerpo)
+# Como la respuesta SIEMPRE trae razonamiento, el primer bloque no es el texto:
+# content[0].text devolveria el pensamiento en vez del JSON. Por eso esta ruta
+# tiene que pasar por _texto_de() si o si.
+# Se mira el CODIGO, no el docstring: ahi 'content[0]' aparece justo para
+# explicar por que no se usa. (Es la cuarta vez hoy que una comprobacion busca
+# una palabra en texto libre y la encuentra en el comentario que la desaconseja;
+# la regla es afirmar sobre estructura, no sobre prosa.)
+codigo = cuerpo.split('"""')[2] if cuerpo.count('"""') >= 2 else cuerpo
+check("la respuesta se lee con _texto_de, no por indice",
+      "_texto_de(response)" in codigo and "content[0]" not in codigo, codigo[:200])
+
+# Reintentos: los mismos, y por el mismo predicado -- las excepciones las levanta
+# ese SDK, asi que son sus clases. Incluye el 429.
+# El decorador va en la linea justo encima del def. Las excepciones las levanta
+# el SDK de Anthropic -- es el que hace la llamada -- asi que el predicado es el
+# suyo, y eso incluye el 429.
+lineas = fuente.split(chr(10))
+n = next(k for k, x in enumerate(lineas) if x.startswith("def _generate_deepseek"))
+check("reintenta, con el predicado de Anthropic",
+      "_is_transient_anthropic_error" in lineas[n - 1] and "_RETRY_COMMON" in lineas[n - 1],
+      lineas[n - 1])
+
+print("\n=== 14b. La eleccion es del usuario, en el .env ===")
+check("el proveedor se acepta", "deepseek" in fuente and '"deepseek"' in fuente)
+ejemplo = (RAIZ / ".env.example").read_text(encoding="utf-8")
+for clave in ("DEEPSEEK_API_KEY", "DEEPSEEK_MODEL", "DEEPSEEK_BASE_URL"):
+    check("%s esta en el .env.example" % clave, clave + "=" in ejemplo)
+check("y el selector menciona los tres", '"deepseek"' in ejemplo and '"anthropic"' in ejemplo)
+
+print("\n=== 14c. validate_config solo exige SU clave ===")
+guardado = (config.LLM_PROVIDER, config.DEEPSEEK_API_KEY)
+try:
+    config.LLM_PROVIDER, config.DEEPSEEK_API_KEY = "deepseek", ""
+    falta = config.validate_config()
+    check("sin clave la reclama", "DEEPSEEK_API_KEY" in falta, falta)
+    check("y no pide las de los otros",
+          not any(k.startswith(("GEMINI", "ANTHROPIC")) for k in falta), falta)
+    config.DEEPSEEK_API_KEY = "sk-loquesea"
+    check("con clave no falta nada del LLM",
+          not any("API_KEY" in k for k in config.validate_config()), config.validate_config())
+    config.LLM_PROVIDER = "gemini"
+    check("y con gemini no exige la de deepseek",
+          "DEEPSEEK_API_KEY" not in config.validate_config())
+    config.LLM_PROVIDER = "otracosa"
+    check("un proveedor desconocido nombra los tres",
+          all(x in str(config.validate_config()) for x in ("gemini", "anthropic", "deepseek")),
+          config.validate_config())
+finally:
+    config.LLM_PROVIDER, config.DEEPSEEK_API_KEY = guardado
+
+print("\n=== 14d. El despachador lo enruta ===")
+llamadas = []
+guardado = (llm_client._generate_deepseek, config.LLM_PROVIDER)
+try:
+    llm_client._generate_deepseek = lambda sp, um: llamadas.append(("deepseek", sp, um)) or "OK"
+    config.LLM_PROVIDER = "deepseek"
+    check("responde", llm_client.generate("sistema", "usuario") == "OK")
+    check("por la rama de deepseek", llamadas and llamadas[0][0] == "deepseek", llamadas)
+    check("con el system prompt y el mensaje", llamadas[0][1:] == ("sistema", "usuario"), llamadas)
+    config.LLM_PROVIDER = "marciano"
+    try:
+        llm_client.generate("a", "b")
+        check("un proveedor invalido revienta", False, "no lanzo nada")
+    except ValueError as exc:
+        check("un proveedor invalido revienta, y dice cuales valen",
+              "deepseek" in str(exc), str(exc))
+finally:
+    llm_client._generate_deepseek, config.LLM_PROVIDER = guardado
+
+print("\n=== 15. El techo de tokens cubre el RAZONAMIENTO, no solo la respuesta ===")
+# El Step 6 de un reanalisis real murio con stop_reason=max_tokens y un UNICO
+# bloque 'thinking': gasto el techo entero pensando y no llego a escribir el
+# diagnostico, habiendo pagado ya los cinco pasos anteriores.
+#
+# Repetido contra ese mismo prompt (79.024 caracteres, el mas grande que produce
+# el workflow) salio bien con 9.608 tokens de salida. Asi que 16000 no era
+# absurdo, era JUSTO -- 1,7x sobre un caso normal -- y lo que varia de una vuelta
+# a otra es cuanto razona el modelo.
+check("el techo da mas de 3x sobre lo medido", config.LLM_MAX_TOKENS >= 3 * 9608,
+      config.LLM_MAX_TOKENS)
+cfg = (RAIZ / "config.py").read_text(encoding="utf-8")
+check("y el porque esta escrito, con la medida",
+      "9.608" in cfg and "razonamiento" in cfg)
+
+# El aviso tiene que decir QUE paso y QUE hacer, sin mandar a una palanca que no
+# aplica: deepseek-flash razona siempre y ANTHROPIC_THINKING no lo apaga.
+# Se provoca el fallo y se lee EL MENSAJE MONTADO, no el fuente: en el codigo el
+# texto va partido entre literales, asi que buscarlo ahi encuentra trozos y no
+# frases. Lo que importa es lo que acaba leyendo una persona.
+class _Bloque:
+    type = "thinking"
+
+
+class _Respuesta:
+    content = [_Bloque()]
+    stop_reason = "max_tokens"
+
+
+try:
+    llm_client._texto_de(_Respuesta())
+    aviso = ""
+    check("sin texto se avisa", False, "no lanzo nada")
+except llm_client.LLMGenerationError as exc:
+    aviso = str(exc)
+    check("sin texto se avisa", True)
+
+check("dice el motivo de parada", "max_tokens" in aviso, aviso)
+check("y que solo vino un bloque de razonamiento", "thinking" in aviso, aviso)
+check("distingue quedarse sin espacio RAZONANDO", "RAZONANDO" in aviso, aviso)
+check("dice que el techo cubre las dos cosas",
+      "razonamiento y la respuesta juntos" in aviso, aviso)
+check("y que apagarlo solo vale en la ruta de Anthropic",
+      "solo sirve en la ruta de Anthropic" in aviso, aviso)
+# Decia "Claude no devolvio texto" cuando ya son tres proveedores.
+check("no nombra a un proveedor como si fuera el unico",
+      "Claude no" not in aviso, aviso)
+
+print("\n=== 16. uv se resuelve a ruta absoluta, no se confia al PATH ===")
+# El 2026-10-08 una notificacion REAL murio con FileNotFoundError [WinError 2]:
+# el proceso del webhook llevaba encendido desde antes de que la carpeta
+# .local/bin del usuario entrara en el PATH, asi que no encontraba 'uv' y no
+# podia lanzar los servidores MCP. Un servicio de larga vida hereda el entorno
+# del momento en que arranco: "esta en mi terminal" no significa que este en el
+# suyo.
+check("UV_BINARY existe", hasattr(config, "UV_BINARY"))
+check("y apunta a un ejecutable de verdad",
+      os.path.isfile(config.UV_BINARY) or shutil.which(config.UV_BINARY),
+      config.UV_BINARY)
+check("es una ruta, no el nombre a secas", os.sep in config.UV_BINARY, config.UV_BINARY)
+
+# Los dos clientes MCP lo usan; si alguno se queda con "uv" literal, vuelve el
+# fallo pero solo en ese paso.
+for mod in ("graph_client.py", "pi_client.py"):
+    fuente = (RAIZ / mod).read_text(encoding="utf-8")
+    check("%s lanza con UV_BINARY" % mod, "command=config.UV_BINARY," in fuente)
+    check("%s ya no usa 'uv' literal" % mod, 'command="uv"' not in fuente)
+
+# Y se avisa ANTES de perder un analisis, no a mitad del Step 2.
+guardado = config.UV_BINARY
+try:
+    config.UV_BINARY = "uv-que-no-existe-en-ninguna-parte"
+    falta = config.validate_config()
+    check("si no se encuentra, validate_config lo dice",
+          any("UV_BINARY" in x for x in falta), falta)
+    check("y explica la consecuencia",
+          any("servidores MCP" in x for x in falta), falta)
+finally:
+    config.UV_BINARY = guardado
+
+print("\n=== 17. Un servidor de pruebas no comparte el log ni el audit del servicio ===")
+# Hasta el 2026-11-25 el de pruebas se arrancaba cambiando solo INCIDENTS_DIR, y
+# escribio dos meses en el audit.jsonl real. Se comprueba la funcion que lo
+# detecta y que el arranque la usa.
+guardado = (config.INCIDENTS_DIR, config.LOG_FILE, config.AUDIT_FILE)
+defecto = (str(config._INCIDENTS_DIR_POR_DEFECTO), str(config._LOG_FILE_POR_DEFECTO),
+           str(config._AUDIT_FILE_POR_DEFECTO))
+try:
+    config.INCIDENTS_DIR, config.LOG_FILE, config.AUDIT_FILE = defecto
+    check("el servicio con sus rutas: nada que avisar",
+          config.ficheros_compartidos_con_el_servicio() == [])
+
+    config.INCIDENTS_DIR = "dev-fixtures/incidents"
+    check("solo cambia INCIDENTS_DIR: avisa de los dos",
+          config.ficheros_compartidos_con_el_servicio() == ["LOG_FILE", "AUDIT_FILE"],
+          config.ficheros_compartidos_con_el_servicio())
+
+    config.LOG_FILE = "dev-fixtures/webhook.log"
+    check("cambia tambien el log: avisa solo del audit",
+          config.ficheros_compartidos_con_el_servicio() == ["AUDIT_FILE"],
+          config.ficheros_compartidos_con_el_servicio())
+
+    config.AUDIT_FILE = "dev-fixtures/audit.jsonl"
+    check("las tres separadas: nada que avisar",
+          config.ficheros_compartidos_con_el_servicio() == [])
+
+    # Poner a mano la ruta del servicio comparte igual: se comparan rutas
+    # resueltas, no si la variable esta definida.
+    config.AUDIT_FILE = str(Path(defecto[2]).parent / "." / "audit.jsonl")
+    check("la ruta del servicio escrita de otra forma tambien cuenta",
+          config.ficheros_compartidos_con_el_servicio() == ["AUDIT_FILE"],
+          config.ficheros_compartidos_con_el_servicio())
+finally:
+    config.INCIDENTS_DIR, config.LOG_FILE, config.AUDIT_FILE = guardado
+
+fuente_webhook = (RAIZ / "webhook.py").read_text(encoding="utf-8")
+inicio = fuente_webhook.index("async def startup_event")
+arranque = fuente_webhook[inicio:fuente_webhook.index("\nasync def ", inicio + 1)]
+check("el arranque del webhook lo comprueba y avisa",
+      "config.ficheros_compartidos_con_el_servicio()" in arranque and "log.warning" in arranque)
+
 print("\n" + "=" * 62)
 if fallos:
     print(f"FALLOS: {len(fallos)} -> {fallos}")

@@ -167,6 +167,91 @@ check("el feedback se construye antes del Step 3",
       fuente.index("feedback, causas_nuevas = bloque_feedback")
       < fuente.index("context = build_analysis_context(notification_payload"))
 
+print("\n=== 12. PEDIRSELO NO ES AUTORIZARLO ===")
+# El prompt le dice "No las repitas en tu respuesta" y "Devuelve una sola causa
+# nueva". En la primera ejecucion real (OX313, 2026-09-29) se salto las dos:
+# devolvio DOS causas teniendo una de presupuesto, y una repetia la colmatacion
+# de los difusores, que seguia ABIERTA desde la pasada anterior con otras
+# palabras. El operario se encuentra dos tarjetas para la misma hipotesis y
+# tiene que juzgarla dos veces.
+#
+# Los textos de aqui abajo son los reales de esa ejecucion.
+ABIERTA = "Colmatacion de los difusores de la parrilla de aireacion de la linea 1"
+DESCART = ("Punta de carga organica en la entrada que consume el oxigeno mas "
+           "rapido de lo que se aporta")
+REPETIDA = ("Colmatacion de los difusores de la parrilla de aireacion en la zona "
+            "aerobia de la Linea 1, reduciendo la eficiencia de transferencia de "
+            "oxigeno al licor mezcla.")
+NUEVA = ("Aumento de la demanda biologica de oxigeno debido a una mayor "
+         "concentracion de solidos suspendidos (MLSS) en el reactor biologico de "
+         "la Linea 1, lo que consume el oxigeno mas rapido de lo que puede ser "
+         "aportado por el sistema de aireacion.")
+
+PREVIAS = [
+    {"iteracion": 1, "indice": 0, "cause": ABIERTA, "estado": incidents.PENDIENTE},
+    {"iteracion": 1, "indice": 1, "cause": DESCART, "estado": incidents.DESCARTADA,
+     "evidencia": "La DQO de entrada esta en rango normal."},
+]
+
+
+def autorizar(causas, previas=PREVIAS, hueco=1):
+    d = {"root_causes": [{"cause": c} for c in causas]}
+    tr = {}
+    workflow.autorizar_causas(d, previas, hueco, tr)
+    return [c["cause"] for c in d["root_causes"]], tr.get("causas_no_autorizadas", [])
+
+vivas, fuera = autorizar([NUEVA, REPETIDA])
+check("la repetida se cae", REPETIDA not in vivas, vivas)
+check("y la que si es nueva sobrevive", vivas == [NUEVA], vivas)
+check("se dice de cual es copia", fuera[0]["repite"] == ABIERTA, fuera)
+check("y que aquella seguia abierta", fuera[0]["estado_anterior"] == incidents.PENDIENTE, fuera)
+
+print("\n=== 12b. El caso que NO puede confundirse ===")
+# "Mayor concentracion de MLSS en el reactor" comparte con "punta de carga
+# organica en la entrada" hasta el final de la frase -- "consume el oxigeno mas
+# rapido de lo que se aporta" --, pero son mecanismos distintos: demanda
+# endogena frente a carga que entra. El giro es justo lo que anuncio que_cambia.
+# Si el criterio no separa estos dos, tira diagnosticos buenos.
+vivas, fuera = autorizar([NUEVA], hueco=1)
+check("una causa distinta de verdad NO se toca", vivas == [NUEVA], (vivas, fuera))
+
+print("\n=== 12c. Repetir una DESCARTADA es peor, y tambien se corta ===")
+# Alguien abrio la tapa y lo refuto. Reproponerlo es lo que el reanalisis existe
+# para no hacer.
+vivas, fuera = autorizar([DESCART + " otra vez"])
+check("se cae", vivas == [], vivas)
+check("y consta que estaba descartada",
+      fuera[0]["estado_anterior"] == incidents.DESCARTADA, fuera)
+
+print("\n=== 12d. Las tildes y las mayusculas no deciden nada ===")
+vivas, _ = autorizar(["COLMATACIÓN DE LOS DIFUSORES DE LA PARRILLA DE AIREACIÓN DE LA LÍNEA 1"])
+check("la misma causa con tildes se detecta igual", vivas == [], vivas)
+
+print("\n=== 12e. El presupuesto se APLICA, no se pide ===")
+vivas, fuera = autorizar(["Causa nueva alfa sobre el soplante",
+                          "Causa nueva beta sobre la valvula de purga"], hueco=1)
+check("solo entra la primera", len(vivas) == 1, vivas)
+check("y la otra consta como sin presupuesto",
+      fuera[0]["motivo"] == "sin_presupuesto", fuera)
+# El orden importa: si se recortara ANTES de quitar repetidas, el recorte podria
+# quedarse con la copia y tirar la buena. Aqui la repetida va primera.
+vivas, _ = autorizar([REPETIDA, NUEVA], hueco=1)
+check("primero se quitan las copias y despues se recorta", vivas == [NUEVA], vivas)
+
+print("\n=== 12f. En una PRIMERA pasada no se toca nada ===")
+# Sin causas anteriores no hay con que comparar, y el tope de un reanalisis no
+# aplica: la primera pasada tiene su propio minimo de dos.
+d = {"root_causes": [{"cause": "a"}, {"cause": "b"}, {"cause": "c"}]}
+workflow.autorizar_causas(d, [], 0, None)
+check("las tres siguen", len(d["root_causes"]) == 3, d)
+
+print("\n=== 12g. Nada de esto es silencioso ===")
+vivas, fuera = autorizar([NUEVA, REPETIDA])
+check("queda en el trace", len(fuera) == 1, fuera)
+check("con el parecido medido", 0 < fuera[0]["parecido"] <= 1, fuera)
+check("el umbral es configurable", config.UMBRAL_CAUSA_REPETIDA_PCT == 80,
+      config.UMBRAL_CAUSA_REPETIDA_PCT)
+
 print("\n" + "=" * 62)
 if fallos:
     print(f"FALLOS: {len(fallos)} -> {fallos}")

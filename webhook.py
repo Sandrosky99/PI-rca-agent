@@ -35,6 +35,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 import config
 import incidents
+import llm_client
 import observability
 import workflow
 
@@ -111,8 +112,16 @@ async def _ejecutar_analisis(payload: dict, registro: dict,
         # Como la llamada ya tiene su propio LLM_TIMEOUT_SECONDS, ese rezagado
         # dura como mucho un par de minutos. La plaza del semáforo sí se libera
         # al instante, que es lo que importa para los que esperan turno.
+        # Lo ya buscado en pasadas anteriores se DERIVA del expediente, no se
+        # arrastra por parametro desde el disparador: asi un reanalisis 2 hereda
+        # lo que encontro el 1 sin repetir la busqueda, y una sospecha que acabo
+        # en "no existe" no se vuelve a intentar.
         diagnostico = await asyncio.wait_for(
-            workflow.run_rca_analysis(payload, trace, revision),
+            workflow.run_rca_analysis(
+                payload, trace, revision,
+                ya_atendidas=incidents.sospechas_atendidas(registro),
+                aciertos_previos=incidents.aciertos_anadidos(registro),
+            ),
             timeout=config.ANALYSIS_TIMEOUT_SECONDS,
         )
     except (asyncio.TimeoutError, TimeoutError):
@@ -142,9 +151,16 @@ async def _ejecutar_analisis(payload: dict, registro: dict,
         # Etiquetado de contenido generado por IA (ai-governance 5.4): quien lea
         # el fichero del incidente debe saber que el diagnostico lo produjo un
         # modelo y que es una hipotesis pendiente de verificacion humana.
+        #
+        # El modelo sale de llm_client.modelo_en_uso(), la misma tabla que decide
+        # a quien se llama. Aqui habia un `if gemini ... else ANTHROPIC_MODEL`
+        # de cuando solo habia dos proveedores, y desde que llego DeepSeek
+        # (2026-09-30) etiquetaba sus diagnosticos con un modelo de Claude que no
+        # habia intervenido. Corregido el 2026-11-25; ver modelo_en_uso() y
+        # docs/AI-TRACEABILITY.md §3. No volver a decidir el modelo en este sitio.
         diagnostico["_ai_generated"] = {
             "provider": config.LLM_PROVIDER,
-            "model": config.GEMINI_MODEL if config.LLM_PROVIDER == "gemini" else config.ANTHROPIC_MODEL,
+            "model": llm_client.modelo_en_uso(),
             "notice": ("Hipotesis generada por un modelo de lenguaje a partir de datos de PI. "
                        "NO es una causa raiz confirmada: requiere verificacion por un ingeniero "
                        "de procesos antes de actuar."),
@@ -250,6 +266,16 @@ async def startup_event() -> None:
         log.info("GET /notifications/history: deshabilitado (responde 404)")
 
     log.info("Registro de incidentes: %s", config.INCIDENTS_DIR)
+    # Un servidor de pruebas que solo cambia INCIDENTS_DIR escribe en el log y el
+    # audit del servicio real. Pasó dos meses sin que nada lo dijera; ver
+    # config.ficheros_compartidos_con_el_servicio().
+    compartidos = config.ficheros_compartidos_con_el_servicio()
+    if compartidos:
+        log.warning(
+            "INCIDENTS_DIR no es el del servicio, pero %s si: este proceso escribira "
+            "en los ficheros del servicio real. Para un servidor de pruebas, definir "
+            "tambien %s (p. ej. en dev-fixtures/).",
+            " y ".join(compartidos), " y ".join(compartidos))
     log.info("Enfriamiento de duplicados: %d min", config.INCIDENT_COOLDOWN_MINUTES)
 
     # Si el proceso murio a mitad de un analisis, esos incidentes quedaron en
@@ -357,6 +383,10 @@ async def receive_notification(
              request.method,
              request.headers.get("content-type", "no definido"),
              request.headers.get("content-length", "no definido"))
+    # Recorte normal (200). Esta línea sale para TODA notificación, también las
+    # válidas, y de ésas el cuerpo completo ya vive en el fichero del incidente:
+    # volcarlo aquí además sería duplicarlo en un sitio que no lo necesita. Ver
+    # "El log no vuelca el payload entero" en tests/test_seguridad.py.
     log.info("Body raw (primeros 1000 bytes): %s", raw_body[:1000])
     log.info("---------------------")
 
@@ -365,10 +395,23 @@ async def receive_notification(
     try:
         import json
         payload = json.loads(raw_body)
-    except Exception:
+    except Exception as exc:
         # No es JSON — lo guardamos como texto para poder analizarlo
         payload = {"_raw": raw_body.decode("utf-8", errors="replace"), "_format": "no-json"}
-        log.warning("El body de PI no es JSON valido. Guardado como texto para diagnostico.")
+        # AQUÍ SÍ va el cuerpo entero, y solo aquí. Un cuerpo que no parsea se
+        # RECHAZA, así que no se crea expediente: el log es el único sitio donde
+        # queda, y recortarlo a 200 lo deja inservible justo para lo que existe.
+        #
+        # Visto el 2026-10-08: llegó una notificación mal formada y el registro
+        # se cortó en 'Plant": "WW…', antes del error. Con el payload de una
+        # notificación válida no pasa -- ése va entero al fichero del incidente.
+        #
+        # Y el motivo del parseo, que es lo que señala DÓNDE falla:
+        # "Expecting ',' delimiter: line 6 column 10".
+        log.warning("El body de PI no es JSON valido (%s). Guardado como texto "
+                    "para diagnostico: %s", exc,
+                    raw_body[:1000].decode("utf-8", errors="replace"),
+                    extra={"_crudo": True})
 
     # ------------------------------------------------------------------
     # Paso 2: Registrar la notificación en el log y en el historial
@@ -652,6 +695,12 @@ def _con_estado_de_causas(registro: dict) -> dict:
                     "quedan": incidents.quedan_reanalisis(registro),
                 },
                 estadoCausas=incidents.estado_de_causas(registro),
+                # Que fue de cada sospecha, y que se anadio al expediente por
+                # ellas. Lo compone el servidor por lo mismo que 'causas': se
+                # deduce de los traces, y ese calculo no puede vivir en dos
+                # sitios. La pantalla escribe la frase; el dato sale de aqui.
+                sospechas=incidents.estado_de_sospechas(registro),
+                anadido=incidents.aciertos_anadidos(registro),
                 cierre=etiqueta,
                 cerrado=incidents.esta_cerrado(registro))
 

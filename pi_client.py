@@ -31,7 +31,10 @@ import observability
 log = logging.getLogger(__name__)
 
 _SERVER_PARAMS = StdioServerParameters(
-    command="uv",
+    # Ruta absoluta, no "uv" a secas: ver UV_BINARY en config.py. Un
+    # servicio de larga vida no tiene por que compartir el PATH de quien
+    # lo desarrolla.
+    command=config.UV_BINARY,
     args=[
         "run", "--directory", config.AVEVA_PI_MCP_DIR,
         "python", "src/aveva_pi_mcp/server.py",

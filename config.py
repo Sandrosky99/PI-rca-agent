@@ -14,6 +14,7 @@ config.py — Carga y validación de la configuración del Workflow RCA
 """
 
 import os
+import shutil
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -58,7 +59,7 @@ def _entero(nombre: str, por_defecto: int) -> int:
 # sin conocer qué proveedor hay detrás. Solo se exige la clave de API del
 # proveedor realmente seleccionado (ver validate_config()).
 
-# "gemini" (por defecto) o "anthropic".
+# "gemini" (por defecto), "anthropic" o "deepseek".
 LLM_PROVIDER: str = os.environ.get("LLM_PROVIDER", "gemini").strip().lower()
 
 # Clave de API de Google (Gemini). Obligatoria si LLM_PROVIDER=gemini.
@@ -79,6 +80,76 @@ ANTHROPIC_API_KEY: str = os.environ.get("ANTHROPIC_API_KEY", "")
 # Modelo de Claude a usar si LLM_PROVIDER=anthropic.
 ANTHROPIC_MODEL: str = os.environ.get("ANTHROPIC_MODEL") or "claude-opus-4-8"
 
+# Razonamiento extendido en la ruta de Anthropic.
+#
+# Existe para IGUALAR LOS DOS PROVEEDORES, que es el problema que arregla:
+# gemini-2.5-flash razona por defecto y la llamada a Anthropic no lo pedía, así
+# que cambiar de proveedor cambiaba algo más que el proveedor. Comparar un
+# diagnóstico de una ruta con el de la otra no medía el modelo, medía eso.
+#
+# Es "adaptive", no un presupuesto de tokens: el propio modelo decide cuánto
+# razona, que es lo que hace viable encenderlo también en las llamadas cortas
+# --  la puerta de la búsqueda y las vueltas del bucle -- sin pagar en todas el
+# precio de la más difícil. Con `budget_tokens` habría que elegir un número
+# para pasos que no se parecen en nada, y además en claude-opus-4-8 ese
+# parámetro ya no se acepta: la API responde 400.
+#
+# Se puede apagar sin tocar código (ANTHROPIC_THINKING=false) por dos motivos:
+# para comparar con y sin él el día que haya con qué medir, y porque razonar
+# alarga las llamadas -- si alguna vez empieza a rozar LLM_TIMEOUT_SECONDS,
+# esta es la palanca inmediata.
+ANTHROPIC_THINKING: bool = (
+    os.environ.get("ANTHROPIC_THINKING") or "true"
+).strip().lower() in ("1", "true", "yes")
+
+# -----------------------------------------------------------------------------
+# DeepSeek (LLM_PROVIDER=deepseek)
+# -----------------------------------------------------------------------------
+# Se habla con el SDK de Anthropic, no con uno propio: DeepSeek publica un
+# endpoint compatible con el protocolo de Anthropic y la llamada tiene la misma
+# forma -- model, max_tokens, system, messages. Eso evita una dependencia nueva,
+# que en este proyecto no es gratis: cada una lleva revisión de mantenimiento,
+# adopción y licencia (izSpecs §1.3, AI-TRACEABILITY.md §6).
+#
+# Clave de API de DeepSeek. Obligatoria solo si LLM_PROVIDER=deepseek.
+# Se obtiene en https://platform.deepseek.com/api_keys
+DEEPSEEK_API_KEY: str = os.environ.get("DEEPSEEK_API_KEY", "")
+
+# Modelo de DeepSeek. Por defecto el rápido, por el mismo criterio que hace que
+# el de Gemini sea 'flash' y no 'pro': lo caro se elige a propósito.
+#   deepseek-flash    rápido y barato
+#   deepseek-v4-pro   el grande
+DEEPSEEK_MODEL: str = os.environ.get("DEEPSEEK_MODEL") or "deepseek-flash"
+
+# El endpoint compatible con Anthropic. Se deja configurable por si mañana
+# cambia o hay que pasar por una pasarela interna; el valor por defecto es el
+# que documenta DeepSeek (https://api-docs.deepseek.com/guides/anthropic_api).
+DEEPSEEK_BASE_URL: str = (
+    os.environ.get("DEEPSEEK_BASE_URL") or "https://api.deepseek.com/anthropic"
+)
+
+# Techo de tokens SOLO para DeepSeek. Existe porque la evidencia es suya y no
+# vale para los otros dos: razona siempre, razona mucho, y lo que razona VARÍA
+# mucho de una vuelta a otra. Medido sobre el Step 6 de un reanálisis real --
+# el prompt más grande que produce el workflow:
+#
+#   intento   techo     resultado                 al repetir ESE mismo prompt
+#   1         16.000    agotado razonando          9.608 tokens
+#   2         32.000    agotado razonando         14.690 tokens
+#
+# Las dos veces el repetido salió bien. No es que el techo estuviera mal
+# calculado: es que el consumo típico (~15.000 con la ventana ampliada) y el de
+# una vuelta mala se llevan más del doble. Con 64.000 hay 4x sobre lo medido.
+#
+# Y el precio de quedarse corto es el peor del workflow: el Step 6 muere con el
+# análisis entero pagado -- AF, PI y las llamadas anteriores -- sin producir
+# diagnóstico.
+#
+# No se sube LLM_MAX_TOKENS para todos porque no hay medida de que Gemini o
+# Claude lo necesiten, y 64.000 está comprobado contra DeepSeek pero no contra
+# los otros. Cuando haya medida, se unifica.
+DEEPSEEK_MAX_TOKENS: int = _entero("DEEPSEEK_MAX_TOKENS", 64000)
+
 # Techo de tokens de la respuesta del modelo, para AMBOS proveedores.
 #
 # Es un techo duro que la API aplica cortando la generación en seco: el modelo
@@ -92,10 +163,26 @@ ANTHROPIC_MODEL: str = os.environ.get("ANTHROPIC_MODEL") or "claude-opus-4-8"
 # MAX_SELECTED_VARIABLES=40 puede llegar a ~3.700. No llegó a fallar porque el
 # proveedor por defecto es Gemini, cuya llamada no fijaba ningún tope.
 #
-# 16000 cubre el peor caso con holgura, deja sitio para los tokens de thinking
-# si algún día se activa (cuentan contra este mismo tope en Anthropic) y se
-# mantiene por debajo de los timeouts HTTP del SDK sin necesitar streaming.
-# Subirlo no cuesta nada: solo se pagan los tokens realmente generados.
+# 32000 desde el 2026-10-01, y el motivo es que el techo ya NO cubre solo la
+# respuesta: en el protocolo de Anthropic los tokens de razonamiento cuentan
+# contra este mismo número, y ahora razonan DOS de los tres proveedores --
+# Claude desde el 2026-09-28 (thinking adaptive) y deepseek-flash siempre, lo
+# quiera uno o no.
+#
+# Estaba en 16000 con la nota "deja sitio para los tokens de thinking si algún
+# día se activa". Se activó, y no dejaba sitio suficiente: el Step 6 de un
+# reanálisis real murió con stop_reason=max_tokens y un único bloque
+# 'thinking' -- gastó el techo entero pensando y no llegó a escribir el
+# diagnóstico, habiendo pagado ya los cinco pasos anteriores.
+#
+# Medido sobre ESE mismo prompt (79.024 caracteres, el más grande que produce
+# el workflow): repetido, salió bien con 9.608 tokens de salida. Así que 16000
+# no era absurdo, era JUSTO -- 1,7x sobre un caso normal --, y lo que varía de
+# una vuelta a otra es cuánto razona el modelo. 32000 da más de 3x.
+#
+# Subirlo no cuesta nada: solo se pagan los tokens realmente generados. Lo que
+# cuesta es quedarse corto, porque se paga el análisis entero y no se obtiene
+# diagnóstico.
 #
 # Por qué se aplica también a Gemini, que no lo exige (decisión 2026-09-03):
 # los dos SDK tienen el mismo concepto, pero Anthropic lo hace OBLIGATORIO
@@ -109,7 +196,7 @@ ANTHROPIC_MODEL: str = os.environ.get("ANTHROPIC_MODEL") or "claude-opus-4-8"
 # en ambas rutas, que es justo para lo que existe llm_client. Si alguna vez
 # truncara, se vería en el log como un JSONDecodeError del Step 4 o 6, no en
 # silencio.
-LLM_MAX_TOKENS: int = _entero("LLM_MAX_TOKENS", 16000)
+LLM_MAX_TOKENS: int = _entero("LLM_MAX_TOKENS", 32000)
 
 
 # =============================================================================
@@ -153,12 +240,18 @@ PI_LOCAL_TIMEZONE: str = os.environ.get("PI_LOCAL_TIMEZONE", "Europe/Madrid")
 # Observabilidad -- ver observability.py y extensions/observability-spec.md
 # =============================================================================
 
+# Rutas por defecto de los tres ficheros que escribe el servicio. Van en
+# constantes porque ficheros_compartidos_con_el_servicio() compara contra ellas.
+_LOG_FILE_POR_DEFECTO = Path(__file__).parent / "webhook.log"
+_AUDIT_FILE_POR_DEFECTO = Path(__file__).parent / "audit.jsonl"
+_INCIDENTS_DIR_POR_DEFECTO = Path(__file__).parent / "incidents"
+
 # Log de aplicación: una línea JSON por evento, rotativo a 10 MB x 5.
-LOG_FILE: str = os.environ.get("LOG_FILE") or str(Path(__file__).parent / "webhook.log")
+LOG_FILE: str = os.environ.get("LOG_FILE") or str(_LOG_FILE_POR_DEFECTO)
 
 # Audit trail. DEBE ser un destino distinto del log de aplicación (spec §2.3) y
 # sobrevivir a los reinicios (§2.4). Formato JSON Lines, append-only.
-AUDIT_FILE: str = os.environ.get("AUDIT_FILE") or str(Path(__file__).parent / "audit.jsonl")
+AUDIT_FILE: str = os.environ.get("AUDIT_FILE") or str(_AUDIT_FILE_POR_DEFECTO)
 
 # Interruptor de parada en caliente (ai-governance §9.5).
 # Con WORKFLOW_ENABLED=false el webhook sigue aceptando y registrando las
@@ -178,7 +271,7 @@ WORKFLOW_ENABLED: bool = (os.environ.get("WORKFLOW_ENABLED") or "true").strip().
 # atómica) y el registro que sobrevive a un reinicio. NO se purga sola: esos
 # ficheros son el archivo de casos, y serán la base de la revisión humana y de
 # las métricas de evaluación.
-INCIDENTS_DIR: str = os.environ.get("INCIDENTS_DIR") or str(Path(__file__).parent / "incidents")
+INCIDENTS_DIR: str = os.environ.get("INCIDENTS_DIR") or str(_INCIDENTS_DIR_POR_DEFECTO)
 
 # Minutos durante los cuales una alerta del mismo activo y KPI se considera el
 # mismo incidente, aunque llegue con otro StartTime. Es la capa que protege si
@@ -236,7 +329,7 @@ LLM_TIMEOUT_SECONDS: int = _entero("LLM_TIMEOUT_SECONDS", 120)
 # la espera peor es calculable: ceil(alertas / simultáneos) x este valor.
 #
 # 10 min: un análisis normal son 2-3. Quien lo agote está roto, no lento.
-ANALYSIS_TIMEOUT_SECONDS: int = _entero("ANALYSIS_TIMEOUT_SECONDS", 600)
+ANALYSIS_TIMEOUT_SECONDS: int = _entero("ANALYSIS_TIMEOUT_SECONDS", 900)
 
 # Cuánto se sigue reintentando UNA llamada al modelo cuando el error es de los
 # que se arreglan solos (5xx, límite de ritmo, conexión).
@@ -259,11 +352,18 @@ ANALYSIS_TIMEOUT_SECONDS: int = _entero("ANALYSIS_TIMEOUT_SECONDS", 600)
 #     ventana efectiva = 90 + 30 = 120 s por llamada
 #     peor caso = trabajo normal (~150 s) + 3 x 120 = 510 s
 #
-# y 510 cabe en ANALYSIS_TIMEOUT_SECONDS=600 con holgura. Con 120 s de ventana
-# el peor caso da justo 600 y lo cortaría el tope: el análisis moriría igual,
-# pero con el mensaje genérico de tiempo agotado en vez del específico.
+# REHECHO el 2026-09-28, al añadir la búsqueda del reanálisis. Ya no son 3
+# llamadas: la puerta añade una y el bucle hasta 5, y cada una puede irse a 120 s
+# si el proveedor tiene un corte. Pero el bucle entero lleva su propio tope
+# (BUSQUEDA_TIMEOUT_SECONDS), así que no se suman sus 5 llamadas sino ese tope:
 #
-# Si se sube esta ventana, hay que subir también ANALYSIS_TIMEOUT_SECONDS.
+#     peor caso = 150 + 3 x 120 (Steps 4 y 6) + 120 (la puerta) + 180 (el bucle)
+#               = 810 s
+#
+# y 810 cabe en ANALYSIS_TIMEOUT_SECONDS=900. Con 600 no cabía, y el conjunto
+# moriría llevándose por delante un diagnóstico que ya estaba hecho.
+#
+# Si se sube esta ventana, o se añaden llamadas, hay que rehacer esta cuenta.
 LLM_RETRY_WINDOW_SECONDS: int = _entero("LLM_RETRY_WINDOW_SECONDS", 90)
 
 # Qué ventana muestra la pantalla de la sala de control al abrirse, en horas, y
@@ -305,6 +405,25 @@ INCIDENT_TRACE_RETENTION_DAYS: int = _entero("INCIDENT_TRACE_RETENTION_DAYS", 90
 # Carpeta del proyecto afkg-graph-mcp (Step 2: consulta de la estructura del AF).
 # Se usa para lanzar el servidor MCP como subproceso vía "uv run --directory ...",
 # igual que hace Claude Code según C:\MCPServer\MCP Server\.mcp.json.
+# Ruta del ejecutable de uv, que es quien lanza los dos servidores MCP.
+#
+# Se RESUELVE a ruta absoluta en vez de confiar en que "uv" esté en el PATH, y
+# eso no es paranoia: el 2026-10-08 una notificación real murió con
+# FileNotFoundError [WinError 2] porque el proceso del webhook llevaba encendido
+# desde antes de que la carpeta .localin del usuario entrara en el PATH. Un
+# servicio de larga vida hereda el entorno del momento en que arrancó, así que
+# "está en mi terminal" no significa que esté en el suyo.
+#
+# El fallo era además mudo: [WinError 2] no dice QUÉ fichero no encuentra, y
+# parecía un problema de los MCP cuando era de arranque.
+#
+# UV_BINARY permite fijarlo a mano si la resolución falla o hay varias copias.
+UV_BINARY: str = (
+    os.environ.get("UV_BINARY")
+    or shutil.which("uv")
+    or "uv"            # último recurso: que lo resuelva el sistema, como antes
+)
+
 AFKG_GRAPH_MCP_DIR: str = os.environ.get("AFKG_GRAPH_MCP_DIR") or r"C:\MCPServer\afkg-graph-mcp"
 
 # Carpeta del proyecto aveva-pi-mcp (Step 5: datos históricos de PI Web API).
@@ -422,6 +541,84 @@ MAX_SELECTED_VARIABLES: int = _entero("MAX_SELECTED_VARIABLES", 40)
 # gasta mejor que uno que no se ve.
 MAX_REANALISIS: int = _entero("MAX_REANALISIS", 2)
 
+# Cuándo dos causas son la misma, en porcentaje.
+#
+# Se compara por CONTENCIÓN: qué parte de las palabras con contenido de la más
+# corta aparece en la más larga. No por Jaccard, y no es indiferente -- medido
+# el 2026-09-29 sobre el primer reanálisis real (OX313, dos pasadas, cinco
+# causas):
+#
+#   par                                        jaccard   contención
+#   "colmatación de los difusores..." x2          0,38         1,00   <- repetida
+#   carga orgánica en la entrada / MLSS           0,14         0,38   distintas
+#   el resto de pares                            <=0,10       <=0,40
+#
+# Jaccard deja 0,38 contra 0,14: separa, pero por poco, y se estrecha en cuanto
+# la repetición viene con más palabras alrededor -- que es justo lo que hace un
+# modelo al reformular. La contención dio 1,00 contra 0,40, un hueco donde 80
+# cae holgado por los dos lados.
+#
+# Es UNA medida sobre UN caso. Si aparecen falsos positivos, esta es la perilla;
+# el log dice siempre qué se descartó y por qué parecido.
+UMBRAL_CAUSA_REPETIDA_PCT: int = _entero("UMBRAL_CAUSA_REPETIDA_PCT", 80)
+
+
+# =============================================================================
+# La búsqueda de la sospecha (Fase 3, §5 ter del documento de diseño)
+# =============================================================================
+# Cuando el operario escribe una sospecha que señala un activo que NO está en
+# ninguno de los tres bloques del af_context, el modelo no puede pedir esa
+# variable ni queriendo. La búsqueda lo resuelve, y es el ÚNICO sitio del
+# proyecto donde el modelo recibe una herramienta.
+#
+# Dos topes, y el que manda es el de iteraciones:
+#
+#   - 5 iteraciones. Medido el 2026-09-23: una llamada al modelo son ~15 s y una
+#     consulta al grafo ~2 s, así que cinco vueltas son unos 85 s.
+#   - 180 s de reloj. NO es el mando: es la guarda contra el cuelgue. Son 180 y
+#     no 120 porque una sola llamada puede irse a LLM_TIMEOUT_SECONDS=120, y con
+#     120 de tope una llamada lenta se comería la búsqueda entera.
+#
+# Agotar cualquiera de los dos NO es un fallo: la búsqueda devuelve "no lo he
+# encontrado", el análisis sigue y el diagnóstico se produce igual. Es contexto
+# que mejora la selección, no un requisito -- igual que la ficha del equipo.
+MAX_ITERACIONES_BUSQUEDA: int = _entero("MAX_ITERACIONES_BUSQUEDA", 5)
+BUSQUEDA_TIMEOUT_SECONDS: int = _entero("BUSQUEDA_TIMEOUT_SECONDS", 180)
+
+# Cuántas sospechas distintas se pueden atender en UNA pasada. El presupuesto de
+# arriba es del paso entero, no de cada objetivo: dos búsquedas más una elección
+# son 3 llamadas de las 5, así que dos objetivos caben sin tocar la aritmética
+# de ANALYSIS_TIMEOUT_SECONDS.
+#
+# Lo que sobra del tope NO se pierde ni se descarta en silencio: queda como
+# sospecha pendiente colgada de su causa, visible en la pantalla y en el orden
+# en que la persona las ve. Por eso el tope puede ser bajo sin que nadie se
+# quede sin respuesta.
+MAX_BUSQUEDAS_POR_PASADA: int = _entero("MAX_BUSQUEDAS_POR_PASADA", 2)
+
+# Tope de atributos de TODO el bloque añadido, sumando los objetivos atendidos.
+#
+# 80 sale de una medida, no de una intuición: el subárbol completo de la bomba
+# PS20102 son 16 grupos y 74 atributos, y sus atributos PROPIOS son sólo 4 --
+# identidad y configuración. Los 70 útiles (Head, Hydraulic Efficiency,
+# Hydraulic Power) cuelgan de 'Indicators'. Añadir un activo sin sus hijos es la
+# apariencia de haber atendido la sospecha sin atenderla, así que se baja; y 80
+# es lo que hace falta para que quepa uno entero con margen.
+#
+# Un instrumento suelto, en cambio, es 1 atributo (FT105, SS101...).
+MAX_ATRIBUTOS_ANADIDOS: int = _entero("MAX_ATRIBUTOS_ANADIDOS", 80)
+
+# Ramas del AF que la búsqueda NO puede devolver nunca. No son proceso: son
+# diagramas, modelos importados y nodos de navegación, y un elemento de ahí
+# metido en el contexto sería ruido con pinta de dato.
+#
+# Va aparte del filtro de planta porque son dos cosas distintas: aquel dice en
+# qué instalación estamos, éste qué partes de ella son mediciones.
+AF_RAMAS_NO_PROCESO: list[str] = [
+    r.strip() for r in (os.environ.get("AF_RAMAS_NO_PROCESO")
+                        or "Sankey Diagrams|PM_from_PME").split("|") if r.strip()
+]
+
 
 # =============================================================================
 # El grafo del AF NO contiene solo esta planta. Es un entorno compartido de
@@ -480,6 +677,35 @@ AF_PLANT_CONTEXT_ELEMENTS: list[str] = [
 # Validación de configuración
 # =============================================================================
 
+def ficheros_compartidos_con_el_servicio() -> list[str]:
+    """Qué ficheros del servicio real usaría un proceso que NO es el servicio.
+
+    Si INCIDENTS_DIR apunta a otra carpeta, este proceso es otra cosa -- un
+    servidor de pruebas, típicamente sobre dev-fixtures/incidents --, y entonces
+    LOG_FILE y AUDIT_FILE también deberían ser otros. Devuelve los que siguen en
+    la ruta del servicio (vacío si no hay nada que avisar). Se comparan las rutas
+    RESUELTAS, no si la variable está definida: poner a mano la ruta por defecto
+    comparte el fichero igual.
+
+    Por qué existe (2026-11-25): el servidor de pruebas se arrancaba cambiando
+    solo INCIDENTS_DIR y WEBHOOK_PORT. Durante dos meses escribió en el
+    audit.jsonl del servicio real -- 106 entradas de incidentes de prueba,
+    mezcladas con las reales -- y los dos procesos se pisaban al rotar
+    webhook.log (PermissionError, rotaciones perdidas). Nada fallaba de forma
+    visible. Se avisa, no se impide: puede haber motivos para compartir, pero
+    tiene que ser a sabiendas.
+    """
+    def _es(ruta: str, por_defecto: Path) -> bool:
+        return Path(ruta).resolve() == por_defecto.resolve()
+
+    if _es(INCIDENTS_DIR, _INCIDENTS_DIR_POR_DEFECTO):
+        return []
+    return [nombre for nombre, ruta, defecto in (
+        ("LOG_FILE", LOG_FILE, _LOG_FILE_POR_DEFECTO),
+        ("AUDIT_FILE", AUDIT_FILE, _AUDIT_FILE_POR_DEFECTO),
+    ) if _es(ruta, defecto)]
+
+
 def validate_config() -> list[str]:
     """Comprueba que todas las variables obligatorias están definidas.
 
@@ -498,10 +724,21 @@ def validate_config() -> list[str]:
     if LLM_PROVIDER == "gemini":
         if not GEMINI_API_KEY:
             missing.append("GEMINI_API_KEY")
+    elif LLM_PROVIDER == "deepseek":
+        if not DEEPSEEK_API_KEY:
+            missing.append("DEEPSEEK_API_KEY")
     elif LLM_PROVIDER == "anthropic":
         if not ANTHROPIC_API_KEY:
             missing.append("ANTHROPIC_API_KEY")
     else:
-        missing.append(f"LLM_PROVIDER (valor invalido: '{LLM_PROVIDER}', usa 'gemini' o 'anthropic')")
+        missing.append(f"LLM_PROVIDER (valor invalido: '{LLM_PROVIDER}', "
+                       f"usa 'gemini', 'anthropic' o 'deepseek')")
+
+    # No es una clave, pero sin esto los dos servidores MCP no arrancan y el
+    # fallo aparece tarde y mudo: a mitad del Step 2, como [WinError 2].
+    if not os.path.isfile(UV_BINARY) and not shutil.which(UV_BINARY):
+        missing.append(
+            f"UV_BINARY (no se encuentra el ejecutable de uv: '{UV_BINARY}'; "
+            f"sin el no arrancan los servidores MCP)")
 
     return missing
