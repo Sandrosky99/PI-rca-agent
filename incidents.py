@@ -237,11 +237,12 @@ def traces(registro: dict) -> list[dict]:
     """Los prompts y respuestas de CADA pasada, de la mas antigua a la reciente.
 
     Mismo problema que tenia el diagnostico, y misma forma de resolverlo. Hasta
-    el 2026-09-23 el trace era un objeto suelto que mark() escribia entero en
-    cada pasada, asi que un reanalisis PISABA los prompts de la anterior.
+    la Fase 3 (2026-09-28) el trace era un objeto suelto que mark() escribia
+    entero en cada pasada, asi que un reanalisis PISABA los prompts de la anterior.
 
-    Lo destapo una prueba de punta a punta: el volcado de la primera pasada solo
-    existe porque se guardo a mano antes de relanzar. Sin eso habria desaparecido.
+    Lo destapo una prueba de punta a punta el 2026-09-23: el volcado de la primera
+    pasada solo existe porque se guardo a mano antes de relanzar. Sin eso habria
+    desaparecido.
 
     No es solo incomodo. base/software-spec §1.5 pide conservar el prompt que
     llevo a un artefacto generado por IA: el diagnostico de la primera pasada si

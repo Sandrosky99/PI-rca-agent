@@ -5,9 +5,13 @@
 
 | | |
 |---|---|
-| **Fecha** | 10 de septiembre de 2026 · revisado el 1 de octubre |
+| **Fecha** | 10 de septiembre de 2026 · revisado el 25 de noviembre |
 | **Estado** | Fases 1 a 3 entregadas |
 | **Alcance** | Fases 1 a 3 |
+
+> Este documento describe **cómo funciona hoy**. Los análisis y las decisiones que
+> llevaron hasta aquí —lo que se probó, se retiró o se corrigió— están al final, en los
+> **anexos**, con una referencia desde el punto al que afectan. No se ha borrado nada.
 
 ---
 
@@ -65,9 +69,10 @@ caso si hay varios activos.
 
 ### 3. La pantalla muestra el estado, sea cual sea
 
-Junto al payload: **procesando** si el análisis sigue en marcha, **listo** si hay
-causas, o **fallo del análisis** si se cayó el MCP, PI no respondió o el modelo
-devolvió basura.
+Junto al payload: **en cola** si espera turno, **procesando** si el análisis sigue en
+marcha, **pendiente de revisar** si hay causas esperando a una persona,
+**recalculando** si se ha pedido un reanálisis, o **fallo del análisis** si se cayó el
+MCP, PI no respondió o el modelo devolvió basura.
 
 Nunca un «procesando» que no termina. Alguien que viene de planta y encuentra una
 pantalla que le miente no vuelve.
@@ -76,6 +81,10 @@ pantalla que le miente no vuelve.
 
 Cada una con su explicación y su acción recomendada, y cada una con su propio estado:
 pendiente, descartada o confirmada. Son candidatas independientes, no un bloque.
+
+En un reanálisis las causas **nuevas** conviven con las que seguían abiertas: no hay
+mínimo de dos —si los datos sostienen una, o ninguna, se dice— y **nunca hay más de tres
+en total**, contando las que ya estaban.
 
 ### 5. La revisión
 
@@ -99,10 +108,18 @@ Si no vuelve y vence el reloj, cierra como **revisado parcialmente**. No como *s
 veredicto*: sí hubo uno, y descartar una hipótesis con evidencia física es trabajo que
 no se puede tirar.
 
-**c. Relanza con el feedback** → vuelve al paso 4
+**c. Pide volver a analizar con el feedback** → vuelve a los pasos 3 y 4 → y de ahí al 5
 
-El botón se habilita en cuanto hay **una** causa descartada con evidencia no vacía.
-Lo pulsa cuando quiera: tras descartar una, dos o todas.
+El botón *Volver a analizar* se habilita en cuanto hay **una** causa descartada con
+evidencia no vacía, mientras el incidente siga en activos y quede presupuesto
+(`MAX_REANALISIS`, 2). Lo pulsa cuando quiera: tras descartar una, dos o todas.
+
+Al pulsarlo, la pantalla pasa a **recalculando** (paso 3), el workflow trae causas
+nuevas (paso 4) y la revisión continúa sobre ellas (paso 5). Cada vuelta gasta una
+unidad del presupuesto, y se ve: «te quedan N de 2».
+
+Dentro del workflow, la nueva pasada entra por la **selección de variables** y no por el
+diagnóstico, con datos nuevos de PI (§1, «El modelo ayuda, no decide»).
 
 Siempre botón, nunca automático. Cuando se han descartado todas es justo cuando menos
 probable es que quede alguien delante para leer el recálculo — y además gastaría una
@@ -110,9 +127,11 @@ iteración a ciegas.
 
 **d. Agotado el presupuesto de relanzados** → cierra
 
-Cierra como **causa no determinada**, con el registro de qué se descartó y con qué
-evidencia. Ese registro vale más que una respuesta equivocada: es por donde empieza el
-siguiente que coja el caso.
+Mientras quede presupuesto, descartar todas las causas **no cierra**: el incidente sigue
+en activos con la etiqueta *causa no determinada* —que describe lo que se sabe **ahora**,
+no que se haya dado por perdido— y ofrece el relanzado. Cuando el presupuesto se agota,
+cierra con ese registro de qué se descartó y con qué evidencia. Ese registro vale más que una respuesta equivocada: es
+por donde empieza el siguiente que coja el caso.
 
 **e. Nadie da veredicto y vence el reloj** → cierra
 
@@ -121,7 +140,10 @@ Cierra como **sin veredicto**. No se afirma que nadie mirase: no nos consta.
 **f. Fallo técnico** → cierra
 
 Cierra como **fallo del análisis**. No cuenta ni como acierto ni como error del
-modelo.
+modelo. Se ve en activos 12 h y luego pasa a cerrados (§3 bis).
+
+Si el que falla es un **reanálisis**, no se pierde lo anterior: el incidente vuelve a
+*finalizado* con su diagnóstico intacto, y el intento fallido se anota aparte (§5 bis).
 
 ### 6. Corregir un veredicto
 
@@ -137,17 +159,427 @@ actual, sin ruido; el historial queda para quien tenga que mirarlo.
 
 ---
 
-## 3. Los cinco cierres
+## 3. Los cierres: cinco que se deducen y uno que se anota
 
 | Cierre | Qué dice de verdad |
 |---|---|
 | **Causa confirmada** | Acierto |
 | **Revisado parcialmente** | Descartó alguna con evidencia, no terminó |
-| **Causa no determinada** | Se descartaron todas; consta qué no era |
+| **Causa no determinada** | Se descartaron todas; consta qué no era. Cierra al agotarse el presupuesto de reanálisis |
 | **Sin veredicto** | Nadie dijo nada |
 | **Fallo del análisis** | Problema técnico |
+| **Alerta no válida** | La anota una persona: el problema no existía (§4) |
 
-### Por qué son cinco y no seis (corregido el 2026-09-15)
+Los cinco primeros **se deducen** del expediente y del reloj; no se guardan. El sexto es
+el único que se apoya en una opinión, y por eso es el único que se anota.
+
+Por qué son cinco y no seis —y por qué no se detecta presencia ante la pantalla—:
+**Anexo A**.
+
+---
+
+## 3 bis. El reloj
+
+**Un solo reloj: 12 horas desde el último trabajo que sigue en pie.**
+
+Mientras corre, el incidente está en **activos** y se puede reanalizar. Cuando vence,
+las dos cosas se acaban **a la vez**: el botón se apaga y el incidente pasa a cerrados.
+
+Una **respuesta terminal** —causa confirmada, o todas las causas descartadas sin
+presupuesto de reanálisis— lo cierra **en ese momento**, sin esperar al reloj. La
+pregunta ya está contestada, y tener en la pantalla de «lo que pide atención» algo que
+no pide nada es lo contrario de para lo que sirve esa pantalla.
+
+El **veredicto** y la **reclasificación** no caducan nunca.
+
+### Qué cuenta como «trabajo que sigue en pie»
+
+El reloj arranca en el último movimiento **del workflow** (`movimiento_workflow`; en los
+expedientes anteriores al campo, `recibido_en`) y se alarga con los veredictos, con dos
+reglas:
+
+- **Deshacer no es trabajo.** Un apunte `pendiente` no aporta fecha: el reloj
+  **retrocede** hasta el último veredicto real que quede vigente. Corregir un clic mal
+  dado no rejuvenece un expediente cerrado.
+- **Revisar en frío no reabre.** Un veredicto alarga el reloj **solo si se dio mientras
+  el incidente seguía abierto**; los posteriores cambian la etiqueta y nada más.
+
+Lo que no se pierde: el operario que descarta una causa en la hora 11 y vuelve en la 13
+sigue teniendo su ventana. La cadena se mantiene viva mientras cada veredicto caiga
+dentro de la que abrió el anterior; el primero que llegue fuera de plazo la corta.
+
+> **Un incidente cerrado no se reabre nunca por acción humana** — decisión del
+> propietario, 2026-09-21. Eso significa que **no se puede pedir un reanálisis sobre un
+> expediente cerrado, ni aunque se le acabe de aportar evidencia nueva**. Es coherente
+> con que el botón viva donde vive la pestaña: si el reanálisis pudiera dispararse desde
+> cerrados, volveríamos a tener dos relojes.
+
+Cómo se llegó a estas reglas, y por qué doce horas y no ocho: **Anexo B**.
+
+### Qué se ve en activos
+
+| Estado | |
+|---|---|
+| `recibido`, `analizando` | Siempre: está en curso |
+| `finalizado` | Hasta que venza el reloj o haya respuesta terminal |
+| `fallido`, `interrumpido` | 12 h. `interrumpido` se muestra a propósito: si se escondiera, quien acaba de recibir la alerta no encontraría **nada**, que es la pantalla que miente de la que huimos |
+| `pausado` | **Nunca.** No es información de un incidente sino del sistema entero: que alguien bajó el interruptor. Va en un **aviso fijo arriba de la pantalla** — «el análisis automático está desactivado; las alertas se registran pero no se analizan» —, que dice lo que importa sin llenar la lista de ruido |
+
+---
+
+## 4. La anotación posterior
+
+Sobre un incidente *ya cerrado* (la alerta no válida, además, se puede marcar también
+mientras sigue en activos). Cerrar y anotar son operaciones distintas: el workflow no
+espera a nadie, y el rastro humano puede llegar dos horas o dos días después sin
+mantener nada abierto.
+
+Un incidente cerrado tiene **una etiqueta y nada más**. No hay campos que
+rellenar ni nada que pedirle a nadie. Lo único que se puede hacer después es
+**corregir esa etiqueta**: con un veredicto en frío, o marcando la alerta como no válida.
+
+### No hay disposición
+
+El cierre **no registra qué se hizo en la planta**: ni nº de OT, ni «actuado / sin acción
+/ en seguimiento», ni autor. Eso es territorio del GMAO, y un campo que lo duplica acaba
+divergiendo de él — con la agravante de que el que miente es el nuestro.
+
+Que el expediente nunca termine en *«lo dijo el sistema»* lo cubre el **veredicto**:
+confirmar o descartar una causa con su evidencia es una decisión de una persona,
+registrada.
+
+Queda un hueco asumido: *causa confirmada* dice que el diagnóstico era bueno, no que se
+hiciera nada al respecto. Decidir si se actúa es planificación de mantenimiento, y
+perseguirlo aquí sería la duplicación que se evita. (Cómo se decidió: **Anexo C**.)
+
+### Reclasificación
+
+Esto **sí se mantiene**, y por un motivo distinto del que movía a la disposición:
+no habla de la planta, habla de **nuestro** registro y de la calidad de lo que
+produce el sistema. El GMAO no lo guarda mejor, no lo guarda en absoluto.
+
+Hay **un solo valor: alerta no válida**, para cuando el problema no existía y era el
+umbral de PI el que estaba mal. El modelo no se equivocó: le dieron un problema
+inventado. Es información que el equipo de PI necesita, y meterla dentro de «incorrecto»
+ensuciaría las métricas.
+
+Dar la causa por buena en frío **no es una reclasificación**: es un veredicto normal dado
+más tarde, y la etiqueta pasa sola a *causa confirmada* (§5 bis).
+
+**Va en un bloque propio**, al final del detalle, con su encabezado, y vale igual en las
+dos pestañas. El riesgo de este botón es de **alcance** —actúa sobre el incidente
+entero, los demás sobre una causa—, no de momento; por eso lo resuelve el sitio. (Por qué
+no se limita a la pestaña de cerrados: **Anexo C**.)
+
+**Marcarla sustituye a la etiqueta de cierre** y es terminal. Manda sobre todo lo demás
+—incluso sobre una causa confirmada o un análisis fallido—: si la alerta no debió
+existir, da igual cómo fuera el análisis de un problema que no había.
+
+**Y se puede quitar**, sin pedir motivo. Es el único cierre que se apoya en una
+*opinión* y no en un hecho: los otros se deducen de si hay veredicto o de si venció el
+reloj. Lo que descansa en una creencia es lo que más tiene que poder revisarse. Al
+quitarla, el incidente vuelve exactamente a donde estaba —incluido volver a Activos si
+allí estaba— porque la reclasificación no toca el reloj.
+
+Las métricas usan siempre el valor anotado cuando existe.
+
+Y como todo ocurre en el mismo sitio —el HMI de la sala de control—, la
+reclasificación no cuesta ni una superficie nueva ni una decisión de acceso: es
+la misma pantalla y el mismo puesto.
+
+### Quién puede escribir, y por qué no hace falta identidad
+
+La pantalla es alcanzable **solo desde el HMI de la sala de control**. En planta,
+el firewall lo garantiza con una regla de dos IPs fijas: PI y ese puesto. (En las
+máquinas de desarrollo el firewall está desactivado por política de la
+plataforma; la premisa de §8-bis de `AI-GOVERNANCE.md` cubre ese entorno.)
+
+De ahí se deduce lo demás. **Quien autentica es la cerradura de la sala**, no la
+aplicación: el conjunto de personas que pueden escribir en un expediente es el
+conjunto de las que han entrado ahí. Por eso el veredicto no lleva autor, y por
+eso la Fase 2 no necesita login — que es una decisión, no una limitación
+heredada de PI como las otras cuatro de `webhook.py`.
+
+> ⚠️ **Las dos cosas están atadas y viven en sitios distintos.** Si algún día la
+> pantalla se abre a más máquinas —una petición perfectamente razonable: *«¿puedo
+> verla desde mi mesa?»*— el argumento se cae en silencio, sin que nada falle ni
+> avise, y hay que reabrir si el veredicto necesita autor.
+
+---
+
+## 5. Qué necesita la pantalla
+
+Marcado con **[lista inicial]** lo que ya estaba identificado, con **[añadido]** lo
+que faltaba, y con **[recomendado]** lo que mejora mucho la pantalla pero no la
+bloquea.
+
+### Zona de identificación
+
+**Payload de la alerta** · [lista inicial]
+Los mismos campos que la persona recibió por correo: activo, KPI, valor, umbral, hora
+de inicio. Es lo único que le permite saber que la pantalla está hablando de *su* caso.
+
+**Estado del incidente** · [añadido]
+En cola · Procesando · Pendiente de revisar · Recalculando · Fallo del análisis.
+Explícito siempre, incluido el fallo.
+
+**Selector de incidentes activos** · [añadido]
+Si puede haber dos análisis a la vez —y puede—, hace falta poder pasar de uno a otro.
+Si no, la persona no sabe si está mirando el suyo.
+
+**Aviso de que el análisis lo ha generado una IA** · [añadido]
+Una línea de texto. Es obligación de transparencia del reglamento europeo de IA y
+cuesta nada ponerla desde el primer día.
+
+### Zona de análisis
+
+**Las causas propuestas, con estado individual** · [añadido]
+Dos o tres, cada una con explicación, acción recomendada y su estado propio:
+pendiente, descartada o confirmada. Es el contenido central de la pantalla.
+
+**Evidencia ya registrada** · [añadido]
+Al volver de planta, la persona tiene que ver lo que ella misma escribió antes. Sin
+esto, el caso *b* —descartar una y volver luego— no funciona.
+
+### Zona de veredicto
+
+**Botón «Es esta», por causa** · [lista inicial, como «causa correcta»]
+Confirma esa candidata y cierra el incidente.
+
+**Botón «No es esta», por causa** · [añadido, como «descartar causa»]
+El par de «Es esta», y el que abre los dos campos de texto; el formulario se envía con
+«Descartar causa». Sin él la lista no está completa.
+
+**Campo obligatorio: por qué no es** · [lista inicial]
+La evidencia. Entra como hecho. Es lo que hace que la segunda pasada valga para algo.
+
+**Campo opcional: qué sospecha** · [lista inicial]
+Entra explícitamente marcado como pista a contrastar, nunca como conclusión. Separarlo
+del anterior en la *estructura* es lo que impide que el modelo tome la hipótesis del
+operario por buena.
+
+**Botón «Volver a analizar»** · [lista inicial]
+Habilitado cuando hay al menos una causa descartada con evidencia no vacía, el incidente
+sigue en activos y queda presupuesto de reanálisis. Sin nada nuevo que aportar, la
+segunda llamada sería una tirada de dados con los mismos datos.
+
+**Contador de reanálisis** · [añadido]
+«Te queda 1 de 2». Un presupuesto que se ve se gasta mejor que uno que no se ve.
+
+**Tiempo restante de la ventana** · [recomendado] — **no entregado**
+Que se sepa cuánto queda antes de que cierre solo, para no volver de planta y encontrárselo
+cerrado sin aviso.
+
+**Datos que sustentan cada causa** · descartado el 2026-09-21 — ver **Anexo D**.
+
+### Fuera de la pantalla en caliente
+
+**Pestaña de cerrados** · [añadido]
+Una **pestaña aparte**, no el mismo listado con el filtro de periodo corrido hacia
+atrás. Es la superficie del reloj lento: el veredicto en frío y la reclasificación. En
+el mismo HMI y sin disposición ninguna (§4), así que no necesita otra pantalla ni otra
+decisión de acceso.
+
+**Aviso de análisis desactivado** · [añadido]
+Una línea fija arriba cuando el interruptor está bajado: *«el análisis automático está
+desactivado; las alertas se registran pero no se analizan»*. Sustituye a listar los
+incidentes en `pausado`, que es información del sistema y no de cada alerta.
+
+---
+
+## 5 bis. El esquema del fichero de incidente
+
+Un fichero por incidente (`incidents/<id>.json`), con **dos escritores** que no se pisan:
+el workflow escribe `estado`, `diagnosticos`, `traces`, `intentos_fallidos` y `motivo`;
+la pantalla escribe `revision`. Cada uno es dueño de su parcela y la función de
+escritura **solo puede decir «cambia estos campos»**, nunca reemplazar el documento.
+
+```
+diagnosticos:      [ {iteracion, root_causes, _ai_generated,
+                      que_cambia, variables_que_faltan} ]
+traces:            [ {iteracion, system_prompt, step3_prompt, ...} ]
+intentos_fallidos: [ {en, motivo} ]
+revision:
+  veredictos:      [ {en, iteracion, causa, veredicto, evidencia, sospecha} ]
+  reclasificacion: null | "alerta_no_valida"
+```
+
+- **Un incidente puede analizarse más de una vez**, y cada pasada **se añade**, nunca
+  sustituye a la anterior. Un veredicto apunta a `(iteracion, causa)`, no solo al índice.
+- `veredicto` es `confirmada`, `descartada` o `pendiente` — este último para corregir un
+  clic mal dado. **La lista es de solo añadir**: corregir es anotar encima.
+- **`revision` es hermano de `diagnosticos`, no va dentro.** Lo que sale del modelo lleva
+  su etiqueta `_ai_generated` —**por pasada**: el modelo puede cambiar entre una y otra—
+  y lo que escribe una persona o el código no.
+- **`reclasificacion` tiene un solo valor.** *Alerta no válida* es lo único que no se
+  puede expresar como veredicto sobre una causa: no dice que el modelo se equivocara, dice
+  que le dieron un problema que no existía.
+- **Un reanálisis que falla no destruye la pasada anterior**: el incidente vuelve a
+  `finalizado` y el intento queda en `intentos_fallidos`, también de solo añadir.
+- **`variables_que_faltan`** guarda lo que el modelo dijo que le habría hecho falta y no
+  estaba en el AF. Sale en la pantalla en una línea: es lo que hace crecer el contexto
+  fijo **por evidencia** y no por especulación.
+- **El anclaje del reloj es `movimiento_workflow`**, que escribe únicamente el workflow y
+  solo cuando hace trabajo de verdad (§3 bis).
+- Los expedientes con la forma antigua (`diagnostico` y `trace` sueltos) **no se
+  migran** —base §1.7: un registro de trazabilidad no se reescribe— y se leen como la
+  iteración 1. Si uno se vuelve a escribir (un reanálisis, un fallo), el campo suelto
+  pasa a la lista y desaparece: el contenido es el mismo, la forma del fichero cambia.
+
+Lo que el fichero **no** lleva: ni disposición, ni nº de OT, ni autor, ni estado de
+cierre —que se deduce—, ni lista de interacciones, que se cayó con la decisión de no
+detectar presencia.
+
+Cómo se fue formando este esquema, y por qué hay dos escritores: **Anexo E**.
+
+---
+
+## 5 ter. La sospecha que señala fuera del contexto
+
+El Step 2 alcanza el subárbol del activo, el de su subsistema y los elementos de
+`AF_PLANT_CONTEXT_ELEMENTS`. **Todo lo demás del AF es inalcanzable.**
+
+Así que si el operario escribe *«creo que viene de un vertido: mirad la
+conductividad de la entrada de planta»* y esa variable no está en ninguno de los
+tres sitios, el modelo **no puede pedirla ni queriendo**. Le decimos que la
+sospecha es una pista a contrastar y le escondemos el dato con el que
+contrastarla.
+
+Y no basta con buscar el texto: nadie escribe «PH213 Primary Line 1 Outlet pH»,
+escribe «el pH de salida del primario».
+
+**El riesgo no es no encontrarla: es encontrar la equivocada.** Sin el paso, el
+fallo es visible y benigno —el modelo declara en `variables_que_faltan` que no la
+tenía y modula su confianza—. Con una búsqueda floja pasa a ser un diagnóstico
+seguro de sí mismo citando una variable de otra parte de la planta. Es el mismo
+tipo de fallo que el espejo de Wonderware: no revienta nada, solo miente.
+
+### Cómo funciona
+
+- **Una puerta, en código, decide si el paso se ejecuta.** Lo normal es que la sospecha
+  hable de algo que ya se tiene; ante cualquier duda, no se ejecuta.
+- **La primera búsqueda la hace el código**, con el término que escribió la puerta y antes
+  de gastar una vuelta del modelo. El caso normal se resuelve en **una sola** llamada: la
+  de elegir.
+- **Si no basta, el modelo dirige un bucle acotado** (`MAX_ITERACIONES_BUSQUEDA` vueltas,
+  `BUSQUEDA_TIMEOUT_SECONDS` segundos). Es el único paso agéntico del proyecto, y agotarlo
+  **no es un fallo**: lo que quede sin resolver sale como no encontrado y el diagnóstico
+  se produce igual.
+- **Su única herramienta es una función envuelta**, `graph_client.buscar_en_la_planta()`,
+  no el servidor MCP —entre sus tools está `refresh_graph`, de escritura sobre un Neo4j
+  compartido—. Solo lectura, la planta y el tope de resultados los fija el código, y no
+  devuelve `piApiPath`: el modelo elige un **sitio** y la ruta la resuelve el código
+  después. Las ramas que nunca pueden entrar son configuración (`AF_RAMAS_NO_PROCESO`).
+- **El término se parte en palabras** y se cruzan los resultados, ignorando las que no
+  existen en esta planta. Así una sospecha escrita en castellano funciona: de «pH a la
+  salida del primario» sobrevive `pH`, que basta.
+- **Lo encontrado entra como un cuarto bloque etiquetado** (`contexto_anadido`), y el
+  prompt dice lo que es: un intento de emparejar lo que escribió una persona.
+- **Se le enseña a la persona, siempre.** Cada sospecha muestra qué fue de ella
+  —*encontrado aquí*, *no existe en la planta*, *no se llegó a localizar* o *pendiente*—,
+  y en «Qué ha cambiado» aparece una línea que **escribe el código**, marcada aparte del
+  texto del modelo. Si el emparejamiento se equivoca, se ve: es el guardarraíl.
+
+En qué se apartó esto del plan inicial y qué enseñaron las ejecuciones reales: **Anexo F**.
+
+### Lo que falta vigilar, visto en uso
+
+El riesgo que este documento marcaba como el importante —**no es no encontrarla,
+es encontrar la equivocada**— se materializó en su versión suave el 1 de octubre.
+La sospecha decía *«el nivel del tanque **secundario** de la línea 1»* y lo que
+entró fue `LT212 Biological Line 1 Tank Level`: el tanque del biológico de esa
+línea, misma zona pero no lo señalado.
+
+No hizo daño, y vale la pena ver por qué: el modelo lo miró y **lo descartó con
+los datos** — *«el nivel de la línea 1 ni sube»*. Esa es la defensa de fondo, y
+funcionó. Pero el emparejamiento se equivocó, y sólo lo detecta quien conoce la
+planta: por eso lo añadido **se enseña siempre**, que era justo el guardarraíl
+previsto aquí.
+
+Y una limitación que no estaba escrita: **una sospecha que nombre dos variables
+se atiende como un único objetivo**. En esa misma ejecución se pedía el nivel *y*
+los sólidos de la línea 1, y el bucle paró al encontrar el nivel. La puerta
+agrupa en un `que_busca`, así que el tope de dos objetivos por pasada no ayuda
+aquí.
+
+> El banco de pruebas sigue montado: `PH213 Primary Line 1 Outlet pH`, con una
+> causa descartada y una sospecha que señala la conductividad de la entrada de
+> planta — que **no existe** en el WWTP, así que ese caso termina honestamente en
+> *aquí no se mide eso*.
+
+---
+
+## 6. Lo que deliberadamente no va
+
+Decisiones tomadas a propósito. Anotadas aquí para no tener que volver a discutirlas
+dentro de tres meses.
+
+- **Un chat abierto con el modelo.** Los campos son de propósito único: aportar
+  evidencia sobre una causa concreta. No es una puerta para conversar, y acotarlo así
+  acota el coste, el alcance y la superficie de «la IA decide cosas».
+
+- **Un botón de «alerta falsa» con el alcance mezclado.** El riesgo es *dónde* está, no
+  *cuándo* se ofrece: actúa sobre el incidente entero mientras los demás actúan sobre una
+  causa, y juntarlos es lo que hace que alguien con prisa pulse el que no era. Por eso
+  vive en un bloque propio al final del detalle, con su encabezado. Limitarlo **además**
+  a la pestaña de cerrados se probó y se retiró el 2026-09-21; el porqué está en el Anexo C.
+
+- **Nada sobre órdenes de trabajo**: ni el número, ni su contenido, ni su estado, ni
+  avisos de seguimiento. Todo eso vive en el GMAO, que lo guarda mejor. Ver §4.
+
+- **Identidad de quien escribe.** Autentica la cerradura de la sala de control, no la
+  aplicación (§4). Añadir identidad convertiría los ficheros de incidente en datos
+  personales, con lo que eso arrastra.
+
+- **Detección de presencia ante la pantalla.** Ni ratón, ni desplazamiento, ni botón de
+  «lo estoy mirando». No mide lo que hace falta medir. Ver Anexo A.
+
+- **Bloquear el cierre hasta que alguien anote.** El incidente cierra solo, por reloj o
+  por respuesta terminal. Nadie tiene que ir a apagar nada.
+
+---
+
+## 7. Fases y lo que queda
+
+Fases, donde cada una sirve por sí sola:
+
+1. **Pantalla de solo lectura.** ✅ Entregada el 2026-09-14.
+2. **Captura del feedback**, guardado sin bucle. ✅ Entregada el 2026-09-22. Permite ver
+   qué escribe la gente de verdad antes de construir encima.
+3. **La vuelta al modelo**, con las dos reglas: verificar en vez de razonar, y
+   «no lo sé» como resultado de primera clase. ✅ Entregada el 2026-09-28.
+   Validada de punta a punta contra el AF, PI y el modelo reales: se le dio una
+   sospecha y **la contrastó y la rechazó**.
+   El paso de búsqueda (§5 ter) se entregó el 2026-09-29, y la cadena completa
+   —puerta, búsqueda, elección y alta en el contexto— se validó también contra
+   el AF y el modelo reales.
+
+Las dependencias que había y cómo se repartieron las fases: **Anexo G**.
+
+### Lo que queda
+
+1. **Vigilar el emparejamiento de las sospechas** (§5 ter): que lo añadido sea lo que la
+   persona señalaba y no su vecino.
+2. **Una sospecha con dos variables se atiende como un único objetivo** (§5 ter).
+3. **Ver en producción si el modelo usa la variable que se le añade**, que es otra
+   pregunta distinta de si se encuentra.
+
+---
+
+# Anexos: decisiones anteriores y análisis
+
+Todo lo que sigue es histórico. Se conserva porque explica por qué las cosas están como
+están y evita reinventar lo que ya se probó o se descartó. **Lo vigente está arriba**: si
+algo de un anexo contradice a una sección anterior, manda la sección. Algunos pasajes
+hablan de versiones superadas (p. ej. los cierres *desatendido* y *visto sin veredicto*,
+del diseño de seis); están marcados donde ocurre.
+
+---
+
+## Anexo A. Por qué son cinco cierres y no seis
+
+*(Referido desde §3. Después se añadió *alerta no válida*, que no se deduce sino que la
+anota una persona; este anexo habla de los cierres deducidos.)*
 
 Una versión anterior separaba *desatendido* (nadie tocó nada) de *visto sin veredicto*
 (alguien miró y calló), y defendía esa distinción como la más valiosa de las seis: sin
@@ -189,19 +621,9 @@ Así que no se detecta presencia, y la etiqueta se llama *sin veredicto* y no
 
 ---
 
-## 3 bis. El reloj
+## Anexo B. El reloj: cómo se afinó y por qué un solo número
 
-**Un solo reloj: 12 horas desde el último trabajo que sigue en pie.**
-
-Mientras corre, el incidente está en **activos** y se puede reanalizar. Cuando vence,
-las dos cosas se acaban **a la vez**: el botón se apaga y el incidente pasa a cerrados.
-
-Una **respuesta terminal** —causa confirmada, o todas las causas descartadas— lo cierra
-**en ese momento**, sin esperar al reloj. La pregunta ya está contestada, y tener en la
-pantalla de «lo que pide atención» algo que no pide nada es lo contrario de para lo que
-sirve esa pantalla.
-
-El **veredicto** y la **reclasificación** no caducan nunca.
+*(Referido desde §3 bis.)*
 
 ### Qué cuenta como «trabajo que sigue en pie» (afinado el 2026-09-21)
 
@@ -220,16 +642,6 @@ incidente por hacerla convierte una virtud en un castigo. Ahora un veredicto ala
 reloj **solo si se dio mientras el incidente seguía abierto**; los posteriores cambian
 la etiqueta y nada más.
 
-Lo que no se pierde: el operario que descarta una causa en la hora 11 y vuelve en la 13
-sigue teniendo su ventana. La cadena se mantiene viva mientras cada veredicto caiga
-dentro de la que abrió el anterior; el primero que llegue fuera de plazo la corta.
-
-> **Un incidente cerrado no se reabre nunca por acción humana** — decisión del
-> propietario, 2026-09-21. En la Fase 3 eso significa que **no se podrá pedir un
-> reanálisis sobre un expediente cerrado, ni aunque se le acabe de aportar evidencia
-> nueva**. Es coherente con que el botón viva donde vive la pestaña: si el reanálisis
-> pudiera dispararse desde cerrados, volveríamos a tener dos relojes.
-
 ### Por qué un solo número
 
 Hubo una versión con dos: 8 h para el reanálisis y 12 h para la pestaña. Se descartó
@@ -243,26 +655,13 @@ podía actuar; quedarse largo solo ensucia la lista, y para eso está el filtro.
 si el turno dura ocho horas y el incidente puede caer en cualquier momento de él, solo
 doce garantizan que lo vea el turno siguiente.
 
-### Qué se ve en activos
-
-| Estado | |
-|---|---|
-| `recibido`, `analizando` | Siempre: está en curso |
-| `finalizado` | Hasta que venza el reloj o haya respuesta terminal |
-| `fallido`, `interrumpido` | 12 h. `interrumpido` se muestra a propósito: si se escondiera, quien acaba de recibir la alerta no encontraría **nada**, que es la pantalla que miente de la que huimos |
-| `pausado` | **Nunca.** No es información de un incidente sino del sistema entero: que alguien bajó el interruptor. Va en un **aviso fijo arriba de la pantalla** — «el análisis automático está desactivado; las alertas se registran pero no se analizan» —, que dice lo que importa sin llenar la lista de ruido |
-
 ---
 
-## 4. La anotación posterior
+## Anexo C. Disposición y reclasificación: lo que se retiró
 
-Sobre un incidente *ya cerrado*. Cerrar y anotar son operaciones distintas: el
-workflow no espera a nadie, y el rastro humano puede llegar dos horas o dos días
-después sin mantener nada abierto.
-
-Un incidente cerrado tiene **una etiqueta y nada más**. No hay campos que
-rellenar ni nada que pedirle a nadie. Lo único que se puede hacer después es
-**corregir esa etiqueta**.
+*(Referido desde §4. Marcado: los cierres *visto sin veredicto* y *desatendido* que se
+nombran aquí son los del diseño de seis, ya superado; ver Anexo A. Y lo de reclasificar
+«a causa confirmada» se quedó en un veredicto normal; ver §5 bis.)*
 
 ### No hay disposición (decidido el 2026-09-15)
 
@@ -291,11 +690,7 @@ que estamos evitando.
 Con esto desaparecen también la segunda superficie («otra pantalla, en otro
 sitio» para el responsable), su problema de acceso, y el campo de autor.
 
-### Reclasificación
-
-Esto **sí se mantiene**, y por un motivo distinto del que movía a la disposición:
-no habla de la planta, habla de **nuestro** registro y de la calidad de lo que
-produce el sistema. El GMAO no lo guarda mejor, no lo guarda en absoluto.
+### La reclasificación: el planteamiento anterior, y el riesgo de la alerta falsa
 
 La anotación puede **cambiar el cierre**, y es lo que rescata los dos casos que
 la pantalla en caliente no puede capturar bien:
@@ -324,75 +719,11 @@ la pantalla en caliente no puede capturar bien:
 > El riesgo real lo resuelve **el sitio y no el momento**: bloque propio, al final del
 > detalle, con su encabezado. Eso vale igual en las dos pestañas.
 
-**Marcarla sustituye a la etiqueta de cierre** y es terminal. Manda sobre todo lo demás
-—incluso sobre una causa confirmada o un análisis fallido—: si la alerta no debió
-existir, da igual cómo fuera el análisis de un problema que no había.
-
-**Y se puede quitar**, sin pedir motivo. Es el único cierre que se apoya en una
-*opinión* y no en un hecho: los otros se deducen de si hay veredicto o de si venció el
-reloj. Lo que descansa en una creencia es lo que más tiene que poder revisarse. Al
-quitarla, el incidente vuelve exactamente a donde estaba —incluido volver a Activos si
-allí estaba— porque la reclasificación no toca el reloj.
-
-Las métricas usan siempre el valor anotado cuando existe.
-
-Y como todo ocurre en el mismo sitio —el HMI de la sala de control—, la
-reclasificación no cuesta ni una superficie nueva ni una decisión de acceso: es
-la misma pantalla y el mismo puesto.
-
-### Quién puede escribir, y por qué no hace falta identidad
-
-La pantalla es alcanzable **solo desde el HMI de la sala de control**. En planta,
-el firewall lo garantiza con una regla de dos IPs fijas: PI y ese puesto. (En las
-máquinas de desarrollo el firewall está desactivado por política de la
-plataforma; la premisa de §1 de `AI-GOVERNANCE.md` cubre ese entorno.)
-
-De ahí se deduce lo demás. **Quien autentica es la cerradura de la sala**, no la
-aplicación: el conjunto de personas que pueden escribir en un expediente es el
-conjunto de las que han entrado ahí. Por eso el veredicto no lleva autor, y por
-eso la Fase 2 no necesita login — que es una decisión, no una limitación
-heredada de PI como las otras cuatro de `webhook.py`.
-
-> ⚠️ **Las dos cosas están atadas y viven en sitios distintos.** Si algún día la
-> pantalla se abre a más máquinas —una petición perfectamente razonable: *«¿puedo
-> verla desde mi mesa?»*— el argumento se cae en silencio, sin que nada falle ni
-> avise, y hay que reabrir si el veredicto necesita autor.
-
 ---
 
-## 5. Qué necesita la pantalla
+## Anexo D. Lo que se descartó en la pantalla: datos que sustentan cada causa
 
-Marcado con **[lista inicial]** lo que ya estaba identificado, con **[añadido]** lo
-que faltaba, y con **[recomendado]** lo que mejora mucho la pantalla pero no la
-bloquea.
-
-### Zona de identificación
-
-**Payload de la alerta** · [lista inicial]
-Los mismos campos que la persona recibió por correo: activo, KPI, valor, umbral, hora
-de inicio. Es lo único que le permite saber que la pantalla está hablando de *su* caso.
-
-**Estado del incidente** · [añadido]
-Procesando · Listo · Recalculando · Fallo del análisis. Explícito siempre, incluido el
-fallo.
-
-**Selector de incidentes activos** · [añadido]
-Si puede haber dos análisis a la vez —y puede—, hace falta poder pasar de uno a otro.
-Si no, la persona no sabe si está mirando el suyo.
-
-**Aviso de que el análisis lo ha generado una IA** · [añadido]
-Una línea de texto. Es obligación de transparencia del reglamento europeo de IA y
-cuesta nada ponerla desde el primer día.
-
-### Zona de análisis
-
-**Las causas propuestas, con estado individual** · [añadido]
-Dos o tres, cada una con explicación, acción recomendada y su estado propio:
-pendiente, descartada o confirmada. Es el contenido central de la pantalla.
-
-**Evidencia ya registrada** · [añadido]
-Al volver de planta, la persona tiene que ver lo que ella misma escribió antes. Sin
-esto, el caso *b* —descartar una y volver luego— no funciona.
+*(Referido desde §5.)*
 
 **Datos que sustentan cada causa** · ~~[recomendado]~~ **descartado el 2026-09-21**
 La idea era enseñar qué variables miró el modelo y en qué ventana, para que quien
@@ -407,57 +738,11 @@ donde el ingeniero espera mirar — con lo que la ayuda se convierte en confusi�
 Para que esto valga la pena haría falta antes resolver la identidad de un valor en el
 AF, que es un problema de modelado de PI y no de este workflow.
 
-### Zona de veredicto
-
-**Botón «causa correcta», por causa** · [lista inicial]
-Confirma esa candidata y cierra el incidente.
-
-**Botón «descartar causa», por causa** · [añadido]
-El par de «causa correcta», y el que abre los dos campos de texto. Sin él la lista no
-está completa.
-
-**Campo obligatorio: por qué no es** · [lista inicial]
-La evidencia. Entra como hecho. Es lo que hace que la segunda pasada valga para algo.
-
-**Campo opcional: qué sospecha** · [lista inicial]
-Entra explícitamente marcado como pista a contrastar, nunca como conclusión. Separarlo
-del anterior en la *estructura* es lo que impide que el modelo tome la hipótesis del
-operario por buena.
-
-**Botón «recalcular»** · [lista inicial]
-Deshabilitado hasta que haya al menos una causa descartada con evidencia no vacía. Sin
-nada nuevo que aportar, la segunda llamada sería una tirada de dados con los mismos
-datos.
-
-**Contador de reanálisis** · [añadido]
-«Te queda 1 de 2». Un presupuesto que se ve se gasta mejor que uno que no se ve.
-
-**Tiempo restante de la ventana** · [recomendado] — **aplazado a la Fase 3** (2026-09-22)
-Que se sepa cuánto queda antes de que cierre solo, para no volver de planta y encontrárselo
-cerrado sin aviso.
-
-En la Fase 2 no se pone, y no es por coste: es que **al cerrarse todavía no se pierde nada**.
-El veredicto no caduca y se puede dar igual desde cerrados, así que el reloj solo mueve de
-pestaña. Una cuenta atrás hacia una consecuencia que no existe mete prisa sin motivo, que es
-peor que no tenerla. En la Fase 3 vencer apaga el botón de reanalizar; entonces sí hay algo
-que perder, y entonces se pone.
-
-### Fuera de la pantalla en caliente
-
-**Pestaña de cerrados** · [añadido]
-Una **pestaña aparte**, no el mismo listado con el filtro de periodo corrido hacia
-atrás. Es la superficie del reloj lento: el veredicto en frío y la reclasificación. En
-el mismo HMI y sin disposición ninguna (§4), así que no necesita otra pantalla ni otra
-decisión de acceso.
-
-**Aviso de análisis desactivado** · [añadido]
-Una línea fija arriba cuando el interruptor está bajado: *«el análisis automático está
-desactivado; las alertas se registran pero no se analizan»*. Sustituye a listar los
-incidentes en `pausado`, que es información del sistema y no de cada alerta.
-
 ---
 
-## 5 bis. El esquema del fichero de incidente
+## Anexo E. Cómo se fue formando el esquema del fichero
+
+*(Referido desde §5 bis. Hechos de las Fases 2 y 3, con su fecha.)*
 
 Lo que la Fase 2 añade es **un bloque y nada más**:
 
@@ -597,25 +882,42 @@ hecho de cuándo trabajó el workflow por última vez, y no se deduce de ningún
 Y lo que **no** lleva: ni disposición, ni nº de OT, ni autor, ni estado de cierre —que se
 deduce—, ni lista de interacciones, que se cayó con la decisión de no detectar presencia.
 
-## 5 ter. La sospecha que señala fuera del contexto
+### El segundo escritor
 
-El Step 2 alcanza el subárbol del activo, el de su subsistema y los elementos de
-`AF_PLANT_CONTEXT_ELEMENTS`. **Todo lo demás del AF es inalcanzable.**
+Hasta la Fase 2 el fichero tiene **un solo escritor**. La función que usa el workflow
+para actualizarlo no cambia el campo que toca: recibe el incidente entero tal como lo
+tiene cargado en memoria y **escribe ese objeto completo encima**, reemplazándolo todo.
+Como editar un documento compartido bajándotelo, cambiando tu copia y subiéndola encima:
+lo que otro tocó mientras tanto desaparece sin dejar rastro.
 
-Así que si el operario escribe *«creo que viene de un vertido: mirad la
-conductividad de la entrada de planta»* y esa variable no está en ninguno de los
-tres sitios, el modelo **no puede pedirla ni queriendo**. Le decimos que la
-sospecha es una pista a contrastar y le escondemos el dato con el que
-contrastarla.
+Hoy da igual. En la Fase 3, no:
 
-Y no basta con buscar el texto: nadie escribe «PH213 Primary Line 1 Outlet pH»,
-escribe «el pH de salida del primario».
+| | |
+|---|---|
+| 15:00 | El operario descarta todas las causas y pulsa **reanalizar** |
+| 15:00 | El workflow arranca y carga el incidente en memoria |
+| 15:02 | El operario añade una evidencia más; la pantalla la escribe en el fichero |
+| 15:04 | El workflow termina y escribe **su copia**, la de las 15:00 |
+| | **La evidencia de las 15:02 ha desaparecido**, y nadie se entera |
 
-**El riesgo no es no encontrarla: es encontrar la equivocada.** Sin el paso, el
-fallo es visible y benigno —el modelo declara en `variables_que_faltan` que no la
-tenía y modula su confianza—. Con una búsqueda floja pasa a ser un diagnóstico
-seguro de sí mismo citando una variable de otra parte de la planta. Es el mismo
-tipo de fallo que el espejo de Wonderware: no revienta nada, solo miente.
+Y no es un caso raro: en la Fase 3 el análisis lo dispara una persona que está delante
+de la pantalla en ese momento.
+
+**El arreglo no es acordarse, es que no se pueda.** La función deja de aceptar el
+documento entero y solo puede decir «cambia estos campos»: relee el disco, cambia lo
+suyo y escribe. Cada escritor es dueño de su parcela —el workflow de `estado`,
+`diagnostico`, `trace` y `motivo`; la pantalla de `revision`— y ninguno puede pisar la
+del otro aunque quiera.
+
+Queda una carrera teórica entre releer y escribir. Con un puesto y un workflow es
+despreciable, y lo peor que produce es perder un veredicto, no corromper el fichero. Si
+algún día hace falta certeza, un contador de versión cuesta poco.
+
+---
+
+## Anexo F. La búsqueda: en qué se apartó del plan y qué enseñaron las ejecuciones reales
+
+*(Referido desde §5 ter.)*
 
 ### Cómo quedó, y en qué se apartó del plan
 
@@ -704,97 +1006,13 @@ Ninguna la había cogido una suite:
   **varía mucho** de una vuelta a otra, y el techo cubre razonamiento y respuesta
   juntos. DeepSeek tiene desde entonces techo propio.
 
-### Lo que falta vigilar, visto en uso
-
-El riesgo que este documento marcaba como el importante —**no es no encontrarla,
-es encontrar la equivocada**— se materializó en su versión suave el 1 de octubre.
-La sospecha decía *«el nivel del tanque **secundario** de la línea 1»* y lo que
-entró fue `LT212 Biological Line 1 Tank Level`: el tanque del biológico de esa
-línea, misma zona pero no lo señalado.
-
-No hizo daño, y vale la pena ver por qué: el modelo lo miró y **lo descartó con
-los datos** — *«el nivel de la línea 1 ni sube»*. Esa es la defensa de fondo, y
-funcionó. Pero el emparejamiento se equivocó, y sólo lo detecta quien conoce la
-planta: por eso lo añadido **se enseña siempre**, que era justo el guardarraíl
-previsto aquí.
-
-Y una limitación que no estaba escrita: **una sospecha que nombre dos variables
-se atiende como un único objetivo**. En esa misma ejecución se pedía el nivel *y*
-los sólidos de la línea 1, y el bucle paró al encontrar el nivel. La puerta
-agrupa en un `que_busca`, así que el tope de dos objetivos por pasada no ayuda
-aquí.
-
-> El banco de pruebas sigue montado: `PH213 Primary Line 1 Outlet pH`, con una
-> causa descartada y una sospecha que señala la conductividad de la entrada de
-> planta — que **no existe** en el WWTP, así que ese caso termina honestamente en
-> *aquí no se mide eso*.
-
 ---
 
-### El segundo escritor
+## Anexo G. Dependencias y dónde cortaba la Fase 2
 
-Hasta la Fase 2 el fichero tiene **un solo escritor**. La función que usa el workflow
-para actualizarlo no cambia el campo que toca: recibe el incidente entero tal como lo
-tiene cargado en memoria y **escribe ese objeto completo encima**, reemplazándolo todo.
-Como editar un documento compartido bajándotelo, cambiando tu copia y subiéndola encima:
-lo que otro tocó mientras tanto desaparece sin dejar rastro.
+*(Referido desde §7.)*
 
-Hoy da igual. En la Fase 3, no:
-
-| | |
-|---|---|
-| 15:00 | El operario descarta todas las causas y pulsa **reanalizar** |
-| 15:00 | El workflow arranca y carga el incidente en memoria |
-| 15:02 | El operario añade una evidencia más; la pantalla la escribe en el fichero |
-| 15:04 | El workflow termina y escribe **su copia**, la de las 15:00 |
-| | **La evidencia de las 15:02 ha desaparecido**, y nadie se entera |
-
-Y no es un caso raro: en la Fase 3 el análisis lo dispara una persona que está delante
-de la pantalla en ese momento.
-
-**El arreglo no es acordarse, es que no se pueda.** La función deja de aceptar el
-documento entero y solo puede decir «cambia estos campos»: relee el disco, cambia lo
-suyo y escribe. Cada escritor es dueño de su parcela —el workflow de `estado`,
-`diagnostico`, `trace` y `motivo`; la pantalla de `revision`— y ninguno puede pisar la
-del otro aunque quiera.
-
-Queda una carrera teórica entre releer y escribir. Con un puesto y un workflow es
-despreciable, y lo peor que produce es perder un veredicto, no corromper el fichero. Si
-algún día hace falta certeza, un contador de versión cuesta poco.
-
----
-
-## 6. Lo que deliberadamente no va
-
-Decisiones tomadas a propósito. Anotadas aquí para no tener que volver a discutirlas
-dentro de tres meses.
-
-- **Un chat abierto con el modelo.** Los campos son de propósito único: aportar
-  evidencia sobre una causa concreta. No es una puerta para conversar, y acotarlo así
-  acota el coste, el alcance y la superficie de «la IA decide cosas».
-
-- **Un botón de «alerta falsa» con el alcance mezclado.** El riesgo es *dónde* está, no
-  *cuándo* se ofrece: actúa sobre el incidente entero mientras los demás actúan sobre una
-  causa, y juntarlos es lo que hace que alguien con prisa pulse el que no era. Por eso
-  vive en un bloque propio al final del detalle, con su encabezado. Limitarlo **además**
-  a la pestaña de cerrados se probó y se retiró el 2026-09-21; el porqué está en §4.
-
-- **Nada sobre órdenes de trabajo**: ni el número, ni su contenido, ni su estado, ni
-  avisos de seguimiento. Todo eso vive en el GMAO, que lo guarda mejor. Ver §4.
-
-- **Identidad de quien escribe.** Autentica la cerradura de la sala de control, no la
-  aplicación (§4). Añadir identidad convertiría los ficheros de incidente en datos
-  personales, con lo que eso arrastra.
-
-- **Detección de presencia ante la pantalla.** Ni ratón, ni desplazamiento, ni botón de
-  «lo estoy mirando». No mide lo que hace falta medir. Ver §3.
-
-- **Bloquear el cierre hasta que alguien anote.** El incidente cierra solo, por reloj o
-  por respuesta terminal. Nadie tiene que ir a apagar nada.
-
----
-
-## Dependencias para implementar
+### Dependencias para implementar
 
 | # | Dependencia | Bloquea a | Estado |
 |---|---|---|---|
@@ -803,6 +1021,45 @@ dentro de tres meses.
 | 3 | **El segundo escritor** — ver §5 bis | Fase 2 | ✅ hecho el 2026-09-15 |
 | 4 | **Re-entrada en `run_rca_analysis`** — ver §5 ter | Fase 3 | ✅ hecho el 2026-09-28: acepta `revision` y vuelve a entrar por el Step 4 |
 | 5 | **Arreglo de `pausado`** | — | ✅ hecho el 2026-09-11 |
+
+### Dónde cortaba la Fase 2, y qué cambió al llegar la 3
+
+Se deja escrito porque explica por qué algunas cosas están como están.
+
+| | Fase 2 | Fase 3 (2026-09-28) |
+|---|---|---|
+| El reloj de 12 h | Solo movía de pestaña | Además apaga el botón de reanalizar |
+| Descartar **todas** las causas | Cerraba al momento | Ofrece el relanzado mientras quede presupuesto; al agotarlo, *causa no determinada* |
+
+Lo que **no** cambió, y era una decisión: sobre un expediente cerrado **no se
+ofrece reanálisis**, ni aunque se le aporte evidencia nueva en frío. El
+razonamiento está en §3 bis, y la tentación de «ya que hay evidencia, deja
+reanalizar» reintroduciría el segundo reloj que se descartó.
+
+### El aplazamiento del tiempo restante de la ventana
+
+*(Texto original de §5, 2026-09-22, y la nota que se añadió después. Hoy figura en §5 como «no entregado»; se retiró de la lista de pendientes.)*
+
+**Tiempo restante de la ventana** · [recomendado] — **aplazado a la Fase 3** (2026-09-22)
+Que se sepa cuánto queda antes de que cierre solo, para no volver de planta y encontrárselo
+cerrado sin aviso.
+
+En la Fase 2 no se pone, y no es por coste: es que **al cerrarse todavía no se pierde nada**.
+El veredicto no caduca y se puede dar igual desde cerrados, así que el reloj solo mueve de
+pestaña. Una cuenta atrás hacia una consecuencia que no existe mete prisa sin motivo, que es
+peor que no tenerla. En la Fase 3 vencer apaga el botón de reanalizar; entonces sí hay algo
+que perder, y entonces se pone.
+
+> ⚠️ **Y una consecuencia que quedó pendiente.** En §5 se aplazó el *tiempo
+> restante de la ventana* con el argumento de que «con el reloj moviendo solo de
+> pestaña sería una cuenta atrás hacia nada» y de que entraría con la Fase 3,
+> «que es cuando vencer apaga el reanálisis».
+>
+> **La Fase 3 está entregada y eso no se ha hecho.** Ahora vencer el reloj sí
+> quita algo —el botón—, así que el argumento para aplazarlo ya no se sostiene.
+> Queda como lo único de la Fase 2 que sigue sin entregar.
+
+### Las fases, tal como estaban descritas
 
 Fases, donde cada una sirve por sí sola:
 
@@ -819,32 +1076,6 @@ Fases, donde cada una sirve por sí sola:
    —puerta, búsqueda, elección y alta en el contexto— se validó también contra
    el AF y el modelo reales. Lo que queda por ver en producción es si el modelo
    **usa** la variable que se le añade, que es otra pregunta.
-
-### Dónde cortaba la Fase 2, y qué cambió al llegar la 3
-
-Se deja escrito porque explica por qué algunas cosas están como están.
-
-| | Fase 2 | Fase 3 (2026-09-28) |
-|---|---|---|
-| El reloj de 12 h | Solo movía de pestaña | Además apaga el botón de reanalizar |
-| Descartar **todas** las causas | Cerraba al momento | Ofrece el relanzado mientras quede presupuesto; al agotarlo, *causa no determinada* |
-
-Lo que **no** cambió, y era una decisión: sobre un expediente cerrado **no se
-ofrece reanálisis**, ni aunque se le aporte evidencia nueva en frío. El
-razonamiento está en §3 bis, y la tentación de «ya que hay evidencia, deja
-reanalizar» reintroduciría el segundo reloj que se descartó.
-
-> ⚠️ **Y una consecuencia que quedó pendiente.** En §5 se aplazó el *tiempo
-> restante de la ventana* con el argumento de que «con el reloj moviendo solo de
-> pestaña sería una cuenta atrás hacia nada» y de que entraría con la Fase 3,
-> «que es cuando vencer apaga el reanálisis».
->
-> **La Fase 3 está entregada y eso no se ha hecho.** Ahora vencer el reloj sí
-> quita algo —el botón—, así que el argumento para aplazarlo ya no se sostiene.
-> Queda como lo único de la Fase 2 que sigue sin entregar.
-
-La pestaña de **cerrados es una pestaña aparte**, no el mismo listado con el filtro de
-periodo corrido hacia atrás.
 
 ---
 

@@ -117,146 +117,99 @@ Ampliar lo que puede invocar es la decisión de arquitectura, no haber abierto l
 | 4 | El modelo identifica, de esas variables reales, cuáles necesita analizar | ✅ Completado (parseado y usado en el Step 5) |
 | 5 | Obtener datos históricos de PI vía MCP Server (aveva-pi-mcp) | ✅ Completado (`pi_client.py`) |
 | 6 | El modelo produce diagnóstico y recomendaciones | ✅ Completado (`build_diagnosis_context()`) |
+| ↻ | **Pantalla y reanálisis** — una persona confirma o descarta cada causa con evidencia y pide volver a analizar; el workflow vuelve a entrar por el Step 4 con ese feedback | ✅ Completado: Fases 1 a 3 (`static/pantalla.html`, `incidents.py`, `docs/DISENO-INTERACCION-HUMANA.md`) |
 
 **Los 6 steps están implementados.** El flujo se recorre entero y produce un JSON con 2–3 causas
-raíz, cada una con su explicación y su acción recomendada.
+raíz, cada una con su evidencia (una lista de hechos observados) y su acción recomendada. En un
+reanálisis pueden ser menos, o ninguna.
 
-**Validación:** un ciclo completo registrado en `webhook.log` el 2026-08-20, con una alerta real de
-`Hydraulic Efficiency` sobre `PS20102 A03 PS02 Pump 02`. El diagnóstico apuntó a desgaste interno
-de la bomba (impulsor y anillos de desgaste). Validación real pero no exhaustiva: falta ejercitarlo
-con otros KPIs y otros tipos de activo.
+**Validación** (a 2026-11-25), **solo en el entorno de demo** (ver el aviso del `README.md`):
+
+- Primer ciclo completo el 2026-08-20, con una alerta real de `Hydraulic Efficiency` sobre
+  `PS20102 A03 PS02 Pump 02`. El diagnóstico apuntó a desgaste interno de la bomba.
+- Con alertas reales de PI hay cinco análisis terminados, del 2026-09-07 al 2026-10-28, sobre dos
+  bombas y **todos del mismo KPI**. Solo uno se revisó y se reanalizó desde la pantalla
+  (2026-10-08), y hay **una** causa confirmada, sin constancia de que la confirmara mantenimiento.
+- El reanálisis con búsqueda se probó el 2026-10-01 contra el AF, PI y el modelo reales, pero sobre
+  incidentes de prueba (`OX313`, `SS324`) con alertas y veredictos escritos a mano.
+
+Falta ejercitarlo con otros KPIs y otros tipos de activo.
 
 ### Próximo paso
 
-**La Fase 3 está entregada** (2026-09-28). El ciclo completo funciona: el
-operario descarta causas con evidencia, pulsa reanalizar, y el workflow vuelve a
-entrar **por la selección de variables** con ese feedback y con datos nuevos de
-PI. Si la sospecha señala algo que no está en el contexto, el paso de búsqueda
-lo localiza en el AF y lo añade.
+*Revisado contra el código, el servicio y los expedientes el 2026-11-25. El texto anterior de esta
+sección, con todo lo que ya se resolvió, está en el Anexo A.*
 
-Validado de punta a punta contra el AF, PI y el modelo reales (2026-09-23):
-alerta → análisis → veredicto → reanálisis, 90 s + 90 s, 4 llamadas al modelo.
-El modelo **contrastó la sospecha del operario y la rechazó**, que era lo que
-había que comprobar.
+**Dónde está.** Las tres fases de la pantalla están entregadas (2026-09-14, 2026-09-22 y
+2026-09-28), y el paso de búsqueda el 2026-09-29. El operario descarta causas con evidencia, pide
+volver a analizar, y el workflow vuelve a entrar **por la selección de variables** con ese
+feedback y con datos nuevos de PI; si la sospecha señala algo que no está en el contexto, la
+búsqueda lo localiza en el AF y lo añade. El diseño y sus decisiones están en
+[`docs/DISENO-INTERACCION-HUMANA.md`](./docs/DISENO-INTERACCION-HUMANA.md).
 
-Lo que queda: **el paso de búsqueda** para cuando la sospecha señale un activo
-de otro sistema que tampoco esté en `AF_PLANT_CONTEXT_ELEMENTS`. Hoy el modelo
-no puede pedir esa variable ni queriendo. Hay un fixture montado como banco de
-pruebas (`PH213 Primary Line 1 Outlet pH`, con una sospecha que señala la
-conductividad de la entrada de planta).
+**El servicio.** `RCA-Workflow-Webhook` (puerto 8090) corre con `WORKFLOW_ENABLED=true` y
+`LLM_PROVIDER=deepseek`, y **se arrancó por última vez el 2026-10-08**: no lleva nada de lo cambiado
+después. El servidor de pruebas (puerto 8099) se reinició el 2026-11-25 con el código actual y
+con **su propio log y su propio audit**:
 
+```
+INCIDENTS_DIR=dev-fixtures/incidents LOG_FILE=dev-fixtures/webhook.log \
+AUDIT_FILE=dev-fixtures/audit.jsonl WEBHOOK_PORT=8099 python serve.py
+```
 
+Hacen falta las tres: hasta el 2026-11-25 solo se separaba la carpeta de incidentes, y el servidor
+de pruebas escribía en el `audit.jsonl` y el `webhook.log` del servicio real. El audit real
+conserva **106 entradas de incidentes de prueba** (2026-09-18 → 2026-11-18). No se borran, porque
+es de solo añadir; se distinguen por el `incidentId`, que es de `dev-fixtures/`. Del log compartido
+venía el `PermissionError` al rotar (`service_error.log`) y que falten `webhook.log.3` y `.4`.
 
-**Decidir el canal de salida del diagnóstico.** Desde el 2026-09-03 el diagnóstico se guarda en el
-fichero del incidente (`incidents/<id>.json`), junto al payload que lo originó, así que ya no se
-pierde en el log. Lo que falta es el **aviso**: correo al ingeniero de proceso, interfaz web, o
-devolverlo a PI como anotación del event frame. Es una decisión de producto, no técnica.
+Para que no se repita, el arranque avisa: si `INCIDENTS_DIR` no es el del servicio pero `LOG_FILE`
+o `AUDIT_FILE` sí, sale un WARNING que dice cuál (`config.ficheros_compartidos_con_el_servicio()`,
+probado en `tests/test_config.py` §17). Avisa y no impide: compartir puede tener motivo, pero tiene
+que ser a sabiendas.
 
-Ese fichero es además la base natural de la revisión humana: añadirle campos de `revision` y
-`causa_confirmada` no requiere diseñar nada nuevo.
+Pendiente, por orden de urgencia:
 
-Otros cabos sueltos, por orden de urgencia:
+1. **Reiniciar el servicio.** Hasta que se haga, sigue etiquetando los diagnósticos de DeepSeek
+   con un modelo de Claude: la corrección (`llm_client.modelo_en_uso()`, 2026-11-25) no está viva.
+   Ver `docs/AI-TRACEABILITY.md` §3. **Necesita una consola de Administrador** (`sc stop` y
+   `sc start RCA-Workflow-Webhook`); el 2026-11-25 se intentó sin esos permisos y no se pudo.
 
-1. **El workflow está parado desde el 2026-09-08.** `WORKFLOW_ENABLED=false` en el `.env` tras la
-   prueba del interruptor. Una alerta real se registraría como `pausado` y **no se analizaría**.
-   Aceptado a sabiendas: estamos en desarrollo y nadie depende todavía del sistema. **Hay que
-   volver a ponerlo en `true` antes de darlo por operativo.** Desde el 2026-09-11 las alertas que
-   lleguen entretanto ya no quedan atrapadas: un `pausado` se recoge al reenviar la notificación.
+2. **Relanzar un análisis fallido.** Un incidente en `fallido` sigue siendo un callejón sin salida:
+   `_RECLAMABLES` es `(interrumpido, pausado)`. El plan está decidido y sin implementar (detalle
+   en el Anexo A):
+   - un botón en la pantalla, no un planificador. Le hace falta otro nombre: «Volver a analizar»
+     ya es el del reanálisis;
+   - relanzar siempre desde el principio;
+   - un tope de relanzamientos visible;
+   - y separar `fallido` en transitorio (re-reclamable) y propio (bloqueado).
 
-   Ojo: **el servicio en marcha carga el código anterior al 2026-09-11.** Los arreglos del bucle
-   de eventos, `pausado` y el límite de simultáneos no están vivos hasta reiniciarlo.
+   Lo que hay hoy en `incidents/`: cinco `fallido`. Cuatro son el mismo `FileNotFoundError
+   [WinError 2]` (2026-10-06 y 2026-10-08), que era no encontrar `uv` al lanzar los MCP. Está
+   resuelto con `UV_BINARY` desde el reinicio del 2026-10-08, pero esas alertas se perdieron. El
+   quinto (2026-11-11) es un corte del modelo al elegir variables, justo el caso que un relanzado
+   resolvería.
 
-2. **La pantalla de la sala de control — Fases 1 y 2 entregadas.** Diseño y decisiones en
-   [`docs/DISENO-INTERACCION-HUMANA.md`](./docs/DISENO-INTERACCION-HUMANA.md). Se sirve en
-   `GET /pantalla`, sondea cada 5 s y no tiene dependencias externas.
+3. **Completar la prueba del interruptor.** Probado el 2026-09-08 hasta el `pausado`. Falta
+   reactivar y reenviar para comprobar que la alerta pausada se procesa; ese `pausado` sigue en
+   `incidents/` sin procesar.
 
-   Lo que hace hoy: lista activos y cerrados en dos pestañas con sus filtros, enseña el
-   payload y las causas propuestas, y **captura el veredicto** — confirmar o descartar cada
-   causa, con evidencia obligatoria y sospecha opcional, deshacer un clic mal dado, y marcar
-   la alerta como no válida. El cierre (`causa confirmada`, `causa no determinada`, `revisado
-   parcialmente`, `sin veredicto`, `fallo del análisis`, `alerta no válida`) **se deduce** del
-   expediente y del reloj de 12 h; no se guarda.
+4. **Vigilar la búsqueda**, que es donde el modelo tiene más margen:
+   - que lo añadido sea lo que señalaba la persona y no su vecino. El 2026-10-01 se pidió «el
+     tanque secundario de la línea 1» y entró `LT212`, el del biológico;
+   - una sospecha que nombra dos variables se atiende como un solo objetivo;
+   - y si el modelo **usa** la variable que se le añade, que es otra pregunta.
 
-   Lo que falta es la **Fase 3** (la vuelta al modelo con el feedback), más un elemento de la
-   Fase 2 aplazado a propósito: el **tiempo restante de la ventana**. Hoy el reloj solo mueve
-   de pestaña y el veredicto no caduca, así que sería una cuenta atrás hacia una consecuencia
-   que todavía no existe. En la Fase 3 sí la habrá —al vencer se apaga el reanálisis—, y ese
-   es el momento de ponerlo.
+   En el único reanálisis de una alerta real (2026-10-08) la búsqueda agotó sus 5 vueltas sin dar
+   con lo que se pedía.
 
-   Para verla sin PI hay 15 incidentes sintéticos: `python dev-fixtures/generar.py` los escribe
-   en `dev-fixtures/incidents/`, **nunca** en `incidents/`. Cubren los seis cierres y los seis
-   estados. Se levanta con `INCIDENTS_DIR=dev-fixtures/incidents WEBHOOK_PORT=8099 python serve.py`.
+5. **Ampliar la validación** a más KPIs y tipos de activo, con confirmaciones de mantenimiento tras
+   inspeccionar el equipo. `plant_context` sigue sin usarse: en la ejecución del 2026-09-23 el
+   modelo eligió 0 de sus 10 variables.
 
-3. **PENDIENTE (2026-09-14) — Relanzar un análisis fallido.** Hoy un incidente en `fallido` es un
-   callejón sin salida: `_RECLAMABLES` es `(interrumpido, pausado)` y `fallido` está excluido con
-   este razonamiento — *«el análisis se ejecutó y falló por algo suyo; reintentar daría el mismo
-   error»*. **Esa premisa es falsa para la mitad de los ocho motivos de fallo**, que son cortes
-   externos.
-
-   Mitigado en parte el 2026-09-14 con `LLM_RETRY_WINDOW_SECONDS`: antes el análisis se rendía
-   tras **6 segundos** de reintentos (3 intentos con esperas de 2 y 4 s), así que un corte de tres
-   minutos lo tumbaba con 174 s por delante. Ahora aguanta 90 s, así que los cortes cortos ya no
-   llegan a ser fallos. Queda lo que dure más.
-
-   Lo que falta, decidido pero sin implementar:
-
-   - **Botón «volver a analizar» en la pantalla**, no un planificador. El workflow no sabe cuándo
-     ha vuelto PI —solo se entera cuando le toca hablar con él— y montar sondeo y comprobaciones
-     de salud en un sistema puramente reactivo es la solución equivocada. Quien sabe es la persona
-     que está delante. Ya no lo bloquea nada —la pantalla escribe desde la Fase 2—, así que
-     va con el reanálisis de la Fase 3.
-   - **Relanzar siempre desde el principio.** Reanudar a mitad ahorraría una llamada al modelo y
-     costaría guardar estado intermedio reutilizable. No compensa — y además, si falló bajando
-     datos de PI, volver a bajarlos es lo correcto: los datos pueden haber cambiado, y reutilizar
-     los viejos daría un diagnóstico sobre una foto que ya no es.
-   - **Un tope de relanzamientos, visible**, como el contador de reanálisis del diseño.
-   - **Separar `fallido`** en transitorio (re-reclamable) y propio (bloqueado), igual que se hizo
-     con `interrumpido` y `pausado`. El código ya sabe cuál es cuál: es la rama de excepción que
-     se disparó, la misma que elige el mensaje.
-
-   Qué motivo necesita qué, de los ocho mensajes de `_fallo()` y `webhook`:
-
-   | Grupo | Motivos | Relanzar |
-   |---|---|---|
-   | Corte externo | no respondió al elegir variables · datos de PI · no respondió con diagnóstico · superó el tiempo máximo | Sí, funciona |
-   | Salida del modelo mal formada | formato inválido al elegir variables · diagnóstico con formato inválido | Sí; si se repite, el problema es el prompt |
-   | Hace falta arreglar algo antes | variables que no existen (configuración) · error inesperado (fallo nuestro) | No sirve hasta arreglarlo; después sí, y recupera la alerta |
-
-4. **Completar la prueba del interruptor.** Probado el 2026-09-08 y **funciona**: la notificación
-   se acepta, se registra como `pausado`, queda `BLOCKED` en el audit trail y no se ejecuta
-   ningún Step 2-6 — coste cero. Falta el último tramo del procedimiento (reactivar y reenviar
-   para procesar la alerta pausada), que ya es posible desde que se arregló el re-lanzado.
-5. **La llamada a Anthropic no usa adaptive thinking**, mientras que Gemini sí razona por defecto
-   (ver «Asimetría de razonamiento» más abajo). Activar `thinking: {type: "adaptive"}` en
-   `_generate_anthropic()` igualaría las dos rutas, y `LLM_MAX_TOKENS` ya deja sitio para
-   ello. Pendiente de decidir: sin evaluación no habría forma de medir si mejora el diagnóstico.
-   Si se activa, hacerlo detrás de un flag y en ambos proveedores.
-6. **Ampliar la validación** a más KPIs y tipos de activo. Las tres ejecuciones reales que hay son
-   del mismo activo y el mismo indicador, y ninguna causa se ha confirmado.
-7. **Definir un periodo de retención para `incidents/`**: hoy no se purgan nunca.
-
-Resuelto el 2026-09-22 con la Fase 2: **los cierres del diseño ya existen en el código**. La
-pantalla filtra por estado en activos y por cierre en cerrados, que son dos vocabularios
-distintos a propósito. Antes `finalizado` era justo el estado que **sí** pedía atención —tenía
-un diagnóstico esperando a que alguien lo leyera—, así que no se podía archivar por estado y el
-acotado de la lista tenía que ser por tiempo. Ya no.
-
-Resueltos el 2026-09-08: el servicio quedó registrado y en marcha, el gate de CI se ejecuta y
-**bloquea** con protección de rama, y el flujo pasó a rama + PR con revisión humana (PR #1).
-
-Resueltos el 2026-09-11, los tres que bloqueaban la pantalla:
-
-- **La llamada al modelo congelaba el bucle de eventos.** `llm_client.generate()` es síncrona y se
-  invocaba directamente desde una corrutina. Medido: **cero** despertares del bucle durante la
-  llamada. Mientras duraba, no se aceptaban POST de PI, `/health` no respondía y cualquier otro
-  análisis se detenía. Ahora pasa por `workflow._generar()`, que la descarga a un hilo.
-- **Un `pausado` no se podía relanzar.** `_RECLAMABLES = (INTERRUMPIDO, PAUSADO)` unifica los dos
-  sitios que lo decidían — la rama `FileExistsError` de `claim()` y el filtro del enfriamiento—,
-  que antes eran dos comprobaciones sueltas del mismo concepto en puntos distintos.
-- **No había techo de análisis simultáneos.** `MAX_CONCURRENT_ANALYSES` (3 por defecto), con el
-  semáforo en `webhook._analizar_incidente` y **no** dentro del workflow, a propósito: así el que
-  espera turno figura como `recibido` y solo pasa a `analizando` cuando arranca de verdad. Un
-  estado que miente sería peor que no tenerlo, y ese estado es justo lo que leerá la pantalla.
+6. **Medir si el razonamiento mejora el diagnóstico.** Desde el 2026-09-28 razonan los tres
+   proveedores, así que comparar ya es justo, pero no hay evaluación con la que comparar.
+   `ANTHROPIC_THINKING=false` existe para cuando la haya.
 
 ---
 
@@ -279,7 +232,7 @@ workflow.py  (run_rca_analysis)      ← el control de flujo vive aquí, de prin
     └── Step 6 ✅ llm_client.generate()              → diagnóstico final (JSON)
                      │
                      ▼
-        incidents/<id>.json  +  log   ← falta un canal de aviso (correo, web...)
+        incidents/<id>.json  ──▶  pantalla de la sala de control (GET /pantalla)
 ```
 
 ---
@@ -294,7 +247,9 @@ body raw) antes de parsearlo, y acepta el body aunque no sea JSON válido, guard
 para diagnóstico. Timeout de 10 s leyendo el body, por si PI no cierra la conexión.
 
 Endpoints: `GET /health`, `POST /notification`, `GET /notifications/history` (últimas 50 en
-memoria, se pierde al reiniciar), `GET /docs` (Swagger autogenerado).
+memoria, se pierde al reiniciar; **apagado por defecto**, ver Guardrails), `GET /docs` (Swagger
+autogenerado), y los de la pantalla: `GET /pantalla`, `GET /incidentes`, `GET /incidentes/{id}` y
+los `POST` de veredicto, reclasificación y reanálisis.
 
 El log va a consola **y** a `webhook.log` con rotación a los 10 MB y 5 ficheros de respaldo. El
 rotativo se añadió el 2026-08-06 porque una Notification Rule de PI con `NonrepetitionInterval=0`
@@ -361,6 +316,7 @@ Ahora se distingue por el estado en que quedó:
 |---|---|---|
 | `interrumpido` | Murió el proceso. Causa externa, ya no está | **Se re-reserva** y se vuelve a analizar. Cuenta el intento en `intentos` |
 | `fallido` | El análisis se ejecutó y falló por algo suyo | Sigue bloqueado: reintentar daría el mismo error |
+| `pausado` | Llegó con el interruptor de parada bajado | **Se re-reserva** desde el 2026-09-11 (ver Anexo A) |
 
 La vía de recuperación pasa a ser la vía normal. Como la alarma sigue activa en PI, en cuanto
 vuelva a evaluar la regla y reenvíe, el sistema lo recoge solo. **No se relanza automáticamente al
@@ -393,7 +349,8 @@ prompts *que contengan datos personales*, y estos no los tienen.
 pero convierte en visible algo que solo aparecía en un WARNING del arranque. Solo números: el
 endpoint no está autenticado.
 
-**Persistencia.** Estados: `recibido` → `analizando` → `finalizado` / `fallido`. Las escrituras son
+**Persistencia.** Estados: `recibido` → `analizando` → `finalizado` / `fallido`, más
+`interrumpido` (el proceso murió a mitad) y `pausado` (llegó con el interruptor bajado). Las escrituras son
 atómicas (temporal + `os.replace`, que también lo es en Windows). Al arrancar,
 `sweep_interrupted()` marca como `interrumpido` lo que quedó en curso: si hay un incidente en
 `analizando`, el proceso murió durante su análisis y nadie lo va a terminar. **No se relanzan
@@ -732,6 +689,9 @@ Tope de 4, pedido en el prompt y aplicado en el código.
 
 Las formas antiguas (`diagnostico` y `trace` sueltos) **no se migran** —base
 §1.7: los registros de trazabilidad no se reescriben— y se leen como la pasada 1.
+Matiz: si un expediente antiguo se vuelve a escribir (un reanálisis, un fallo),
+`mark()` y `marcar_fallo()` pasan el campo suelto a la lista y **lo borran**. El
+contenido es el mismo; la forma del fichero cambia.
 
 `incidents.revision_de_causas()` es la vista que necesitan el reanálisis y la
 pantalla: todas las causas de todas las pasadas, con su estado y con lo que
@@ -874,8 +834,9 @@ normaliza dos casos que confundían al modelo:
   disponible en ese instante), no como un fallo que haya que explicar.
 
 **Formato de respuesta** (`_DIAGNOSIS_FINAL_INSTRUCTION`): un objeto JSON con dos claves —
-`root_causes` (array de 2 o 3 objetos con `cause`, `explanation` y `recommended_action`, ordenado
-por probabilidad) y `history_request` (ver abajo). Se parsea con el mismo `_extract_json_payload()`
+`root_causes` (array de 2 o 3 objetos con `cause`, `evidence` —de 1 a 4 hechos observados— y
+`recommended_action`, ordenado por probabilidad; hasta el 2026-09-14 era un párrafo `explanation`,
+y los expedientes viejos lo conservan, ver `workflow._evidencias()`) y `history_request` (ver abajo). Se parsea con el mismo `_extract_json_payload()`
 del Step 4.
 
 #### Un atributo estático ENSEÑA su valor (corregido el 2026-09-23)
@@ -1067,7 +1028,7 @@ cada proveedor tiene su propia función interna:
 | SDK | `anthropic` | `google-genai` |
 | System prompt | parámetro `system` | `GenerateContentConfig(system_instruction=...)` |
 | Mensaje | `messages=[{"role": "user", "content": "..."}]` | `contents="..."` |
-| Respuesta | `response.content[0].text` | `response.text` |
+| Respuesta | `_texto_de(response)`: con razonamiento, el primer bloque es el pensamiento y no el texto | `response.text` |
 
 **DeepSeek (desde el 2026-09-30) no trae SDK propio, y es deliberado.** Publica un endpoint que
 habla el **protocolo de Anthropic** —`https://api.deepseek.com/anthropic`— con la misma forma de
@@ -1087,13 +1048,21 @@ primario. Devolvió además `"sospecha": "[1:1]"` **con los corchetes**, igual q
 confirma que aquel fallo no era una manía de un proveedor, sino lo que hace cualquier modelo al
 que se le enseña un identificador así.
 
-Por defecto `LLM_PROVIDER=gemini` con `gemini-2.5-flash`; `validate_config()` en `config.py` solo
-exige la API key del proveedor realmente seleccionado (no ambas).
+Por defecto `LLM_PROVIDER=gemini` con `gemini-2.5-flash`; el servicio de la demo usa `deepseek`
+(comprobado el 2026-11-25). `validate_config()` en `config.py` solo exige la API key del proveedor
+realmente seleccionado.
+
+**El modelo que se registra sale de la misma tabla que la llamada** (`llm_client._MODELO_DE` y
+`modelo_en_uso()`). La etiqueta `_ai_generated` lo decidía aparte, con un `if gemini ... else
+ANTHROPIC_MODEL` de cuando había dos proveedores, y desde que llegó DeepSeek registraba un modelo de
+Claude que no había intervenido. Corregido el 2026-11-25 y cubierto por `tests/test_etiqueta_ia.py`.
+**Al añadir un proveedor, se añade su fila a esa tabla**; la suite falla si no.
 
 **Reintentos (añadidos 2026-07-28):** visto en producción, Gemini devolvió un 503 "high demand"
-(sobrecarga transitoria). `_generate_gemini`/`_generate_anthropic` reintentan hasta 3 veces con
-backoff exponencial (2–30 s) vía `tenacity`, **solo** para errores que un reintento puede arreglar
-(5xx, rate limit, timeout, conexión). Los 4xx por auth o payload inválido no se reintentan, porque
+(sobrecarga transitoria). Las tres rutas reintentan con backoff exponencial vía `tenacity`,
+**solo** para errores que un reintento puede arreglar (5xx, rate limit, timeout, conexión), durante
+una ventana de `LLM_RETRY_WINDOW_SECONDS` (90 s). Hasta el 2026-09-14 eran 3 intentos, unos 6 s en
+total: un corte de tres minutos tumbaba el análisis. Los 4xx por auth o payload inválido no se reintentan, porque
 reintentar no los soluciona. Si se agotan (o el error no es transitorio), `generate()` lanza
 `LLMGenerationError`.
 
@@ -1190,10 +1159,11 @@ rca-agent/
 │                          POST /incidentes/{id}/veredicto · .../reclasificacion
 │                          POST /incidentes/{id}/reanalisis
 ├── workflow.py          ← Orquestación (run_rca_analysis) + Steps 3, 4 y 6 + la ficha
-├── graph_client.py      ← Cliente MCP para afkg-graph-mcp (Step 2)
+├── graph_client.py      ← Cliente MCP para afkg-graph-mcp (Step 2 y la búsqueda)
 ├── pi_client.py         ← Cliente MCP para aveva-pi-mcp (Step 5 y la ficha del equipo)
 ├── incidents.py         ← Expediente: dedup, persistencia y revisión humana (Fase 2)
-├── llm_client.py        ← Abstracción sobre el proveedor de LLM (Gemini/Anthropic)
+├── llm_client.py        ← Abstracción sobre el proveedor de LLM (Gemini, Anthropic o DeepSeek)
+├── observability.py     ← Logging estructurado (JSON) y audit trail (audit.jsonl)
 ├── config.py            ← Carga .env y valida variables obligatorias
 ├── serve.py             ← Arranca uvicorn leyendo WEBHOOK_PORT del .env
 ├── static/pantalla.html ← La pantalla de la sala de control (una sola página)
@@ -1202,18 +1172,21 @@ rca-agent/
 │   ├── AI-GOVERNANCE.md              ← Clasificación de riesgo y usos restringidos
 │   ├── AI-TRACEABILITY.md            ← Registro de asistencia de IA
 │   └── IZSPECS-CONFORMANCE.md        ← Matriz de conformidad
-├── tests/               ← 14 suites. `python tests/run_all.py`, sin PI ni claves
+├── prompts-revision/    ← Evidencia de ejecuciones contra sistemas reales, con fecha. No se edita. Solo local (en .gitignore)
+├── tests/               ← 19 suites. `python tests/run_all.py`, sin PI ni claves
 ├── dev-fixtures/
-│   ├── generar.py       ← 15 incidentes sintéticos que cubren estados y cierres
-│   └── incidents/       ← Donde los escribe. NUNCA en incidents/
+│   ├── generar.py       ← 26 incidentes sintéticos que cubren estados y cierres
+│   ├── incidents/       ← Donde los escribe. NUNCA en incidents/
+│   └── webhook.log · audit.jsonl ← Log y audit del servidor de pruebas (ver Próximo paso)
 ├── .env.example         ← Plantilla (copiar a .env y rellenar)
 ├── .env                 ← Credenciales reales (NO en git)
 ├── requirements.txt     ← fastapi, uvicorn, google-genai, anthropic, python-dotenv, pytz, mcp, tenacity
 ├── setup.bat            ← Crea .venv e instala deps (ejecutar 1 vez)
 ├── start.bat            ← Arranca el servidor (desarrollo)
-├── install_service.bat  ← Windows Service con NSSM (producción)
+├── install_service.bat  ← Windows Service con NSSM (así corre en el servidor de demo)
 ├── webhook.log          ← Log rotativo (10 MB × 5). En .gitignore
 ├── incidents/           ← Un JSON por incidente. En .gitignore (datos de planta)
+├── README.md · DISCLAIMER.md
 └── CLAUDE.md            ← Import de AGENTS.md, para la autocarga de Claude Code
 ```
 
@@ -1223,23 +1196,33 @@ rca-agent/
 
 | Variable | Obligatoria | Descripción | Por defecto |
 |---|---|---|---|
-| `LLM_PROVIDER` | No | Proveedor de LLM: `gemini` o `anthropic` | `gemini` |
+| `LLM_PROVIDER` | No | Proveedor de LLM: `gemini`, `anthropic` o `deepseek` | `gemini` |
 | `GEMINI_API_KEY` | ✅ si `LLM_PROVIDER=gemini` | Clave API de Google para Gemini | — |
 | `GEMINI_MODEL` | No | Modelo de Gemini a usar | `gemini-2.5-flash` |
 | `ANTHROPIC_API_KEY` | ✅ si `LLM_PROVIDER=anthropic` | Clave API de Anthropic para Claude | — |
 | `ANTHROPIC_MODEL` | No | Modelo de Claude a usar | `claude-opus-4-8` |
+| `ANTHROPIC_THINKING` | No | Razonamiento *adaptive* en la ruta de Claude | `true` |
+| `DEEPSEEK_API_KEY` | ✅ si `LLM_PROVIDER=deepseek` | Clave API de DeepSeek | — |
+| `DEEPSEEK_MODEL` | No | Modelo de DeepSeek | `deepseek-flash` |
+| `DEEPSEEK_BASE_URL` | No | Endpoint compatible con el protocolo de Anthropic | `https://api.deepseek.com/anthropic` |
 | `LLM_MAX_TOKENS` | No | Techo de tokens del modelo (razonamiento + respuesta), para Gemini y Anthropic | `32000` |
 | `DEEPSEEK_MAX_TOKENS` | No | Techo **solo** para DeepSeek: razona siempre y lo que razona varía mucho | `64000` |
+| `LLM_TIMEOUT_SECONDS` | No | Tiempo máximo de una llamada al modelo | `120` |
+| `LLM_RETRY_WINDOW_SECONDS` | No | Ventana de reintentos ante errores transitorios del proveedor | `90` |
 | `WEBHOOK_PORT` | No | Puerto del servidor | `8090` |
 | `WEBHOOK_SECRET` | No | Token para validar origen de PI (cabecera `X-PI-Secret`) | vacío |
 | `PI_LOCAL_TIMEZONE` | No | Zona horaria para logs | `Europe/Madrid` |
 | `LOG_FILE` | No | Log de aplicación en JSON, rotativo | `<proyecto>\webhook.log` |
-| `AUDIT_FILE` | No | Audit trail (JSON Lines). Debe ser distinto de `LOG_FILE` | `<proyecto>udit.jsonl` |
+| `AUDIT_FILE` | No | Audit trail (JSON Lines). Debe ser distinto de `LOG_FILE`. Un servidor de pruebas necesita el suyo, igual que su `LOG_FILE` y su `INCIDENTS_DIR` | `<proyecto>\audit.jsonl` |
 | `WORKFLOW_ENABLED` | No | Interruptor de parada. `false` registra las alertas pero no las analiza | `true` |
 | `NOTIFICATION_HISTORY_ENABLED` | No | Expone `GET /notifications/history` con payloads de planta sin autenticar. Encender solo para depurar | `false` |
 | `INCIDENTS_DIR` | No | Carpeta del registro de incidentes | `<proyecto>\incidents` |
 | `INCIDENT_COOLDOWN_MINUTES` | No | Ventana en que una alerta del mismo activo+KPI se considera el mismo incidente. `0` deja solo la dedup exacta | `20` |
-| `INCIDENT_TRACE_RETENTION_DAYS` | No | Días tras los que se poda el `trace` (prompts y respuestas). El caso no se borra nunca. `0` desactiva | `90` |
+| `INCIDENT_TRACE_RETENTION_DAYS` | No | Días tras los que se podan los `traces` (prompts y respuestas). El caso no se borra nunca. `0` desactiva | `90` |
+| `MAX_CONCURRENT_ANALYSES` | No | Análisis simultáneos; el resto espera como `recibido`. `0` = sin límite | `3` |
+| `ANALYSIS_TIMEOUT_SECONDS` | No | Tiempo máximo de un análisis entero | `900` |
+| `SCREEN_DEFAULT_HOURS` / `SCREEN_DEFAULT_LIMIT` | No | Periodo y número de incidentes con que abre la pantalla | `24` / `50` |
+| `UV_BINARY` | No | Ruta a `uv`, si la resolución automática falla | resuelto al arrancar |
 | `AFKG_GRAPH_MCP_DIR` | No | Carpeta del proyecto afkg-graph-mcp (Step 2) | `C:\MCPServer\afkg-graph-mcp` |
 | `AVEVA_PI_MCP_DIR` | No | Carpeta del proyecto aveva-pi-mcp (Step 5) | `C:\MCPServer\MCP Server` |
 | `PI_LOOKBACK_HOURS` | No | Ventana de la **primera** consulta del Step 5, en horas | `24` |
@@ -1251,6 +1234,12 @@ rca-agent/
 | `DEMO_MODE` | No | Avisa al modelo de que las desviaciones son sintéticas y periódicas | `false` |
 | `MAX_SELECTED_VARIABLES` | No | Tope de variables aceptadas de la selección del Step 4 | `40` |
 | `MAX_REANALISIS` | No | Reanálisis permitidos por incidente. El primer análisis no cuenta | `2` |
+| `UMBRAL_CAUSA_REPETIDA_PCT` | No | Parecido a partir del cual `autorizar_causas` da una causa del reanálisis por repetida | `80` |
+| `MAX_ITERACIONES_BUSQUEDA` | No | Vueltas del bucle de búsqueda, para el paso entero | `5` |
+| `BUSQUEDA_TIMEOUT_SECONDS` | No | Reloj de la búsqueda entera | `180` |
+| `MAX_BUSQUEDAS_POR_PASADA` | No | Sospechas que se atienden en una pasada | `2` |
+| `MAX_ATRIBUTOS_ANADIDOS` | No | Tope de atributos que puede añadir la búsqueda | `80` |
+| `AF_RAMAS_NO_PROCESO` | No | Ramas del AF que la búsqueda nunca devuelve, separadas por `\|` | `Sankey Diagrams\|PM_from_PME` |
 | `AF_PLANT_ROOT` | No | Raíz del AF a la que se restringe TODO lo que se consulte. Se aplica **anclada** con el separador | `WWTP` |
 | `AF_PLANT_CONTEXT_ELEMENTS` | No | Elementos que se añaden al contexto de toda alerta, separados por `\|`. Sufijo `\*` para incluir el subárbol | vacío |
 | `MAX_PLANT_CONTEXT_ATTRIBUTES` | No | Tope de atributos que puede aportar el bloque de planta entero | `60` |
@@ -1270,7 +1259,7 @@ El workflow habla con estos dos MCP servers, lanzándolos como subproceso vía `
 
 | Servidor | Ruta | Tools que usa | Step | Cliente |
 |---|---|---|---|---|
-| `afkg-graph-mcp` | `C:\MCPServer\afkg-graph-mcp\` | `graph_neighborhood` → estructura del AF del asset/subsistema y `piApiPath` de sus atributos | Step 2 | `graph_client.py` ✅ |
+| `afkg-graph-mcp` | `C:\MCPServer\afkg-graph-mcp\` | `graph_neighborhood` → estructura del AF del asset/subsistema y `piApiPath` de sus atributos; `graph_search` → localizar el activo por su cadena y la búsqueda del reanálisis | Step 2 y búsqueda | `graph_client.py` ✅ |
 | `aveva-pi-mcp` | `C:\MCPServer\MCP Server\` | `create_timeseries_bucket`, `query_by_path` | Step 5 | `pi_client.py` ✅ |
 
 El `piApiPath` es la moneda de cambio entre los dos: el Step 2 lo extrae del grafo, el modelo lo
@@ -1334,13 +1323,17 @@ Cosas que un asistente de IA (o cualquier contribuidor) debe evitar en este repo
   ```
 
   El `Co-Authored-By` solo no basta: no lleva fecha. Ambos trailers juntos sí cumplen.
-  Los commits anteriores al 2026-09-07 llevan solo `Co-Authored-By`; **no se reescriben**, porque
-  los registros de trazabilidad no deben editarse retroactivamente (base §1.7). La brecha queda
-  anotada en [`docs/AI-TRACEABILITY.md`](./docs/AI-TRACEABILITY.md).
+  Los commits anteriores al 2026-09-07 llevan solo `Co-Authored-By`, y también, por descuido, los
+  19 del 2026-09-28 al 2026-10-08. **No se reescriben**, porque los registros de trazabilidad no
+  deben editarse retroactivamente (base §1.7). La brecha queda anotada en
+  [`docs/AI-TRACEABILITY.md`](./docs/AI-TRACEABILITY.md). Que no se repita: **las dos líneas
+  siempre**.
 - **Documentar el porqué, no el qué.** Casi todo lo que tiene una forma rara en este código está
   ahí porque algo falló contra el sistema real. Cuando se añada un guardarraíl, dejar en el
   docstring o el comentario **qué se vio fallar y cuándo** — es lo que hace mantenible el código.
-- Hacer push a GitHub al final de cada sesión de trabajo
+- **Commit y push a GitHub solo cuando lo pida el operario**, nunca por iniciativa propia ni como
+  cierre automático de una sesión de trabajo. Hasta el 2026-11-25 aquí decía «hacer push al final de
+  cada sesión».
 
 ---
 
@@ -1384,3 +1377,152 @@ expone tools ni acepta conexiones MCP entrantes.
 
 La matriz completa sección por sección, con las justificaciones de lo marcado N/A y el registro de
 excepciones, está en [`docs/IZSPECS-CONFORMANCE.md`](./docs/IZSPECS-CONFORMANCE.md).
+
+---
+
+# Anexo A. «Próximo paso» antes del 2026-11-25
+
+Texto íntegro de la sección tal como estaba antes de la revisión del 2026-11-25. Se conserva
+porque explica de dónde viene cada pendiente y qué se decidió. **Lo vigente está en
+«Próximo paso»**: si algo de aquí lo contradice, manda aquella sección. Desde que se escribió:
+
+- El workflow **ya no está parado**: el `.env` tiene `WORKFLOW_ENABLED=true` y el servicio se
+  reinició el 2026-10-08, así que tampoco carga ya el código anterior al 2026-09-11.
+- La **Fase 3** está entregada (2026-09-28), con la búsqueda (2026-09-29), y la pantalla es el
+  canal de salida del diagnóstico.
+- La llamada a Anthropic **razona** desde el 2026-09-28: la asimetría con Gemini está cerrada.
+- La **retención** de `incidents/` está decidida: no se borran incidentes, se podan los `traces`
+  (ver «Retención» en el Step 1).
+- El **tiempo restante de la ventana** se retiró de lo pendiente.
+
+## A.1 El texto anterior
+
+**La Fase 3 está entregada** (2026-09-28). El ciclo completo funciona: el
+operario descarta causas con evidencia, pulsa reanalizar, y el workflow vuelve a
+entrar **por la selección de variables** con ese feedback y con datos nuevos de
+PI. Si la sospecha señala algo que no está en el contexto, el paso de búsqueda
+lo localiza en el AF y lo añade.
+
+Validado de punta a punta contra el AF, PI y el modelo reales (2026-09-23):
+alerta → análisis → veredicto → reanálisis, 90 s + 90 s, 4 llamadas al modelo.
+El modelo **contrastó la sospecha del operario y la rechazó**, que era lo que
+había que comprobar.
+
+Lo que queda: **el paso de búsqueda** para cuando la sospecha señale un activo
+de otro sistema que tampoco esté en `AF_PLANT_CONTEXT_ELEMENTS`. Hoy el modelo
+no puede pedir esa variable ni queriendo. Hay un fixture montado como banco de
+pruebas (`PH213 Primary Line 1 Outlet pH`, con una sospecha que señala la
+conductividad de la entrada de planta).
+
+
+
+**Decidir el canal de salida del diagnóstico.** Desde el 2026-09-03 el diagnóstico se guarda en el
+fichero del incidente (`incidents/<id>.json`), junto al payload que lo originó, así que ya no se
+pierde en el log. Lo que falta es el **aviso**: correo al ingeniero de proceso, interfaz web, o
+devolverlo a PI como anotación del event frame. Es una decisión de producto, no técnica.
+
+Ese fichero es además la base natural de la revisión humana: añadirle campos de `revision` y
+`causa_confirmada` no requiere diseñar nada nuevo.
+
+Otros cabos sueltos, por orden de urgencia:
+
+1. **El workflow está parado desde el 2026-09-08.** `WORKFLOW_ENABLED=false` en el `.env` tras la
+   prueba del interruptor. Una alerta real se registraría como `pausado` y **no se analizaría**.
+   Aceptado a sabiendas: estamos en desarrollo y nadie depende todavía del sistema. **Hay que
+   volver a ponerlo en `true` antes de darlo por operativo.** Desde el 2026-09-11 las alertas que
+   lleguen entretanto ya no quedan atrapadas: un `pausado` se recoge al reenviar la notificación.
+
+   Ojo: **el servicio en marcha carga el código anterior al 2026-09-11.** Los arreglos del bucle
+   de eventos, `pausado` y el límite de simultáneos no están vivos hasta reiniciarlo.
+
+2. **La pantalla de la sala de control — Fases 1 y 2 entregadas.** Diseño y decisiones en
+   [`docs/DISENO-INTERACCION-HUMANA.md`](./docs/DISENO-INTERACCION-HUMANA.md). Se sirve en
+   `GET /pantalla`, sondea cada 5 s y no tiene dependencias externas.
+
+   Lo que hace hoy: lista activos y cerrados en dos pestañas con sus filtros, enseña el
+   payload y las causas propuestas, y **captura el veredicto** — confirmar o descartar cada
+   causa, con evidencia obligatoria y sospecha opcional, deshacer un clic mal dado, y marcar
+   la alerta como no válida. El cierre (`causa confirmada`, `causa no determinada`, `revisado
+   parcialmente`, `sin veredicto`, `fallo del análisis`, `alerta no válida`) **se deduce** del
+   expediente y del reloj de 12 h; no se guarda.
+
+   Lo que falta es la **Fase 3** (la vuelta al modelo con el feedback), más un elemento de la
+   Fase 2 aplazado a propósito: el **tiempo restante de la ventana**. Hoy el reloj solo mueve
+   de pestaña y el veredicto no caduca, así que sería una cuenta atrás hacia una consecuencia
+   que todavía no existe. En la Fase 3 sí la habrá —al vencer se apaga el reanálisis—, y ese
+   es el momento de ponerlo.
+
+   Para verla sin PI hay 15 incidentes sintéticos: `python dev-fixtures/generar.py` los escribe
+   en `dev-fixtures/incidents/`, **nunca** en `incidents/`. Cubren los seis cierres y los seis
+   estados. Se levanta con `INCIDENTS_DIR=dev-fixtures/incidents WEBHOOK_PORT=8099 python serve.py`.
+
+3. **PENDIENTE (2026-09-14) — Relanzar un análisis fallido.** Hoy un incidente en `fallido` es un
+   callejón sin salida: `_RECLAMABLES` es `(interrumpido, pausado)` y `fallido` está excluido con
+   este razonamiento — *«el análisis se ejecutó y falló por algo suyo; reintentar daría el mismo
+   error»*. **Esa premisa es falsa para la mitad de los ocho motivos de fallo**, que son cortes
+   externos.
+
+   Mitigado en parte el 2026-09-14 con `LLM_RETRY_WINDOW_SECONDS`: antes el análisis se rendía
+   tras **6 segundos** de reintentos (3 intentos con esperas de 2 y 4 s), así que un corte de tres
+   minutos lo tumbaba con 174 s por delante. Ahora aguanta 90 s, así que los cortes cortos ya no
+   llegan a ser fallos. Queda lo que dure más.
+
+   Lo que falta, decidido pero sin implementar:
+
+   - **Botón «volver a analizar» en la pantalla**, no un planificador. El workflow no sabe cuándo
+     ha vuelto PI —solo se entera cuando le toca hablar con él— y montar sondeo y comprobaciones
+     de salud en un sistema puramente reactivo es la solución equivocada. Quien sabe es la persona
+     que está delante. Ya no lo bloquea nada —la pantalla escribe desde la Fase 2—, así que
+     va con el reanálisis de la Fase 3.
+   - **Relanzar siempre desde el principio.** Reanudar a mitad ahorraría una llamada al modelo y
+     costaría guardar estado intermedio reutilizable. No compensa — y además, si falló bajando
+     datos de PI, volver a bajarlos es lo correcto: los datos pueden haber cambiado, y reutilizar
+     los viejos daría un diagnóstico sobre una foto que ya no es.
+   - **Un tope de relanzamientos, visible**, como el contador de reanálisis del diseño.
+   - **Separar `fallido`** en transitorio (re-reclamable) y propio (bloqueado), igual que se hizo
+     con `interrumpido` y `pausado`. El código ya sabe cuál es cuál: es la rama de excepción que
+     se disparó, la misma que elige el mensaje.
+
+   Qué motivo necesita qué, de los ocho mensajes de `_fallo()` y `webhook`:
+
+   | Grupo | Motivos | Relanzar |
+   |---|---|---|
+   | Corte externo | no respondió al elegir variables · datos de PI · no respondió con diagnóstico · superó el tiempo máximo | Sí, funciona |
+   | Salida del modelo mal formada | formato inválido al elegir variables · diagnóstico con formato inválido | Sí; si se repite, el problema es el prompt |
+   | Hace falta arreglar algo antes | variables que no existen (configuración) · error inesperado (fallo nuestro) | No sirve hasta arreglarlo; después sí, y recupera la alerta |
+
+4. **Completar la prueba del interruptor.** Probado el 2026-09-08 y **funciona**: la notificación
+   se acepta, se registra como `pausado`, queda `BLOCKED` en el audit trail y no se ejecuta
+   ningún Step 2-6 — coste cero. Falta el último tramo del procedimiento (reactivar y reenviar
+   para procesar la alerta pausada), que ya es posible desde que se arregló el re-lanzado.
+5. **La llamada a Anthropic no usa adaptive thinking**, mientras que Gemini sí razona por defecto
+   (ver «Asimetría de razonamiento» más abajo). Activar `thinking: {type: "adaptive"}` en
+   `_generate_anthropic()` igualaría las dos rutas, y `LLM_MAX_TOKENS` ya deja sitio para
+   ello. Pendiente de decidir: sin evaluación no habría forma de medir si mejora el diagnóstico.
+   Si se activa, hacerlo detrás de un flag y en ambos proveedores.
+6. **Ampliar la validación** a más KPIs y tipos de activo. Las tres ejecuciones reales que hay son
+   del mismo activo y el mismo indicador, y ninguna causa se ha confirmado.
+7. **Definir un periodo de retención para `incidents/`**: hoy no se purgan nunca.
+
+Resuelto el 2026-09-22 con la Fase 2: **los cierres del diseño ya existen en el código**. La
+pantalla filtra por estado en activos y por cierre en cerrados, que son dos vocabularios
+distintos a propósito. Antes `finalizado` era justo el estado que **sí** pedía atención —tenía
+un diagnóstico esperando a que alguien lo leyera—, así que no se podía archivar por estado y el
+acotado de la lista tenía que ser por tiempo. Ya no.
+
+Resueltos el 2026-09-08: el servicio quedó registrado y en marcha, el gate de CI se ejecuta y
+**bloquea** con protección de rama, y el flujo pasó a rama + PR con revisión humana (PR #1).
+
+Resueltos el 2026-09-11, los tres que bloqueaban la pantalla:
+
+- **La llamada al modelo congelaba el bucle de eventos.** `llm_client.generate()` es síncrona y se
+  invocaba directamente desde una corrutina. Medido: **cero** despertares del bucle durante la
+  llamada. Mientras duraba, no se aceptaban POST de PI, `/health` no respondía y cualquier otro
+  análisis se detenía. Ahora pasa por `workflow._generar()`, que la descarga a un hilo.
+- **Un `pausado` no se podía relanzar.** `_RECLAMABLES = (INTERRUMPIDO, PAUSADO)` unifica los dos
+  sitios que lo decidían — la rama `FileExistsError` de `claim()` y el filtro del enfriamiento—,
+  que antes eran dos comprobaciones sueltas del mismo concepto en puntos distintos.
+- **No había techo de análisis simultáneos.** `MAX_CONCURRENT_ANALYSES` (3 por defecto), con el
+  semáforo en `webhook._analizar_incidente` y **no** dentro del workflow, a propósito: así el que
+  espera turno figura como `recibido` y solo pasa a `analizando` cuando arranca de verdad. Un
+  estado que miente sería peor que no tenerlo, y ese estado es justo lo que leerá la pantalla.
