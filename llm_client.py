@@ -56,6 +56,47 @@ class LLMGenerationError(Exception):
     """El proveedor de LLM no pudo generar una respuesta (tras agotar los reintentos si aplica)."""
 
 
+# Qué variable de config.py nombra el modelo de cada proveedor. Es la MISMA que
+# pasa como model= la función _generate_*() de ese proveedor, y
+# tests/test_etiqueta_ia.py lo comprueba leyendo esas llamadas: si alguien
+# cambia una sin la otra, la suite falla.
+_MODELO_DE = {
+    "gemini": "GEMINI_MODEL",
+    "anthropic": "ANTHROPIC_MODEL",
+    "deepseek": "DEEPSEEK_MODEL",
+}
+
+
+def modelo_en_uso() -> str:
+    """El modelo al que llama generate() con la configuración actual.
+
+    Existe para que la etiqueta '_ai_generated' de cada diagnóstico
+    (ai-governance §5.4, §7.1) nombre el modelo que REALMENTE se llamó, sacándolo
+    de la misma tabla que decide la llamada, en vez de repetir esa decisión en
+    otro sitio.
+
+    Por qué hace falta (corregido el 2026-11-25): la etiqueta se calculaba en
+    webhook.py con un `if gemini ... else ANTHROPIC_MODEL` escrito cuando solo
+    había dos proveedores. Al añadir DeepSeek (2026-09-30) nadie lo tocó, y
+    durante semanas cada expediente analizado con DeepSeek quedó registrado como
+    `"provider": "deepseek", "model": "claude-opus-4-8"`, un modelo que no había
+    intervenido. Nada falló de forma visible: el dato era falso, pero bien formado.
+    Los cuatro expedientes reales afectados NO se corrigen (base §1.7); constan en
+    docs/AI-TRACEABILITY.md §3.
+
+    Raises:
+        ValueError: si LLM_PROVIDER no es uno de los tres. Con un proveedor
+                    desconocido generate() tampoco llega a llamar a nadie.
+    """
+    provider = config.LLM_PROVIDER
+    if provider not in _MODELO_DE:
+        raise ValueError(
+            f"LLM_PROVIDER desconocido: '{provider}' "
+            f"(valores válidos: {', '.join(repr(p) for p in _MODELO_DE)})"
+        )
+    return getattr(config, _MODELO_DE[provider])
+
+
 def generate(system_prompt: str, user_message: str) -> str:
     """Llama al proveedor de LLM configurado y devuelve su respuesta en texto.
 

@@ -41,6 +41,7 @@ SUITES = [
     ("Puerta de la busqueda de la sospecha", "test_puerta_busqueda.py"),
     ("Busqueda en la planta (la unica tool del modelo)", "test_busqueda.py"),
     ("Bucle de busqueda (el paso agentico)", "test_bucle_busqueda.py"),
+    ("Etiqueta de IA: el modelo que se llamo", "test_etiqueta_ia.py"),
 ]
 
 

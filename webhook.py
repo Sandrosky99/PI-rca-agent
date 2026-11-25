@@ -35,6 +35,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 import config
 import incidents
+import llm_client
 import observability
 import workflow
 
@@ -150,9 +151,16 @@ async def _ejecutar_analisis(payload: dict, registro: dict,
         # Etiquetado de contenido generado por IA (ai-governance 5.4): quien lea
         # el fichero del incidente debe saber que el diagnostico lo produjo un
         # modelo y que es una hipotesis pendiente de verificacion humana.
+        #
+        # El modelo sale de llm_client.modelo_en_uso(), la misma tabla que decide
+        # a quien se llama. Aqui habia un `if gemini ... else ANTHROPIC_MODEL`
+        # de cuando solo habia dos proveedores, y desde que llego DeepSeek
+        # (2026-09-30) etiquetaba sus diagnosticos con un modelo de Claude que no
+        # habia intervenido. Corregido el 2026-11-25; ver modelo_en_uso() y
+        # docs/AI-TRACEABILITY.md §3. No volver a decidir el modelo en este sitio.
         diagnostico["_ai_generated"] = {
             "provider": config.LLM_PROVIDER,
-            "model": config.GEMINI_MODEL if config.LLM_PROVIDER == "gemini" else config.ANTHROPIC_MODEL,
+            "model": llm_client.modelo_en_uso(),
             "notice": ("Hipotesis generada por un modelo de lenguaje a partir de datos de PI. "
                        "NO es una causa raiz confirmada: requiere verificacion por un ingeniero "
                        "de procesos antes de actuar."),
