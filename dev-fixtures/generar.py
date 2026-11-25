@@ -6,8 +6,13 @@ Escribe en dev-fixtures/incidents/ un caso por cada situacion que la pantalla
 tiene que saber pintar, con marcas de tiempo relativas al momento de ejecutarlo.
 Para verlos:
 
-    INCIDENTS_DIR=dev-fixtures/incidents WEBHOOK_PORT=8099 python serve.py
+    INCIDENTS_DIR=dev-fixtures/incidents LOG_FILE=dev-fixtures/webhook.log \
+    AUDIT_FILE=dev-fixtures/audit.jsonl WEBHOOK_PORT=8099 python serve.py
     -> http://localhost:8099/pantalla
+
+Las tres rutas, no solo la de incidentes: sin LOG_FILE y AUDIT_FILE propios, lo
+que se hace en la pantalla de pruebas se escribe en el audit.jsonl del servicio
+real (pasó hasta el 2026-11-25).
 
 Que cubre
 ---------

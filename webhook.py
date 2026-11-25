@@ -266,6 +266,16 @@ async def startup_event() -> None:
         log.info("GET /notifications/history: deshabilitado (responde 404)")
 
     log.info("Registro de incidentes: %s", config.INCIDENTS_DIR)
+    # Un servidor de pruebas que solo cambia INCIDENTS_DIR escribe en el log y el
+    # audit del servicio real. Pasó dos meses sin que nada lo dijera; ver
+    # config.ficheros_compartidos_con_el_servicio().
+    compartidos = config.ficheros_compartidos_con_el_servicio()
+    if compartidos:
+        log.warning(
+            "INCIDENTS_DIR no es el del servicio, pero %s si: este proceso escribira "
+            "en los ficheros del servicio real. Para un servidor de pruebas, definir "
+            "tambien %s (p. ej. en dev-fixtures/).",
+            " y ".join(compartidos), " y ".join(compartidos))
     log.info("Enfriamiento de duplicados: %d min", config.INCIDENT_COOLDOWN_MINUTES)
 
     # Si el proceso murio a mitad de un analisis, esos incidentes quedaron en

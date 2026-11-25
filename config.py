@@ -240,12 +240,18 @@ PI_LOCAL_TIMEZONE: str = os.environ.get("PI_LOCAL_TIMEZONE", "Europe/Madrid")
 # Observabilidad -- ver observability.py y extensions/observability-spec.md
 # =============================================================================
 
+# Rutas por defecto de los tres ficheros que escribe el servicio. Van en
+# constantes porque ficheros_compartidos_con_el_servicio() compara contra ellas.
+_LOG_FILE_POR_DEFECTO = Path(__file__).parent / "webhook.log"
+_AUDIT_FILE_POR_DEFECTO = Path(__file__).parent / "audit.jsonl"
+_INCIDENTS_DIR_POR_DEFECTO = Path(__file__).parent / "incidents"
+
 # Log de aplicación: una línea JSON por evento, rotativo a 10 MB x 5.
-LOG_FILE: str = os.environ.get("LOG_FILE") or str(Path(__file__).parent / "webhook.log")
+LOG_FILE: str = os.environ.get("LOG_FILE") or str(_LOG_FILE_POR_DEFECTO)
 
 # Audit trail. DEBE ser un destino distinto del log de aplicación (spec §2.3) y
 # sobrevivir a los reinicios (§2.4). Formato JSON Lines, append-only.
-AUDIT_FILE: str = os.environ.get("AUDIT_FILE") or str(Path(__file__).parent / "audit.jsonl")
+AUDIT_FILE: str = os.environ.get("AUDIT_FILE") or str(_AUDIT_FILE_POR_DEFECTO)
 
 # Interruptor de parada en caliente (ai-governance §9.5).
 # Con WORKFLOW_ENABLED=false el webhook sigue aceptando y registrando las
@@ -265,7 +271,7 @@ WORKFLOW_ENABLED: bool = (os.environ.get("WORKFLOW_ENABLED") or "true").strip().
 # atómica) y el registro que sobrevive a un reinicio. NO se purga sola: esos
 # ficheros son el archivo de casos, y serán la base de la revisión humana y de
 # las métricas de evaluación.
-INCIDENTS_DIR: str = os.environ.get("INCIDENTS_DIR") or str(Path(__file__).parent / "incidents")
+INCIDENTS_DIR: str = os.environ.get("INCIDENTS_DIR") or str(_INCIDENTS_DIR_POR_DEFECTO)
 
 # Minutos durante los cuales una alerta del mismo activo y KPI se considera el
 # mismo incidente, aunque llegue con otro StartTime. Es la capa que protege si
@@ -670,6 +676,35 @@ AF_PLANT_CONTEXT_ELEMENTS: list[str] = [
 # =============================================================================
 # Validación de configuración
 # =============================================================================
+
+def ficheros_compartidos_con_el_servicio() -> list[str]:
+    """Qué ficheros del servicio real usaría un proceso que NO es el servicio.
+
+    Si INCIDENTS_DIR apunta a otra carpeta, este proceso es otra cosa -- un
+    servidor de pruebas, típicamente sobre dev-fixtures/incidents --, y entonces
+    LOG_FILE y AUDIT_FILE también deberían ser otros. Devuelve los que siguen en
+    la ruta del servicio (vacío si no hay nada que avisar). Se comparan las rutas
+    RESUELTAS, no si la variable está definida: poner a mano la ruta por defecto
+    comparte el fichero igual.
+
+    Por qué existe (2026-11-25): el servidor de pruebas se arrancaba cambiando
+    solo INCIDENTS_DIR y WEBHOOK_PORT. Durante dos meses escribió en el
+    audit.jsonl del servicio real -- 106 entradas de incidentes de prueba,
+    mezcladas con las reales -- y los dos procesos se pisaban al rotar
+    webhook.log (PermissionError, rotaciones perdidas). Nada fallaba de forma
+    visible. Se avisa, no se impide: puede haber motivos para compartir, pero
+    tiene que ser a sabiendas.
+    """
+    def _es(ruta: str, por_defecto: Path) -> bool:
+        return Path(ruta).resolve() == por_defecto.resolve()
+
+    if _es(INCIDENTS_DIR, _INCIDENTS_DIR_POR_DEFECTO):
+        return []
+    return [nombre for nombre, ruta, defecto in (
+        ("LOG_FILE", LOG_FILE, _LOG_FILE_POR_DEFECTO),
+        ("AUDIT_FILE", AUDIT_FILE, _AUDIT_FILE_POR_DEFECTO),
+    ) if _es(ruta, defecto)]
+
 
 def validate_config() -> list[str]:
     """Comprueba que todas las variables obligatorias están definidas.

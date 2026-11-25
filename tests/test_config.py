@@ -410,6 +410,47 @@ try:
 finally:
     config.UV_BINARY = guardado
 
+print("\n=== 17. Un servidor de pruebas no comparte el log ni el audit del servicio ===")
+# Hasta el 2026-11-25 el de pruebas se arrancaba cambiando solo INCIDENTS_DIR, y
+# escribio dos meses en el audit.jsonl real. Se comprueba la funcion que lo
+# detecta y que el arranque la usa.
+guardado = (config.INCIDENTS_DIR, config.LOG_FILE, config.AUDIT_FILE)
+defecto = (str(config._INCIDENTS_DIR_POR_DEFECTO), str(config._LOG_FILE_POR_DEFECTO),
+           str(config._AUDIT_FILE_POR_DEFECTO))
+try:
+    config.INCIDENTS_DIR, config.LOG_FILE, config.AUDIT_FILE = defecto
+    check("el servicio con sus rutas: nada que avisar",
+          config.ficheros_compartidos_con_el_servicio() == [])
+
+    config.INCIDENTS_DIR = "dev-fixtures/incidents"
+    check("solo cambia INCIDENTS_DIR: avisa de los dos",
+          config.ficheros_compartidos_con_el_servicio() == ["LOG_FILE", "AUDIT_FILE"],
+          config.ficheros_compartidos_con_el_servicio())
+
+    config.LOG_FILE = "dev-fixtures/webhook.log"
+    check("cambia tambien el log: avisa solo del audit",
+          config.ficheros_compartidos_con_el_servicio() == ["AUDIT_FILE"],
+          config.ficheros_compartidos_con_el_servicio())
+
+    config.AUDIT_FILE = "dev-fixtures/audit.jsonl"
+    check("las tres separadas: nada que avisar",
+          config.ficheros_compartidos_con_el_servicio() == [])
+
+    # Poner a mano la ruta del servicio comparte igual: se comparan rutas
+    # resueltas, no si la variable esta definida.
+    config.AUDIT_FILE = str(Path(defecto[2]).parent / "." / "audit.jsonl")
+    check("la ruta del servicio escrita de otra forma tambien cuenta",
+          config.ficheros_compartidos_con_el_servicio() == ["AUDIT_FILE"],
+          config.ficheros_compartidos_con_el_servicio())
+finally:
+    config.INCIDENTS_DIR, config.LOG_FILE, config.AUDIT_FILE = guardado
+
+fuente_webhook = (RAIZ / "webhook.py").read_text(encoding="utf-8")
+inicio = fuente_webhook.index("async def startup_event")
+arranque = fuente_webhook[inicio:fuente_webhook.index("\nasync def ", inicio + 1)]
+check("el arranque del webhook lo comprueba y avisa",
+      "config.ficheros_compartidos_con_el_servicio()" in arranque and "log.warning" in arranque)
+
 print("\n" + "=" * 62)
 if fallos:
     print(f"FALLOS: {len(fallos)} -> {fallos}")
